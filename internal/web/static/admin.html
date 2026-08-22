@@ -225,6 +225,49 @@
     color: var(--muted); word-break: break-word; white-space: pre-wrap;
   }
   .diag.err { background: var(--crit-soft); color: var(--crit); border-color: color-mix(in srgb, var(--crit) 35%, transparent); }
+
+  /* ---- live transcript card ---- */
+  #lt-card { margin-top: 1.25rem; }
+  #lt-card h2 { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.7rem; }
+
+  #lt-status {
+    display: inline-flex; align-items: center; gap: 0.4em;
+    padding: 0.15em 0.6em; border-radius: 999px; font-weight: 700; font-size: 0.68rem;
+    letter-spacing: 0.02em; text-transform: uppercase;
+  }
+  #lt-status .dot { width: 0.5em; height: 0.5em; border-radius: 50%; }
+  #lt-status.ok   { background: var(--ok-soft);   color: var(--ok); }
+  #lt-status.ok   .dot { background: var(--ok); }
+  #lt-status.idle { background: var(--muted-soft); color: var(--muted); }
+  #lt-status.idle .dot { background: var(--muted); }
+  #lt-status.warn { background: var(--warn-soft); color: var(--warn); }
+  #lt-status.warn .dot { background: var(--warn); }
+  #lt-status.crit { background: var(--crit-soft); color: var(--crit); }
+  #lt-status.crit .dot { background: var(--crit); }
+
+  #lt-page { overflow: hidden; }
+  #lt-viewport { overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+  #lt-stack { display: flex; flex-direction: column; }
+
+  #lt-stack .lt-line {
+    height: var(--lt-row-h, 1.6em);
+    line-height: var(--lt-row-h, 1.6em);
+    white-space: pre;
+    overflow: hidden;
+    font-weight: 600;
+    font-size: 1.05rem;
+  }
+
+  #lt-stack .w { transition: color 180ms linear; }
+  #lt-stack .w.live    { color: var(--accent); }
+  #lt-stack .w.settled { color: var(--fg); }
+  #lt-stack .w.stale   { color: var(--muted); }
+
+  .lt-probe {
+    position: absolute; left: -9999px; top: 0; visibility: hidden;
+    white-space: pre; pointer-events: none;
+    font-weight: 600; font-size: 1.05rem; line-height: 1.25;
+  }
 </style>
 </head>
 <body>
@@ -345,6 +388,19 @@
     <div class="row"><span class="k">Goroutines</span><span class="v num" id="proc-goroutines">—</span></div>
   </div>
 
+</div>
+
+<div class="card" id="lt-card">
+  <h2>
+    <span class="eyebrow">Live Transcript</span>
+    <span id="lt-status" class="idle" role="status" aria-live="polite">
+      <span class="dot"></span><span id="lt-status-label">connecting</span>
+    </span>
+  </h2>
+  <div id="lt-page">
+    <div id="lt-viewport"><div id="lt-stack"></div></div>
+  </div>
+  <div class="lt-probe" id="lt-probe" aria-hidden="true">The quick brown fox jumps over the lazy dog, 0123456789</div>
 </div>
 
 <script>
@@ -706,6 +762,349 @@
 
   tick();
   setInterval(tick, 1000);
+})();
+</script>
+
+<script>
+(function () {
+  "use strict";
+  var page = document.getElementById("lt-page");
+  var viewport = document.getElementById("lt-viewport");
+  var stack = document.getElementById("lt-stack");
+  var probe = document.getElementById("lt-probe");
+  var card = document.getElementById("lt-card");
+  var statusEl = document.getElementById("lt-status");
+  var statusLabel = document.getElementById("lt-status-label");
+
+  var ledger = [];
+  var uttStartIndex = 0;
+  var rows = [];
+  var LEDGER_CAP = 4000;
+  var LT_MAX_ROWS = 3;
+
+  var ctx = document.createElement("canvas").getContext("2d");
+  var rowH = 0;
+  var usableWidth = 0;
+  var fontScale = 1;
+
+  function tokenize(text) {
+    var t = text.replace(/^\s+|\s+$/g, "");
+    return t ? t.split(/\s+/) : [];
+  }
+
+  function commonPrefixLen(a, b) {
+    var n = a.length < b.length ? a.length : b.length;
+    var i = 0;
+    while (i < n && a[i] === b[i]) i++;
+    return i;
+  }
+
+  function measureWidth(s) {
+    return ctx.measureText(s).width * fontScale;
+  }
+
+  function activeRow() {
+    return rows[rows.length - 1];
+  }
+
+  function rowText(row) {
+    var parts = [];
+    for (var i = 0; i < row.words.length; i++) parts.push(row.words[i].text);
+    return parts.join(" ");
+  }
+
+  function wordClass(entry) {
+    return "w " + (entry.stale ? "stale" : entry.state);
+  }
+
+  function placeInRow(row, entry) {
+    if (row.words.length) row.el.appendChild(document.createTextNode(" "));
+    var span = document.createElement("span");
+    span.className = wordClass(entry);
+    span.textContent = entry.text;
+    row.el.appendChild(span);
+    entry.span = span;
+    row.words.push(entry);
+  }
+
+  function removeFromActiveRow(entry) {
+    var row = activeRow();
+    row.words.pop();
+    if (entry.span && entry.span.parentNode) row.el.removeChild(entry.span);
+    if (row.words.length) {
+      var last = row.el.lastChild;
+      if (last && last.nodeType === 3) row.el.removeChild(last);
+    }
+    entry.span = null;
+  }
+
+  function applyRowOpacities() {
+    var n = rows.length;
+    var levels = [1, 0.85, 0.7];
+    for (var i = 0; i < n; i++) {
+      var age = n - 1 - i;
+      var op = age < levels.length ? levels[age] : 0.55;
+      rows[i].el.style.opacity = String(op);
+    }
+  }
+
+  function makeEmptyRow() {
+    var d = document.createElement("div");
+    d.className = "lt-line";
+    return { el: d, words: [], frozen: false };
+  }
+
+  function trimRows() {
+    while (rows.length > LT_MAX_ROWS + 1) {
+      var old = rows.shift();
+      if (old.el.parentNode) old.el.parentNode.removeChild(old.el);
+    }
+  }
+
+  function trimLedger() {
+    var over = ledger.length - LEDGER_CAP;
+    if (over > 0) {
+      ledger.splice(0, over);
+      uttStartIndex = Math.max(0, uttStartIndex - over);
+    }
+  }
+
+  function freezeAndGlide(animate) {
+    var row = activeRow();
+    if (!row || row.words.length === 0) return;
+    row.frozen = true;
+    for (var i = 0; i < row.words.length; i++) row.words[i].frozen = true;
+
+    var next = makeEmptyRow();
+    stack.appendChild(next.el);
+    rows.push(next);
+    applyRowOpacities();
+
+    var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (animate && !reduced) {
+      stack.style.transition = "none";
+      stack.style.transform = "translateY(" + rowH + "px)";
+      void stack.offsetHeight;
+      stack.style.transition = "transform 200ms cubic-bezier(.22,.61,.36,1)";
+      stack.style.transform = "translateY(0)";
+    } else {
+      stack.style.transition = "none";
+      stack.style.transform = "translateY(0)";
+      trimRows();
+    }
+  }
+
+  stack.addEventListener("transitionend", function (e) {
+    if (e.target === stack && e.propertyName === "transform") trimRows();
+  });
+
+  function pushWord(text, state, animate) {
+    var row = activeRow();
+    var cand = row.words.length ? rowText(row) + " " + text : text;
+    if (measureWidth(cand) <= usableWidth) {
+      var entry = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
+      ledger.push(entry);
+      placeInRow(row, entry);
+    } else {
+      freezeAndGlide(animate);
+      row = activeRow();
+      if (measureWidth(text) > usableWidth) {
+        hardSplit(text, state, animate);
+      } else {
+        var e2 = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
+        ledger.push(e2);
+        placeInRow(row, e2);
+      }
+    }
+    trimLedger();
+  }
+
+  function hardSplit(word, state, animate) {
+    var i = 0;
+    while (i < word.length) {
+      var row = activeRow();
+      var end = i + 1;
+      while (end <= word.length && measureWidth(word.slice(i, end)) <= usableWidth) end++;
+      end = end - 1;
+      if (end <= i) end = i + 1;
+      var chunk = word.slice(i, end);
+      var entry = { text: chunk, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
+      ledger.push(entry);
+      placeInRow(row, entry);
+      i = end;
+      if (i < word.length) freezeAndGlide(animate);
+    }
+  }
+
+  function applyUtterance(text, isFinal, animate) {
+    var newWords = tokenize(text);
+    var oldEntries = ledger.slice(uttStartIndex);
+    var oldWords = [];
+    var i;
+    for (i = 0; i < oldEntries.length; i++) oldWords.push(oldEntries[i].text);
+    var common = commonPrefixLen(oldWords, newWords);
+    var frozenCount = 0;
+    while (frozenCount < oldEntries.length && oldEntries[frozenCount].frozen) frozenCount++;
+    var keep = common > frozenCount ? common : frozenCount;
+
+    for (i = 0; i < frozenCount; i++) {
+      var fe = oldEntries[i];
+      var shouldBeStale = i >= common;
+      if (shouldBeStale && !fe.stale) {
+        fe.stale = true;
+        if (fe.span) fe.span.className = wordClass(fe);
+      } else if (!shouldBeStale && fe.stale) {
+        fe.stale = false;
+        if (fe.span) fe.span.className = wordClass(fe);
+      }
+    }
+
+    var removeCount = oldEntries.length - keep;
+    for (i = 0; i < removeCount; i++) {
+      removeFromActiveRow(ledger.pop());
+    }
+
+    for (i = keep; i < newWords.length; i++) {
+      pushWord(newWords[i], "live", animate);
+    }
+
+    if (isFinal) {
+      for (i = uttStartIndex; i < ledger.length; i++) {
+        var e = ledger[i];
+        if (!e.stale && e.state === "live") {
+          e.state = "settled";
+          if (e.span) e.span.className = wordClass(e);
+        }
+      }
+      if (ledger.length > uttStartIndex) ledger[ledger.length - 1].lastOfUtt = true;
+      freezeAndGlide(animate);
+      uttStartIndex = ledger.length;
+    }
+    trimLedger();
+  }
+
+  function resetAll() {
+    ledger = [];
+    uttStartIndex = 0;
+    rebuild();
+  }
+
+  function computeMetrics() {
+    var cs = getComputedStyle(probe);
+    ctx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
+    var box = probe.getBoundingClientRect();
+    var measuredH = Math.ceil(box.height);
+    if (measuredH > 0) {
+      rowH = measuredH;
+      card.style.setProperty("--lt-row-h", rowH + "px");
+    }
+    var canvasW = ctx.measureText(probe.textContent).width;
+    fontScale = (box.width > 0 && canvasW > 0) ? box.width / canvasW : 1;
+    usableWidth = Math.max(1, page.clientWidth - 1);
+    viewport.style.height = (LT_MAX_ROWS * rowH) + "px";
+  }
+
+  function rebuild() {
+    stack.style.transition = "none";
+    stack.style.transform = "translateY(0)";
+    stack.replaceChildren();
+    rows = [];
+    var row = makeEmptyRow();
+    stack.appendChild(row.el);
+    rows.push(row);
+
+    for (var idx = 0; idx < ledger.length; idx++) {
+      var entry = ledger[idx];
+      entry.span = null;
+      entry.frozen = false;
+      row = activeRow();
+      var cand = row.words.length ? rowText(row) + " " + entry.text : entry.text;
+      var fits = row.words.length === 0 || measureWidth(cand) <= usableWidth;
+      if (!fits) {
+        row.frozen = true;
+        for (var k = 0; k < row.words.length; k++) row.words[k].frozen = true;
+        row = makeEmptyRow();
+        stack.appendChild(row.el);
+        rows.push(row);
+      }
+      placeInRow(row, entry);
+      if (entry.lastOfUtt) {
+        row.frozen = true;
+        for (var m = 0; m < row.words.length; m++) row.words[m].frozen = true;
+        row = makeEmptyRow();
+        stack.appendChild(row.el);
+        rows.push(row);
+      }
+    }
+    trimRows();
+    applyRowOpacities();
+  }
+
+  function retypeset() {
+    computeMetrics();
+    rebuild();
+  }
+
+  var retypesetTimer = null;
+  function scheduleRetypeset() {
+    if (retypesetTimer) clearTimeout(retypesetTimer);
+    retypesetTimer = setTimeout(function () {
+      retypesetTimer = null;
+      retypeset();
+    }, 120);
+  }
+
+  computeMetrics();
+  rebuild();
+
+  if (window.ResizeObserver) {
+    new ResizeObserver(scheduleRetypeset).observe(card);
+  }
+
+  var sseOpen = null;
+  var hubState = null;
+
+  function applyIndicator() {
+    var tier = "idle", text = "connecting";
+    if (sseOpen === false) {
+      tier = "crit"; text = "disconnected";
+    } else if (sseOpen === true) {
+      if (hubState === "reconnecting" || hubState === "connecting") {
+        tier = "warn"; text = hubState;
+      } else if (hubState === "closed") {
+        tier = "crit"; text = "closed";
+      } else if (hubState === "paused") {
+        tier = "idle"; text = "no audio";
+      } else {
+        tier = "ok"; text = "live";
+      }
+    }
+    statusEl.className = tier;
+    statusLabel.textContent = text;
+    card.classList.toggle("dim", tier === "crit" && sseOpen === false);
+  }
+
+  var es = new EventSource("/events");
+  es.onopen = function () { sseOpen = true; applyIndicator(); };
+  es.onerror = function () { sseOpen = false; applyIndicator(); };
+  es.onmessage = function (e) {
+    var ev;
+    try { ev = JSON.parse(e.data); } catch (err) { return; }
+    switch (ev.kind) {
+      case "snapshot":
+        resetAll();
+        (ev.lines || []).forEach(function (line) { applyUtterance(line.text || "", true, false); });
+        applyUtterance(ev.pending || "", false, false);
+        sseOpen = true;
+        if (ev.state) hubState = ev.state;
+        break;
+      case "final":   applyUtterance(ev.text || "", true, true); break;
+      case "interim": applyUtterance(ev.text || "", false, true); break;
+      case "status":  hubState = ev.state || null; applyIndicator(); return;
+      default: return;
+    }
+    applyIndicator();
+  };
 })();
 </script>
 </body>
