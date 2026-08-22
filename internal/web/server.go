@@ -164,9 +164,15 @@ func logoHandler(path string) (http.Handler, error) {
 
 // wakeAssetHandler serves one of the wake-lock video assets (Backend B, the
 // silent-looping-video wake lock used over plain HTTP) out of the embedded
-// static FS. Read once at startup, same shape as logoHandler, but unlike the
-// logo these bytes ship with the binary and never change underneath a
-// running server, so the response is safe to cache immutably.
+// static FS. Read once at startup, same shape as logoHandler.
+//
+// Deliberately revalidated rather than cached immutably: the bytes are fixed
+// for a given binary, but the URL is not versioned, so a build that changes
+// the asset (adding the silent audio track Gecko and WebKit require to grant
+// the lock, say) would otherwise never reach a phone that had already cached
+// the old file — the exact failure that made an earlier fix look like a
+// no-op. no-cache still lets the ETag turn the repeat request into a 304, and
+// the file is a few KB on a LAN.
 func wakeAssetHandler(static fs.FS, name, contentType string) (http.Handler, error) {
 	body, err := fs.ReadFile(static, name)
 	if err != nil {
@@ -178,7 +184,7 @@ func wakeAssetHandler(static fs.FS, name, contentType string) (http.Handler, err
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("ETag", etag)
 		// A fresh Reader per request: bytes.Reader carries a read position,
 		// so sharing one across concurrent requests would race.

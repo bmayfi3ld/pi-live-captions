@@ -449,6 +449,39 @@ func TestWakeVideoServedWithContentType(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "video/mp4" {
 		t.Errorf("Content-Type = %q, want video/mp4", ct)
 	}
+	// The URL carries no version, so an immutable response would pin a stale
+	// asset on every phone that ever loaded the page — the failure mode that
+	// made the audio-track fix below look like it had done nothing.
+	if cc := resp.Header.Get("Cache-Control"); strings.Contains(cc, "immutable") {
+		t.Errorf("Cache-Control = %q, want a revalidating directive at an unversioned URL", cc)
+	}
+}
+
+// TestWakeAssetsCarryAudioTrack pins the least obvious property of the wake
+// assets. Gecko grants the screen lock only for video that HasAudio(), and
+// WebKit only for an element whose mediaType() is VideoAudio, so a re-encode
+// that drops the silent audio track would leave playback working and the
+// screen quietly sleeping on two of the three engines. Sniffing the box /
+// element name is enough to catch that without decoding the file.
+func TestWakeAssetsCarryAudioTrack(t *testing.T) {
+	base, _, _ := startTestServer(t, newTestConfig())
+	for _, tc := range []struct{ path, marker string }{
+		{"/wake.mp4", "soun"},      // hdlr box handler_type for an audio track
+		{"/wake.webm", "OpusHead"}, // Opus codec private data
+	} {
+		resp, err := http.Get(base + tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(body, []byte(tc.marker)) {
+			t.Errorf("%s carries no audio track (no %q); Firefox and Safari will not hold the screen lock", tc.path, tc.marker)
+		}
+	}
 }
 
 // TestAPITimeReturnsParseableRFC3339Nano covers the sole contract the viewer

@@ -305,7 +305,25 @@ deployment is plain HTTP to a LAN address (adding TLS would mean a browser cert 
 phone at every event), so `navigator.wakeLock` is simply undefined there. The viewer falls back to
 a silent looping `<video>` — the NoSleep.js technique — as the only mechanism that keeps a screen
 on over insecure HTTP. That backend needs one user gesture to unlock video playback, met by a
-one-time full-screen tap gate on first load (skippable with `?wake=0` for OBS sources and
+one-time full-screen tap gate on first load. Playing the video is necessary but not sufficient:
+each engine decides separately whether playback earns a screen-on grant, and a tiny muted
+video-only file — the shape NoSleep.js ships — satisfies neither. Blink
+(`VideoWakeLock::ShouldBeActive`) requires the element to be ≥75 % onscreen *and* to cover >20 %
+of the viewport unless it is audible, so `#wakevid` is full-bleed at 1 % opacity behind the
+captions. Gecko (`HTMLVideoElement::ShouldCreateVideoWakeLock`) requires
+`HasVideo() && (mSrcStream || HasAudio())` — it deliberately ignores audio-less video, which is
+"often used as a background image". WebKit (`HTMLMediaElement::shouldDisableSleep`) is stricter
+still: it returns `SleepType::None` for any element with `loop()` set, and otherwise only disables
+display sleep when `mediaType()` is `VideoAudio`, which `computeCanProduceAudio()` denies to a
+muted element or a zero volume. So `wake.mp4`/`wake.webm` each carry a **silent audio track**, the
+element loops by seeking rather than by the `loop` attribute, and it plays **unmuted on WebKit
+only** — inaudible either way, but an unmuted element claims the audio session, a cost worth
+paying only where it buys the lock. Three engines, three different tests; a change that satisfies
+one can silently forfeit another, so treat all three as the asset's contract.
+
+One trap worth naming: `/wake.mp4` and `/wake.webm` are unversioned URLs, so they are served
+`no-cache` (ETag-revalidated) rather than `immutable`. A phone that cached the pre-audio-track
+asset would otherwise keep it for a year and make any later fix look like a no-op (skippable with `?wake=0` for OBS sources and
 unattended displays, which have nobody present to tap it). The same URL still serves a projector
 and an OBS browser source.
 

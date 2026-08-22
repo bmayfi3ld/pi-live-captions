@@ -182,12 +182,23 @@
   #debug .drow { display: flex; justify-content: space-between; gap: 1.5em; white-space: nowrap; }
   #debug .k { color: var(--dim); }
 
-  /* Backend B's silent looping video: must stay rendered and non-zero-size
-     or browsers treat it as ineligible for both autoplay and screen-on. */
+  /* Backend B's silent looping video. Both engines gate the screen-on
+     grant on the element's geometry or its tracks, not on playback alone,
+     so this rule is load-bearing:
+       Blink (VideoWakeLock::ShouldBeActive) wants the video >=75% onscreen
+       AND covering >20% of the viewport (kSizeThreshold), unless it is
+       audible — hence full-bleed rather than the 1px sentinel it used to be.
+       Gecko (HTMLVideoElement::ShouldCreateVideoWakeLock) instead wants the
+       file to carry an audio track; see the wake.* assets.
+     Kept at .01 opacity behind the content (never display:none, which would
+     zero the intersection rects and forfeit the Blink grant). */
   #wakevid {
     position: fixed;
-    width: 1px;
-    height: 1px;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    z-index: -1;
     opacity: .01;
     pointer-events: none;
   }
@@ -237,10 +248,20 @@
 
   <!-- Backend B (silent looping video) wake-lock technique: kept playing
        while the tab is visible. Must stay rendered (see CSS), never
-       display:none, or autoplay/screen-on eligibility is lost. -->
-  <video id="wakevid" muted loop playsinline webkit-playsinline disablepictureinpicture preload="auto" aria-hidden="true">
-    <source src="/wake.mp4" type="video/mp4">
-    <source src="/wake.webm" type="video/webm">
+       display:none, or autoplay/screen-on eligibility is lost. The assets
+       carry a silent audio track, which Gecko requires before it will grant
+       the lock at all and WebKit requires before it will call the element
+       audible. No loop attribute on purpose: WebKit's shouldDisableSleep()
+       returns None for any element with loop() set, so the loop is done by
+       seeking instead (see wakeLoopBack). -->
+  <video id="wakevid" muted playsinline webkit-playsinline disablepictureinpicture preload="auto" aria-hidden="true">
+    <!-- ?v= is a cache-buster, not a route: the handler ignores the query.
+         These URLs went out once with an immutable year-long Cache-Control,
+         so a phone that loaded the page back then would never re-ask for the
+         asset, and would keep using a copy with no audio track. Bump it
+         whenever the asset bytes change. -->
+    <source src="/wake.mp4?v=2" type="video/mp4">
+    <source src="/wake.webm?v=2" type="video/webm">
   </video>
   <div id="gate" hidden>
     <button id="gatebtn" type="button">Tap to start</button>
@@ -796,10 +817,24 @@
   // real-world failure of this interface. The Wake Lock API is secure-
   // context only and this server has no TLS, so plain HTTP falls back to a
   // silent looping video (the NoSleep.js technique), which needs one user
-  // gesture before playback is permitted. ?wake=0 disables the feature
-  // entirely, gate included — required for OBS browser sources and
-  // wall-mounted projectors, which nobody is present to tap. ----
+  // gesture before playback is permitted. Playing is necessary but not
+  // sufficient: each engine has its own eligibility test for turning
+  // playback into a screen-on grant (full-bleed geometry for Blink, an
+  // audio track in the file for Gecko) — see the #wakevid CSS. ?wake=0
+  // disables the feature entirely, gate included — required for OBS browser
+  // sources and wall-mounted projectors, which nobody is present to tap. ----
   var wakeBackend = "off";  // "off" | "api" | "video"
+  // WebKit — every iOS browser, plus Safari — is the one engine that needs
+  // the element to be genuinely audible: shouldDisableSleep() only returns
+  // Display when mediaType() is VideoAudio, and computeCanProduceAudio()
+  // returns false for a muted element or a zero volume. The track is
+  // digital silence so nothing is heard, but an unmuted element does claim
+  // the audio session, which is why every other engine keeps its mute:
+  // Blink grants the lock on geometry alone (see the #wakevid CSS) and
+  // Gecko on the mere presence of an audio track, neither of which costs a
+  // phone its music.
+  var wakeNeedsAudible = /AppleWebKit/.test(navigator.userAgent) &&
+                         !/Chrom|Android|Edg\/|OPR\//.test(navigator.userAgent);
   var wakeHeld = false;
   var wakeAwaitingTap = false;
   var wakeInFlight = false; // guards overlapping navigator.wakeLock.request() calls
@@ -840,8 +875,27 @@
     if (wakeSentinel) wakeSentinel.release().catch(function () {});
   }
 
+  // Stand in for the loop attribute, which WebKit treats as a disqualifier.
+  // Seeking back before the file ends means the element never pauses and
+  // never fires "ended", so no engine sees a gap in playback; the 30s asset
+  // keeps these seeks rare. The "ended" handler is belt-and-braces for a
+  // timeupdate that arrives too late to beat the end of the file.
+  var WAKE_LOOP_AT = 25;
+  wakeVid.addEventListener("timeupdate", wakeLoopBack);
+  wakeVid.addEventListener("ended", wakeLoopBack);
+  function wakeLoopBack() {
+    if (wakeVid.ended || wakeVid.currentTime > WAKE_LOOP_AT) {
+      wakeVid.currentTime = 0;
+      if (wakeVid.paused && wakeHeld) {
+        var r = wakeVid.play();
+        if (r && r.catch) r.catch(function () { wakeHeld = false; });
+      }
+    }
+  }
+
   function acquireVideo() {
     if (wakeHeld) return;
+    wakeVid.muted = !wakeNeedsAudible;
     var p = wakeVid.play();
     wakeHeld = true;
     // A rejected play() means the screen is not actually being held, and the
@@ -879,7 +933,10 @@
   // for later programmatic play()/pause() calls for the rest of the page's
   // life. Then the gate hides for good.
   function arm() {
-    wakeVid.muted = true; // the muted attribute alone is unreliable in Safari
+    // Set the property, not just the attribute: Safari honours only the
+    // former reliably, and on WebKit the value has to be false anyway for
+    // the element to count as audible.
+    wakeVid.muted = !wakeNeedsAudible;
     var p = wakeVid.play();
     if (p && p.catch) p.catch(function () {});
     wakeAwaitingTap = false;
