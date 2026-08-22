@@ -47,12 +47,59 @@ up next, in priority order.
 
 ---
 
+## Status — 2026-08-22 update
+
+The work this document's "Remaining work" section (as of 2026-08-20) queued up — S5, S4, and the
+S6 windowing/max remainder — has now landed, plus one item beyond the original findings list (a
+per-phase waterfall on `/admin`). Capture-side calibration (§3.2/§3.3) and ffmpeg PTS recovery
+(§3.1) remain open, deliberately deferred: per the priority reasoning in §3.5, both terms are
+small next to Deepgram's own recognition latency, and both have a concrete blocker — see the
+table below.
+
+| finding | status | notes |
+|---|---|---|
+| S6 remainder — fixed 512-sample ring, non-decaying `latencyMax` | **FIXED** | `latencySeries` (`internal/metrics/metrics.go`) is now a time-windowed FIFO: `latencyWindow` = 5 min is the real bound, `latencyCap` = 512 is a memory cap only. Percentiles and `max` describe the trailing window; the session-lifetime max is gone entirely (not merely decayed) — a non-decaying max under `--auto-pause` (on by default) was getting dragged up by every post-resume pre-roll flush, on a schedule tied to room silence rather than any actual degradation. |
+| S5 — interim latency | **FIXED** | `Metrics.ObserveInterimLatency` / `stt.interim_latency_*_ms`, recorded by `observeLatency` (`internal/cli/run.go`) as a series separate from finals, split on `t.IsFinal`. Interims are what a viewer sees first, so the finals-only figure was pessimistic about perceived latency. |
+| S4 — browser half | **FIXED**, with a caveat | `GET /api/time` + `POST /api/viewer-latency` (`internal/web/server.go`); the viewer measures publish→paint via `requestAnimationFrame` after the SSE-driven DOM write and POSTs it back. Caveat: WiFi RTT to viewer phones is now measured, but only insofar as a viewer is actually connected, has a settled clock-offset estimate, and chooses to report — `web.viewer_latency_*` describes the population of *reporting* viewers, not "the room" as a whole, and the figure is only as good as the clock-offset estimate (`GET /api/time`, NTP-style lowest-RTT-sample selection) that corrects it. |
+| §3.2/§3.3 — capture calibration, `--capture-latency-ms`, ffmpeg buffer flags | **STILL OPEN**, deliberately deferred | No `--capture-latency-ms` flag and no `-audio_buffer_size` / `-fragment_size` / `-thread_queue_size` on the capture command. `--capture-latency-ms` specifically cannot be validated without a loopback impulse against real Pi hardware, which this pass had no access to. |
+| §3.1 — ffmpeg PTS via `-f nut` | **STILL OPEN**, deliberately deferred | Needs a container demuxer in the frame reader in place of headerless `-f s16le` — a larger, riskier change than the rest of this pass's scope. |
+| Per-phase waterfall | **NEW** — beyond the original findings list | `Transcript.SentAt` (audio handed to the recognizer's socket) is now carried through `anchorIndex.Add`/`At` alongside `CapturedAt`. `observeLatency` splits a final's total latency into upload (`CapturedAt→SentAt`), recognize (`SentAt→ReceivedAt`), and assemble (`ReceivedAt→hub publish`), recorded all-or-nothing via `Metrics.ObservePhases` so that for any single final the three phases sum exactly to that final's own `CapturedAt`→publish span. That exactness is per-sample only: the bar draws p50 per phase, and percentiles of three separate series do not add (the slowest upload and the slowest recognition need not be the same caption), so the segments show the composition of a typical caption rather than an arithmetic decomposition of the headline figure. `/admin` draws capture (ADC→`CapturedAt`) as an explicitly-labelled hatched segment at fixed width, since it isn't measured and shouldn't look scaled to a value it doesn't have; the viewer leg is set off by a gap, since it's a separately-sampled population on a different clock, not a fourth phase of the same total. |
+
+**One factual correction this pass turned up.** The original "Remaining work" §3 (superseded by
+the renumbered list at the end of this document) stated that "`Event.At` already ships to the
+client." That was only two-thirds true: `At` was set on `final` (via the closed line's own `At`)
+and on `snapshot`, but **not** on `interim` or `status` — and since `caption.Event.At` is tagged `json:"at,omitzero"`,
+it was absent from the wire entirely for those two kinds, not merely zero-valued. Browser-side
+latency measurement needs `At` on interims, since interims are what a viewer sees first, so
+`Hub.newEventLocked` (`internal/caption/hub.go`) had to be changed to stamp every event kind with
+the publish instant before this instrumentation could work at all.
+
+**A hazard the interim work exposed.** Deepgram's synthetic `UtteranceEnd` transcript has empty
+`Text` and zero `Start`/`Duration`. Before this pass, `observeLatency` filtered on `t.IsFinal`
+alone, and `UtteranceEnd` happens to have `IsFinal == false`, so filtering out real interims
+incidentally filtered out `UtteranceEnd` too — harmless, but only by coincidence. Once
+`observeLatency` started recording interim transcripts (to feed the new interim series), that
+incidental protection went away: `anchorIndex.At(0)` on an empty-range transcript can resolve an
+unrelated capture instant and record it as a bogus latency sample. `observeLatency` now guards
+explicitly on `t.Text == ""` rather than relying on `IsFinal` to keep `UtteranceEnd` out. A future
+engine that emits its own empty-text synthetic results will need the same guard — `IsFinal`
+filtering does not provide it for free.
+
+---
+
 ## 1. What the metric actually computes
 
 **2026-08-20: this section originally described the buggy implementation. That implementation
 is gone. What follows is the current code.**
 
-`internal/cli/run.go` (`observeLatency`):
+**2026-08-22: the snippet below is no longer current.** It is kept because the rest of this
+section reasons about it, but `observeLatency` has since gained a `publishedAt` parameter, routes
+interims to their own series instead of dropping them, guards on empty `Text`, and splits finals
+into phases. The formula this section derives (`latency = ReceivedAt − CapturedAt`) is still
+exactly what the final series records — only the surrounding function changed. `DESIGN.md` §6 is
+the canonical description; see the 2026-08-22 status block above.
+
+`internal/cli/run.go` (`observeLatency`), as of 2026-08-20:
 
 ```go
 func (s *session) observeLatency(t stt.Transcript) {
@@ -195,7 +242,9 @@ no accumulator that a drop or restart can permanently bias. The ring in `deepgra
 anything latency-related — it only affects how much pre-roll survives a pause (see S6's new
 finding below, which is a *consequence* of this pre-roll behavior, not a regression of S3).
 
-### S4 — The browser half is not measured at all — **UNCHANGED / still open**
+### S4 — The browser half is not measured at all — **FIXED (2026-08-22)**
+
+**Original finding, still accurate as of 2026-08-20 (kept for the record):**
 
 Measurement stops at `ReceivedAt`, *inside* the Deepgram read loop — before the channel handoff
 to the hub, hub assembly, SSE encode, network transit, and browser paint.
@@ -206,21 +255,33 @@ Server-side fan-out is a non-issue.
 The genuinely uncounted terms are **WiFi RTT to viewer phones** and **browser render**. On
 congested event WiFi with many simultaneous viewers this is the least predictable link in the
 entire chain, and it has zero instrumentation. The page also does per-word DOM work with a forced
-reflow (`index.html`), which is not free on a low-end phone. Nothing in the recent fix touches
-this path. See Remaining work §3.
+reflow (`index.html`), which is not free on a low-end phone.
 
-### S5 — Finals are timed; interims are what people see — **UNCHANGED / still open**
+**What changed:** `GET /api/time` and `POST /api/viewer-latency` (`internal/web/server.go`) close
+exactly this gap — the viewer itself now measures publish→paint via `requestAnimationFrame` and
+reports it, clock-skew-corrected, back to the server. See the 2026-08-22 status block above for
+the caveat this doesn't erase: it measures RTT-plus-render only for viewers that actually connect
+and report, not "the room" as a whole.
+
+### S5 — Finals are timed; interims are what people see — **FIXED (2026-08-22)**
+
+**Original finding, still accurate as of 2026-08-20 (kept for the record):**
 
 `observeLatency` still returns early unless `t.IsFinal` (now also gated on `t.CapturedAt` being
 non-zero, but the `IsFinal` filter itself is untouched). The viewer still paints interim text as
 it arrives. With `endpointing=300` and `utterance_end_ms=1000`, words are on screen several
 hundred ms before the final that the metric times.
 
-So the number is still simultaneously **pessimistic** about perceived latency (S5) and, per S4,
-**optimistic** about the transport tail. The two errors still do not cancel in any principled
-way. See Remaining work §2.
+So the number was still simultaneously **pessimistic** about perceived latency (S5) and, per S4,
+**optimistic** about the transport tail. The two errors did not cancel in any principled way.
 
-### S6 — Minor statistical issues — **one item fixed, one item open with new urgency**
+**What changed:** `observeLatency` (`internal/cli/run.go`) now records every non-empty-`Text`
+transcript, routing it to `Metrics.ObserveInterimLatency` or `Metrics.ObserveLatency` by
+`IsFinal`. `/admin` shows both as "first pixels" (interim) and the headline final figure. See the
+2026-08-22 status block's `UtteranceEnd` hazard note — removing the `IsFinal`-only filter exposed
+a real bug that had to be fixed alongside this.
+
+### S6 — Minor statistical issues — **both items now fixed**
 
 - ~~`if d > 0` (`run.go`) silently discards negative samples~~ — **FIXED**: that clip is gone
   from `observeLatency` in `internal/cli/run.go`. The defensive `d < 0` guard inside
@@ -228,26 +289,33 @@ way. See Remaining work §2.
   negative samples are filtered. With the anchor fixed, `d` is a real elapsed duration rather
   than an always-large, always-positive artifact, so near-zero or (from clock skew / rounding)
   slightly negative samples are now a real possibility this guard exists to handle.
-- The latency ring holds 512 **finals only**, and `latencyMax` never decays — **STILL OPEN**, and
-  now matters for a reason the original analysis could not have known:
+- The latency ring holds 512 **finals only**, and `latencyMax` never decays — **FIXED
+  (2026-08-22)**. It mattered for a reason the original analysis could not have known:
 
-  **New finding, 2026-08-20:** after a resume, `writeLoop` flushes up to `bufferAudio` (2s) of
-  ring pre-roll whose `CapturedAt` is genuinely that old — the ring is deliberately kept full of
-  recent-but-possibly-silent audio across a pause so the first words of resumed speech aren't
-  lost (`deepgram.go`, `ring.push` comments). That means the **first final reported after every
-  resume carries a real ~1-2 s latency measurement**. This is not a bug and not an artifact of
-  the anchor — it is a true reading of how long that specific audio waited. But with auto-pause
-  on by default (`--auto-pause=true`), this now happens on **every pause/resume cycle** in a
-  normal session, which pulls both `latencyMax` and `p95` up on a schedule tied to room silence
-  rather than to any actual degradation in the pipeline. This upgrades "time-window the latency
-  ring" from optional polish to the right next fix — see Remaining work §1.
+  **Finding, 2026-08-20 (kept for the record):** after a resume, `writeLoop` flushes up to
+  `bufferAudio` (2s) of ring pre-roll whose `CapturedAt` is genuinely that old — the ring is
+  deliberately kept full of recent-but-possibly-silent audio across a pause so the first words of
+  resumed speech aren't lost (`deepgram.go`, `ring.push` comments). That means the **first final
+  reported after every resume carries a real ~1-2 s latency measurement**. Not a bug and not an
+  artifact of the anchor — a true reading of how long that specific audio waited. But with
+  auto-pause on by default (`--auto-pause=true`), this happens on **every pause/resume cycle** in
+  a normal session, which pulled both `latencyMax` and `p95` up on a schedule tied to room silence
+  rather than to any actual degradation in the pipeline.
 
-  The test that currently guards the *opposite* property and will need rewriting:
-  `TestLatencyRingStaysBoundedAfterWrap` (`internal/metrics/metrics_test.go`) asserts that `max`
-  survives a ring wrap unchanged (it feeds the ring monotonically increasing samples and checks
-  `latencyMax` equals the last, largest one) — which is a direct assertion that `max` never
-  decays. That is exactly the behavior a windowed max would change. Whoever picks up the
-  windowing work should expect to rewrite this test's expectations, not just its inputs.
+  **What changed:** `latencySeries` (`internal/metrics/metrics.go`) is now a time-windowed FIFO —
+  `latencyWindow` (5 min) is the real bound, `latencyCap` (512) only a memory cap — and `max` is
+  computed over that window on every read, same as the percentiles. There is no session-lifetime
+  max left to decay; it was removed rather than made to decay, which is a deliberate choice (see
+  the 2026-08-22 status block above) since a decaying-but-still-latching max would have the same
+  failure mode on a long enough silence.
+
+  The test that used to guard the *opposite* property was rewritten:
+  `TestLatencyRingStaysBoundedAfterWrap`, which asserted `max` survives a ring wrap unchanged, is
+  gone from `internal/metrics/metrics_test.go`, replaced by window-behavior tests —
+  `TestLatencySeriesEvictsSamplesOutsideWindow`, `TestLatencySeriesCapsBurstInsideWindow`,
+  `TestLatencySeriesBackingArrayDoesNotGrowUnbounded`, `TestLatencySeriesIdleSessionEmpties` —
+  that assert the window actually ages samples out, which is exactly the property the old test
+  asserted did *not* hold.
 
 ---
 
@@ -393,16 +461,19 @@ never depends on a stream-relative clock (§2 S1–S3).
 
 ### What was NOT done from the original suggested order of work
 
-The original order-of-work list proposed five steps. Only the first shipped:
+**2026-08-20:** the original order-of-work list proposed five steps; only the first had shipped.
+**2026-08-22 update:** items 3 and 4 have since shipped too. Only item 2 (capture calibration)
+remains undone, and it remains so by decision, not oversight — see Remaining work below.
 
 1. ~~**Anchor to the stream, not the process.**~~ **Done** — this section, §1, §2 S1–S3.
 2. **Add a capture calibration constant** (`--capture-latency-ms`) and explicit capture buffer
-   flags. **Not done.** See §3.2/§3.3, Remaining work §4.
-3. **Instrument the browser half.** **Not done.** See §2 S4, Remaining work §3.
-4. **Record interim latency separately from final latency.** **Not done.** See §2 S5, Remaining
-   work §2.
+   flags. **Not done, deliberately deferred.** See §3.2/§3.3, Remaining work item 4.
+3. **Instrument the browser half.** **Done (2026-08-22).** See §2 S4, status block above.
+4. **Record interim latency separately from final latency.** **Done (2026-08-22).** See §2 S5,
+   status block above.
 5. **Clean-up:** stop discarding negative samples (done, §2 S6), decay or window `latencyMax` and
-   the ring (not done, §2 S6, Remaining work §1).
+   the ring (**done (2026-08-22)** — replaced by a time window rather than decayed, §2 S6, status
+   block above).
 
 ---
 
@@ -430,45 +501,27 @@ analysis was written, as uncommitted changes, in direct response to the findings
 
 ## Remaining work
 
-Addressed to whichever agent picks this up next. Ordered by value, per the same reasoning as the
-original §3.5 priority table: fix the biggest term in the budget first. Each item below was
-deliberately **not** done as part of the 2026-08-20 anchor fix — that fix was scoped to S1/S2/S3
-(the anchor's stability), not to these.
-
-1. **S6 remainder — time-window the latency samples and the max.** The ring is a fixed 512
-   finals with a `latencyMax` that never decays. This was optional polish when the anchor was
-   broken (every reading was an artifact anyway); it is not optional now. Motivation: after every
-   auto-pause resume, `writeLoop` flushes up to 2s of genuinely-old pre-roll from the ring
-   (`bufferAudio` in `internal/stt/deepgram/deepgram.go`), so the first final after each resume
-   reports a real ~1-2 s latency — true, but it drags `max` and `p95` up on every pause cycle with
-   auto-pause on by default. Whoever does this must rewrite
-   `TestLatencyRingStaysBoundedAfterWrap` (`internal/metrics/metrics_test.go`), which currently
-   asserts the opposite property (`max` surviving a wrap unchanged) — that assertion is precisely
-   what a windowed max would invalidate.
-
-2. **S5 — record interim latency separately from final latency.** `observeLatency`
-   (`internal/cli/run.go`) still filters on `t.IsFinal`. The viewer paints interim text several
-   hundred ms earlier (`index.html`, `applyUtterance`), so the current figure is pessimistic
-   about what a viewer actually perceives. Add a second latency series (or a second field) for
-   interims so `/admin` can show both "first pixels" and "settled text."
-
-3. **S4 — instrument the browser half.** Still completely uninstrumented. `Event.At` already
-   ships to the client; the cheap version is an SSE→paint figure computed client-side and
-   reported back (or just surfaced locally in the page for a spot-check). The genuinely uncounted
-   term at a real event is WiFi RTT to viewer phones on congested event WiFi — that's the one
-   that actually varies and actually matters, and there is currently zero way to see it without
-   being physically at the venue with a viewer's phone in hand.
+Addressed to whichever agent picks this up next. As of the 2026-08-22 update above, items 1–3
+from the original list are **done** (S6 remainder, S5, S4 — see the status table). What remains
+is the capture side, items 4 and 5 below, retained under their original numbers so cross-references
+elsewhere in this document keep pointing at the right thing. Both were deferred **by decision, not
+oversight**, for the reasons given in each item and per the original §3.5 priority reasoning: they
+are small terms next to Deepgram's own recognition latency (300 ms – 1 s+), and each has a concrete
+blocker beyond just "not yet done."
 
 4. **§3.2 / §3.3 — capture-side calibration.** Add `--capture-latency-ms` (one-time loopback
    calibration per §3.2) and explicit ffmpeg capture-buffer flags
    (`-audio_buffer_size` / `-fragment_size` / `-thread_queue_size`, per §3.3) to `device.go`.
    Turns the capture delay from an unknown into a configured constant that can be legitimately
-   added to the reported figure. Lower priority than 1-3: per the updated §3.5 table, this term
-   is still small next to Deepgram's own recognition latency and the still-unmeasured S4 tail.
+   added to the reported figure. Deferred: per §3.5, this term is small next to Deepgram's own
+   recognition latency and the now-measured-but-still-larger S4 tail, and `--capture-latency-ms`
+   specifically cannot be validated without a loopback impulse against real Pi hardware — this
+   pass had no access to that hardware.
 
 5. **§3.1 — recover ffmpeg's PTS.** Needs a container that preserves timestamps (`-f nut`)
    instead of headerless PCM (`-f s16le`), which touches both the capture command and the frame
-   reader. Flag as **measured-but-unverified on the Pi** — the caveat in §3.1 about PipeWire
-   reporting `Latency: 0 usec` on the dev machine (meaning the PTS compensation term was
+   reader — a demuxer change, not a metrics change, and materially riskier than anything else in
+   this pass's scope. Flag as **measured-but-unverified on the Pi** — the caveat in §3.1 about
+   PipeWire reporting `Latency: 0 usec` on the dev machine (meaning the PTS compensation term was
    effectively zero here) still stands and has not been checked against real PulseAudio or ALSA
    on target hardware.

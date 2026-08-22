@@ -244,6 +244,8 @@ blank.
 | `GET /events` | SSE stream: `snapshot` on connect, then incremental events |
 | `GET /admin` | Metrics dashboard (no auth) |
 | `GET /api/stats` | JSON metrics snapshot |
+| `GET /api/time` | Server wall clock, for the viewer's own clock-offset estimation |
+| `POST /api/viewer-latency` | Viewer-reported publish→paint latency (unauthenticated, rate-limited — see §6) |
 | `GET /logo` | Logo image, registered only when `--logo` is set |
 | `GET /healthz` | Liveness |
 
@@ -255,11 +257,15 @@ closing the connection.
 Event wire format:
 
 ```json
-{"seq":42,"kind":"final","id":"u17","text":"...","offset_ms":91230,"at":"2026-08-19T09:31:05Z"}
-{"seq":43,"kind":"interim","text":"partial words so far"}
-{"seq":44,"kind":"status","state":"reconnecting","detail":"stt websocket closed"}
-{"seq":45,"kind":"status","state":"paused","detail":""}
+{"seq":42,"kind":"final","id":"u17","text":"...","offset_ms":91230,"at":"2026-08-19T09:31:05.912Z"}
+{"seq":43,"kind":"interim","text":"partial words so far","at":"2026-08-19T09:31:06.001Z"}
+{"seq":44,"kind":"status","state":"reconnecting","detail":"stt websocket closed","at":"2026-08-19T09:31:10.442Z"}
+{"seq":45,"kind":"status","state":"paused","detail":"","at":"2026-08-19T09:31:40.000Z"}
 ```
+
+`at` (the publish instant) is stamped on every kind by `newEventLocked`, not just `final` and
+`snapshot` — it used to be absent from `interim` and `status` entirely (the field is `omitzero`),
+until the viewer-latency work needed it on interims too, since that's what a viewer sees first.
 
 `detail` is deliberately left empty for `paused`: the server reports *that* the state changed, but
 the wording shown for it ("no audio" on the viewer, "paused (no audio)" on `/admin`) is a
@@ -319,8 +325,8 @@ dropped 3 % of its audio must not look identical to a clean one.
 |---|---|
 | source | frames/bytes/seconds, `frames_dropped_total`, `ffmpeg_restarts_total`, `xruns_total`, `ffmpeg_last_stderr` |
 | monitor | `enabled`, `device`, `buffer_ms`, `alive`, `frames_dropped_total` |
-| stt | `state` (now including `paused`), `reconnects_total`, `buffer_drops_total`, `pauses_total`, `paused_sec`, `interim_total`, `final_total`, `bytes_sent_total`, `last_error`, latency last/p50/p95/max |
-| web | `sse_clients`, `sse_clients_total`, `events_total`, `slow_disconnects_total` |
+| stt | `state` (now including `paused`), `reconnects_total`, `buffer_drops_total`, `pauses_total`, `paused_sec`, `interim_total`, `final_total`, `bytes_sent_total`, `last_error`, final latency last/p50/p95/max/samples, interim latency last/p50/p95/max/samples, per-phase (upload/recognize/assemble) latency last/p50/p95/max plus `phase_latency_samples` |
+| web | `sse_clients`, `sse_clients_total`, `events_total`, `slow_disconnects_total`, viewer-reported latency last/p50/p95/max/samples, `viewer_reports_total` |
 | transcript | `path`, `lines_written`, `bytes_written`, `last_write_error` |
 | process | `version`, `session_id`, `started_at`, `uptime`, `goroutines`, `health` |
 
@@ -340,13 +346,64 @@ echoes back to that wall-clock instant, interpolating within the chunk it falls 
 anchor (`streamStart + Start + Duration`) doesn't work here: auto-pause, reconnects, ring evictions
 and ffmpeg restarts all move the media clock relative to the wall, so on a long session with quiet
 stretches a stream-relative figure grew without bound instead of reporting real latency. Anchoring to
-the wall-clock capture instant sidesteps all of that. A 512-sample ring plus atomics; percentiles
-computed on read. No metrics library needed.
+the wall-clock capture instant sidesteps all of that.
+
+The figures are windowed, not session-lifetime. `latencySeries` (`internal/metrics/metrics.go`)
+keeps only samples from the trailing `latencyWindow` (5 minutes), capped at `latencyCap` (512
+samples) as a memory bound; both percentiles and `max` are computed over that window on read,
+and trimming happens on every read too, so an idle session's window actually empties out rather
+than showing stale figures forever. There used to be a non-decaying session-lifetime max; it's
+gone on purpose. With `--auto-pause` on by default, `writeLoop` flushes up to ~2 s of
+genuinely-old ring pre-roll after every resume (§3), so the first final after each silence is a
+true but large latency reading — under a non-decaying max that dragged `p95`/`max` up permanently
+on a schedule tied to room silence, not to any actual pipeline problem. Windowing lets that spike
+age out instead of defining the headline figure for the rest of the session.
+
+Interim and final latency are recorded as separate series (`stt.interim_latency_*_ms` vs
+`stt.latency_*_ms`). A viewer sees interim text well before the `SpeechFinal` that closes a line,
+so timing finals alone was pessimistic about perceived latency; `observeLatency`
+(`internal/cli/run.go`) now measures `ReceivedAt − CapturedAt` for every transcript with non-empty
+`Text` and routes the sample to the interim or final series by `IsFinal`. (The empty-`Text` guard
+exists because Deepgram's synthetic `UtteranceEnd` transcript carries no real media range —
+`anchorIndex.At(0)` on it can resolve an unrelated capture instant — see the spec's 2026-08-22
+update for how that surfaced.)
+
+For finals, `observeLatency` additionally splits the total into three phases using
+`Transcript.SentAt` — the wall-clock instant the audio was handed to the recognizer's socket,
+carried alongside `CapturedAt` through `anchorIndex.Add`/`At` — plus the hub's own publish
+instant: upload (`CapturedAt → SentAt`), recognize (`SentAt → ReceivedAt`), assemble
+(`ReceivedAt → publish`). `Metrics.ObservePhases` records all three under one lock or none at
+all, so the split is exact *per sample*: for any one final, upload + recognize + assemble equals
+that final's own `CapturedAt`→publish span. A partial write would let a segment describe a
+different transcript than its neighbours, which is why the three are all-or-nothing.
+
+Note the limit of that guarantee: it is per-sample, not per-percentile. The `/admin` waterfall
+draws p50 per phase, and percentiles of three separate series do not add — the p50 of upload plus
+the p50 of recognize is not the p50 of the total, since the slowest upload and the slowest
+recognition need not have happened on the same caption. The bar therefore shows the *composition*
+of a typical caption, not an arithmetic decomposition of the headline figure above it, and its
+segments are scaled against the sum of the p50s rather than against that headline. Exposed as
+`stt.{upload,recognize,assemble}_latency_{last,p50,p95,max}_ms` plus
+`stt.phase_latency_samples`. Capture itself (ADC → `CapturedAt`) is not part of this split and
+remains unmeasured; the waterfall draws it as an explicitly-labelled, fixed-width hatched segment
+rather than pretending to scale it.
+
+The browser leg — publish to actual paint — is measured by the viewer itself and reported
+voluntarily: `GET /api/time` lets the page estimate its clock offset against the server (an
+uncorrected phone clock is routinely seconds off and would otherwise leak straight into the
+figure as fake latency), and `POST /api/viewer-latency` accepts the viewer's own
+`requestAnimationFrame`-measured publish→paint span, throttled to 1/sec and withheld until an
+offset has actually been measured. It's the first POST route in the codebase, and unauthenticated
+on the LAN by design, so it carries its own guards: a bounded request body, a finite-and-in-range
+check on the value, and a rate limit shared across all clients rather than per-client. Landed as
+`web.viewer_latency_*_ms` and `web.viewer_reports_total`.
 
 See `specs/2026-08-20_analysis_caption_latency_measurement.md` for the full accuracy analysis
-this anchor came from — the anchor-bug findings there are fixed, but the ring's fixed size and
-non-decaying max, interim-latency measurement, and browser/ADC-side instrumentation are still
-open and are tracked there under "Remaining work."
+this anchor came from, updated 2026-08-22: the anchor-bug findings, the windowed ring/max, the
+interim/final split, and the browser-side instrumentation described above are all now fixed.
+Only the capture side — ADC/USB/audio-server delay before `CapturedAt`, and recovering ffmpeg's
+own PTS — remains open, deliberately deferred as the smallest term in the latency budget; see
+"Remaining work" there.
 
 **`Snapshot.Health`** (`"closed"` / `"paused"` / `"degraded"` / `"ok"`) is the server-computed
 answer to "what is happening right now," and it's what `/admin`'s badge switches on — a closed or
@@ -472,6 +529,6 @@ internal/ui/                terminal ownership, slog handler
 internal/audio/             Source interface, ffmpeg plumbing, file/device/monitor
 internal/stt/               Engine interface + registry; deepgram/, mock/
 internal/caption/           hub (utterance assembly, fan-out), transcript writer
-internal/metrics/           counters, latency ring, snapshot
+internal/metrics/           counters, windowed latency series, snapshot
 internal/web/               routes, SSE, embedded viewer + admin pages
 ```

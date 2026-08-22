@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"livecaption/internal/caption"
@@ -47,6 +49,10 @@ type Server struct {
 	http    *http.Server
 	log     *slog.Logger
 	logoSet bool
+
+	viewerLatMu       sync.Mutex
+	viewerLatWindowAt time.Time
+	viewerLatCount    int
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -73,6 +79,8 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /events", s.handleEvents)
 	mux.HandleFunc("GET /api/stats", s.handleStats)
 	mux.HandleFunc("GET /api/config", s.handleConfig)
+	mux.HandleFunc("GET /api/time", s.handleTime)
+	mux.HandleFunc("POST /api/viewer-latency", s.handleViewerLatency)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
@@ -295,4 +303,106 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"version": s.cfg.Metrics.Version,
 		"logo":    logo,
 	})
+}
+
+// handleTime reports the server's own clock so the viewer can estimate its
+// offset against it. Without this, a phone's clock skew (routinely seconds,
+// sometimes minutes on a device that has never synced NTP) would leak
+// straight into the viewer-latency measurement, and the page would end up
+// reporting clock drift instead of the network-plus-render time it actually
+// wants.
+func (s *Server) handleTime(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"now": time.Now().Format(time.RFC3339Nano),
+	})
+}
+
+// maxViewerLatencyBody bounds the request body a viewer can send to report
+// its paint latency. The payload is one small number; a much larger body can
+// only be a mistake or an attempt to make this unauthenticated endpoint do
+// work it shouldn't.
+const maxViewerLatencyBody = 4 << 10
+
+// maxViewerLatencyMS rejects a report a real network-plus-render span could
+// never produce. A tab backgrounded for an hour and then foregrounded will
+// otherwise report its dormant time as "latency" and single-handedly poison
+// the p95 the whole admin page reads.
+const maxViewerLatencyMS = 60000
+
+// viewerLatencyRateLimit and viewerLatencyRateWindow cap how many reports
+// this handler will accept across ALL clients combined. The endpoint is
+// unauthenticated on a LAN by design — anything on the network can POST to
+// it — so a hostile or simply buggy client looping the request must not be
+// able to spin the handler or the metrics lock arbitrarily fast.
+const (
+	viewerLatencyRateLimit  = 20
+	viewerLatencyRateWindow = time.Second
+)
+
+// allowViewerLatencyReport is a simple fixed-window counter guarded by a
+// mutex: cheap, dependency-free, and more than adequate for a limit this
+// coarse (20/sec) — a token bucket would be more precise but this endpoint
+// doesn't need the precision.
+func (s *Server) allowViewerLatencyReport(now time.Time) bool {
+	s.viewerLatMu.Lock()
+	defer s.viewerLatMu.Unlock()
+	if now.Sub(s.viewerLatWindowAt) >= viewerLatencyRateWindow {
+		s.viewerLatWindowAt = now
+		s.viewerLatCount = 0
+	}
+	if s.viewerLatCount >= viewerLatencyRateLimit {
+		return false
+	}
+	s.viewerLatCount++
+	return true
+}
+
+// handleViewerLatency accepts a viewer's own measurement of the span between
+// a caption being published and it actually painting on that viewer's
+// screen — the one leg of the pipeline the server cannot measure itself,
+// since it has no visibility into a browser's render loop.
+//
+// This is the first POST route in the codebase, and the first endpoint
+// reachable by anything that can talk to the LAN without authentication, so
+// every guard here exists to stop a malformed or malicious body from
+// corrupting the metrics every other viewer and the admin page rely on.
+func (s *Server) handleViewerLatency(w http.ResponseWriter, r *http.Request) {
+	// A viewer that has been asleep, or is simply hostile, must not be able
+	// to make this handler read an unbounded body into memory.
+	r.Body = http.MaxBytesReader(w, r.Body, maxViewerLatencyBody)
+
+	var body struct {
+		PaintMS float64 `json:"paint_ms"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		// Both of JSON's "not a real number" edge cases land here already:
+		// a magnitude like 1e999 makes strconv.ParseFloat return ErrRange,
+		// which the encoding/json package surfaces as a decode error rather
+		// than silently rounding to +Inf, and a bare `NaN` token is not
+		// valid JSON syntax at all (JSON has no NaN/Infinity literals), so
+		// it fails during tokenizing. Neither ever reaches body.PaintMS.
+		http.Error(w, "malformed body", http.StatusBadRequest)
+		return
+	}
+	// Defense in depth, not a path exercised by encoding/json today: if a
+	// future Go version or a different decoder ever let a non-finite value
+	// through, it must not be allowed to poison the metrics below it.
+	if math.IsNaN(body.PaintMS) || math.IsInf(body.PaintMS, 0) {
+		http.Error(w, "paint_ms must be finite", http.StatusBadRequest)
+		return
+	}
+	if body.PaintMS < 0 || body.PaintMS > maxViewerLatencyMS {
+		http.Error(w, "paint_ms out of range", http.StatusBadRequest)
+		return
+	}
+
+	if !s.allowViewerLatencyReport(time.Now()) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+
+	s.cfg.Metrics.ObserveViewerLatency(time.Duration(body.PaintMS * float64(time.Millisecond)))
+	w.WriteHeader(http.StatusNoContent)
 }

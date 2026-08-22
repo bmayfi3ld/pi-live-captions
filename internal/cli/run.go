@@ -205,8 +205,15 @@ func (s *session) run(ctx context.Context, openBrowser bool, addr string) error 
 	go func() {
 		defer close(hubDone)
 		for t := range transcripts {
-			s.observeLatency(t)
+			// Publish first, then take the publish instant. Publish runs
+			// synchronously all the way through broadcast (measured at 0.13ms
+			// on loopback), so time.Now() here is that instant plus fan-out.
+			// This makes the "assemble" phase very slightly over-count and the
+			// viewer-side delivery figure very slightly under-count by that
+			// same sub-millisecond amount — a real but negligible seam, and
+			// cheaper than plumbing a callback out of the hub.
 			s.hub.Publish(t)
+			s.observeLatency(t, time.Now())
 		}
 	}()
 
@@ -226,16 +233,48 @@ func (s *session) run(ctx context.Context, openBrowser bool, addr string) error 
 	return nil
 }
 
-// observeLatency records the wall-clock delay between the audio being captured
-// and the caption for it arriving. Anchoring on the frame's capture instant —
-// rather than on media time plus a stream origin — is what makes the figure
-// survive auto-pause, reconnects, dropped frames and ffmpeg restarts, all of
-// which move the recognizer's media clock relative to the wall.
-func (s *session) observeLatency(t stt.Transcript) {
-	if !t.IsFinal || t.ReceivedAt.IsZero() || t.CapturedAt.IsZero() {
+// observeLatency records the wall-clock delay between the audio being
+// captured and the caption for it arriving, for both interims (their own
+// series, since that's what a viewer sees first) and finals (the headline
+// figure). Anchoring on the frame's capture instant — rather than on media
+// time plus a stream origin — is what makes the figure survive auto-pause,
+// reconnects, dropped frames and ffmpeg restarts, all of which move the
+// recognizer's media clock relative to the wall.
+//
+// For finals it additionally splits the total into upload / recognize /
+// assemble phases using SentAt and publishedAt, when both are available.
+func (s *session) observeLatency(t stt.Transcript, publishedAt time.Time) {
+	// An empty Text excludes Deepgram's synthetic UtteranceEnd, which carries
+	// no media range: idx.At(0) can resolve an unrelated capture instant, and
+	// recording that as a latency sample would be pure noise. This used to be
+	// harmless only because UtteranceEnd has IsFinal == false and the old
+	// filter dropped every interim.
+	if t.ReceivedAt.IsZero() || t.CapturedAt.IsZero() || t.Text == "" {
 		return
 	}
-	s.met.ObserveLatency(t.ReceivedAt.Sub(t.CapturedAt))
+	d := t.ReceivedAt.Sub(t.CapturedAt)
+	if !t.IsFinal {
+		s.met.ObserveInterimLatency(d)
+		return
+	}
+	s.met.ObserveLatency(d)
+
+	// The phase split needs SentAt as well; without it the total above is
+	// still sound, we just can't attribute it.
+	if t.SentAt.IsZero() || publishedAt.IsZero() {
+		return
+	}
+	// upload + recognize + assemble must exactly equal publishedAt - CapturedAt:
+	// the stacked bar on /admin sits directly under the headline total, so any
+	// drift between them would be visible and wrong. Note the phase total
+	// spans CapturedAt->publishedAt while the headline final latency above
+	// spans CapturedAt->ReceivedAt — that's intended, the bar shows one stage
+	// further than the headline.
+	s.met.ObservePhases(
+		t.SentAt.Sub(t.CapturedAt),
+		t.ReceivedAt.Sub(t.SentAt),
+		publishedAt.Sub(t.ReceivedAt),
+	)
 }
 
 // shutdown tears everything down and prints the summary. Called on the way out

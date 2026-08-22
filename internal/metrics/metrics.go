@@ -98,16 +98,90 @@ type Metrics struct {
 	sttPauseStart  time.Time     // zero when no pause is currently open
 	sttPausedTotal time.Duration // accumulated from completed pauses only
 	transcriptErr  string
-	latency        []time.Duration // ring of the most recent samples
-	latencyIdx     int
-	latencyMax     time.Duration
-	latencyLast    time.Duration
+	latFinal       latencySeries // finals: the headline figure
+	latInterim     latencySeries // interims: what a viewer actually sees first
+	latViewer      latencySeries // browser-reported publish->paint, POSTed by viewers
+	latUpload      latencySeries // CapturedAt -> released to the recognizer's socket
+	latRecognize   latencySeries // released -> ReceivedAt
+	latAssemble    latencySeries // ReceivedAt -> hub publish
 	mediaProcessed time.Duration
 	mediaTotal     time.Duration // 0 for live (unknown length)
 	lastDegradedAt time.Time     // zero until the first silent-degradation event
+
+	viewerReports atomic.Int64
 }
 
-const latencyRing = 512
+// latencySample pairs a measurement with when it was taken, so the series can
+// age samples out instead of only bounding them by count.
+type latencySample struct {
+	d  time.Duration
+	at time.Time
+}
+
+// latencySeries is a time-windowed FIFO of latency samples. Percentiles and
+// max describe the window, not the session: the pre-roll flush after an
+// auto-pause resume is a true reading of that audio's latency, but it must not
+// go on defining p95 and max for the next half hour.
+type latencySeries struct {
+	samples []latencySample // ascending by at
+}
+
+// observe appends a sample and trims the series to the current window.
+// Negative durations are rejected the same way the old ring rejected them:
+// a clock skew or ordering hiccup upstream must not corrupt the figures
+// operators are reading live.
+func (s *latencySeries) observe(d time.Duration, now time.Time) {
+	if d < 0 {
+		return
+	}
+	s.samples = append(s.samples, latencySample{d, now})
+	s.trim(now)
+}
+
+// trim drops samples older than latencyWindow, then caps the remainder at
+// latencyCap, compacting the backing array in place so it can't grow without
+// bound across a long session.
+func (s *latencySeries) trim(now time.Time) {
+	i := 0
+	for i < len(s.samples) && now.Sub(s.samples[i].at) > latencyWindow {
+		i++
+	}
+	if len(s.samples)-i > latencyCap {
+		i = len(s.samples) - latencyCap
+	}
+	if i > 0 {
+		s.samples = append(s.samples[:0], s.samples[i:]...)
+	}
+}
+
+// stats trims to the current window and returns the figures /admin reads:
+// last is the most recent retained sample, p50/p95/max describe the window,
+// and n is how many samples it holds.
+func (s *latencySeries) stats(now time.Time) (last, p50, p95, max time.Duration, n int) {
+	s.trim(now)
+	n = len(s.samples)
+	if n == 0 {
+		return 0, 0, 0, 0, 0
+	}
+	last = s.samples[n-1].d
+	sorted := make([]time.Duration, n)
+	for i, samp := range s.samples {
+		sorted[i] = samp.d
+	}
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	p50 = percentile(sorted, 0.50)
+	p95 = percentile(sorted, 0.95)
+	max = sorted[n-1]
+	return last, p50, p95, max, n
+}
+
+// latencyWindow is how far back the latency figures look. Long enough for a
+// stable p95 at realistic final rates (~15/min, so ~75 samples), short enough
+// that a spike doesn't outlive the part of the event it happened in.
+const latencyWindow = 5 * time.Minute
+
+// latencyCap bounds memory regardless of sample rate.
+const latencyCap = 512
 
 // degradedWindow is how long a silent-degradation event keeps the /admin
 // health badge at "degraded" after it happens. A ring eviction or a
@@ -122,7 +196,6 @@ func New(version, sessionID string) *Metrics {
 		Version:   version,
 		SessionID: sessionID,
 		StartedAt: time.Now(),
-		latency:   make([]time.Duration, 0, latencyRing),
 	}
 }
 
@@ -264,23 +337,52 @@ func (m *Metrics) STTPauseEnd() {
 	m.sttPauseStart = time.Time{}
 }
 
-// ObserveLatency records how far behind wall clock a caption arrived.
+// ObserveLatency records how far behind wall clock a final caption arrived —
+// the headline figure.
 func (m *Metrics) ObserveLatency(d time.Duration) {
+	m.mu.Lock()
+	m.latFinal.observe(d, time.Now())
+	m.mu.Unlock()
+}
+
+// ObserveInterimLatency records how far behind wall clock an interim caption
+// arrived — what a viewer actually sees first, before the final replaces it.
+func (m *Metrics) ObserveInterimLatency(d time.Duration) {
+	m.mu.Lock()
+	m.latInterim.observe(d, time.Now())
+	m.mu.Unlock()
+}
+
+// ObserveViewerLatency records a browser-reported publish->paint span, POSTed
+// by the viewer itself, and counts it toward viewerReports so the two figures
+// can never disagree about how many reports were accepted.
+func (m *Metrics) ObserveViewerLatency(d time.Duration) {
 	if d < 0 {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.latencyLast = d
-	if d > m.latencyMax {
-		m.latencyMax = d
-	}
-	if len(m.latency) < latencyRing {
-		m.latency = append(m.latency, d)
+	m.latViewer.observe(d, time.Now())
+	m.mu.Unlock()
+	m.viewerReports.Add(1)
+}
+
+// ObservePhases records the three-way split of one transcript's pipeline
+// latency: upload (CapturedAt -> released to the recognizer's socket),
+// recognize (released -> ReceivedAt) and assemble (ReceivedAt -> hub
+// publish). All three are recorded under one lock with one timestamp so the
+// series can never hold samples from different transcripts, and all three are
+// dropped together if any is negative — a partial split would let the
+// stacked bar on /admin disagree with the total it sits under.
+func (m *Metrics) ObservePhases(upload, recognize, assemble time.Duration) {
+	if upload < 0 || recognize < 0 || assemble < 0 {
 		return
 	}
-	m.latency[m.latencyIdx] = d
-	m.latencyIdx = (m.latencyIdx + 1) % latencyRing
+	now := time.Now()
+	m.mu.Lock()
+	m.latUpload.observe(upload, now)
+	m.latRecognize.observe(recognize, now)
+	m.latAssemble.observe(assemble, now)
+	m.mu.Unlock()
 }
 
 // --- Web ---
@@ -370,8 +472,32 @@ type Snapshot struct {
 		LatencyP95   float64 `json:"latency_p95_ms"`
 		LatencyMax   float64 `json:"latency_max_ms"`
 		LatencyCount int     `json:"latency_samples"`
-		Pauses       int64   `json:"pauses_total"`
-		PausedSec    float64 `json:"paused_sec"`
+
+		InterimLatencyLast  float64 `json:"interim_latency_last_ms"`
+		InterimLatencyP50   float64 `json:"interim_latency_p50_ms"`
+		InterimLatencyP95   float64 `json:"interim_latency_p95_ms"`
+		InterimLatencyMax   float64 `json:"interim_latency_max_ms"`
+		InterimLatencyCount int     `json:"interim_latency_samples"`
+
+		UploadLatencyLast float64 `json:"upload_latency_last_ms"`
+		UploadLatencyP50  float64 `json:"upload_latency_p50_ms"`
+		UploadLatencyP95  float64 `json:"upload_latency_p95_ms"`
+		UploadLatencyMax  float64 `json:"upload_latency_max_ms"`
+
+		RecognizeLatencyLast float64 `json:"recognize_latency_last_ms"`
+		RecognizeLatencyP50  float64 `json:"recognize_latency_p50_ms"`
+		RecognizeLatencyP95  float64 `json:"recognize_latency_p95_ms"`
+		RecognizeLatencyMax  float64 `json:"recognize_latency_max_ms"`
+
+		AssembleLatencyLast float64 `json:"assemble_latency_last_ms"`
+		AssembleLatencyP50  float64 `json:"assemble_latency_p50_ms"`
+		AssembleLatencyP95  float64 `json:"assemble_latency_p95_ms"`
+		AssembleLatencyMax  float64 `json:"assemble_latency_max_ms"`
+
+		PhaseLatencyCount int `json:"phase_latency_samples"`
+
+		Pauses    int64   `json:"pauses_total"`
+		PausedSec float64 `json:"paused_sec"`
 	} `json:"stt"`
 
 	Web struct {
@@ -379,6 +505,13 @@ type Snapshot struct {
 		ClientsTotal int64 `json:"sse_clients_total"`
 		Events       int64 `json:"events_total"`
 		SlowDrops    int64 `json:"slow_disconnects_total"`
+
+		ViewerLatencyLast  float64 `json:"viewer_latency_last_ms"`
+		ViewerLatencyP50   float64 `json:"viewer_latency_p50_ms"`
+		ViewerLatencyP95   float64 `json:"viewer_latency_p95_ms"`
+		ViewerLatencyMax   float64 `json:"viewer_latency_max_ms"`
+		ViewerLatencyCount int     `json:"viewer_latency_samples"`
+		ViewerReports      int64   `json:"viewer_reports_total"`
 	} `json:"web"`
 
 	Transcript struct {
@@ -411,16 +544,23 @@ func (s *Snapshot) Clean() bool {
 }
 
 func (m *Metrics) Snapshot() Snapshot {
-	m.mu.RLock()
-	lat := make([]time.Duration, len(m.latency))
-	copy(lat, m.latency)
+	// Full Lock, not RLock: stats() calls trim() on each series, which
+	// mutates it. Trimming on read is what makes an idle session's window
+	// actually empty out, rather than showing stale figures forever.
+	m.mu.Lock()
+	now := time.Now()
+	finalLast, finalP50, finalP95, finalMax, finalN := m.latFinal.stats(now)
+	interimLast, interimP50, interimP95, interimMax, interimN := m.latInterim.stats(now)
+	viewerLast, viewerP50, viewerP95, viewerMax, viewerN := m.latViewer.stats(now)
+	uploadLast, uploadP50, uploadP95, uploadMax, uploadN := m.latUpload.stats(now)
+	recognizeLast, recognizeP50, recognizeP95, recognizeMax, _ := m.latRecognize.stats(now)
+	assembleLast, assembleP50, assembleP95, assembleMax, _ := m.latAssemble.stats(now)
 	lastStderr, sttErr, sttErrAt := m.lastStderr, m.sttLastErr, m.sttLastErrAt
 	transErr := m.transcriptErr
-	latMax, latLast := m.latencyMax, m.latencyLast
 	processed, total := m.mediaProcessed, m.mediaTotal
 	pauseStart, pausedTotal := m.sttPauseStart, m.sttPausedTotal
 	lastDegradedAt := m.lastDegradedAt
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	// A pause still in progress must count toward PausedSec so a long pause
 	// shows live on /admin rather than only jumping once it ends.
@@ -463,18 +603,39 @@ func (m *Metrics) Snapshot() Snapshot {
 	if !sttErrAt.IsZero() {
 		s.STT.LastErrorAt = sttErrAt.Format(time.RFC3339)
 	}
-	s.STT.LatencyLast = ms(latLast)
-	s.STT.LatencyMax = ms(latMax)
-	s.STT.LatencyCount = len(lat)
+	s.STT.LatencyLast = ms(finalLast)
+	s.STT.LatencyP50 = ms(finalP50)
+	s.STT.LatencyP95 = ms(finalP95)
+	s.STT.LatencyMax = ms(finalMax)
+	s.STT.LatencyCount = finalN
+
+	s.STT.InterimLatencyLast = ms(interimLast)
+	s.STT.InterimLatencyP50 = ms(interimP50)
+	s.STT.InterimLatencyP95 = ms(interimP95)
+	s.STT.InterimLatencyMax = ms(interimMax)
+	s.STT.InterimLatencyCount = interimN
+
+	s.STT.UploadLatencyLast = ms(uploadLast)
+	s.STT.UploadLatencyP50 = ms(uploadP50)
+	s.STT.UploadLatencyP95 = ms(uploadP95)
+	s.STT.UploadLatencyMax = ms(uploadMax)
+
+	s.STT.RecognizeLatencyLast = ms(recognizeLast)
+	s.STT.RecognizeLatencyP50 = ms(recognizeP50)
+	s.STT.RecognizeLatencyP95 = ms(recognizeP95)
+	s.STT.RecognizeLatencyMax = ms(recognizeMax)
+
+	s.STT.AssembleLatencyLast = ms(assembleLast)
+	s.STT.AssembleLatencyP50 = ms(assembleP50)
+	s.STT.AssembleLatencyP95 = ms(assembleP95)
+	s.STT.AssembleLatencyMax = ms(assembleMax)
+
+	// The three phase series are always observed together under one lock in
+	// ObservePhases, so they have equal length by construction.
+	s.STT.PhaseLatencyCount = uploadN
+
 	s.STT.Pauses = m.sttPauses.Load()
 	s.STT.PausedSec = pausedTotal.Seconds()
-	if len(lat) > 0 {
-		sorted := make([]time.Duration, len(lat))
-		copy(sorted, lat)
-		sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-		s.STT.LatencyP50 = ms(percentile(sorted, 0.50))
-		s.STT.LatencyP95 = ms(percentile(sorted, 0.95))
-	}
 
 	// Health is resolved after STT.State: a closed or paused connection is
 	// reported as exactly that rather than "degraded", even if a drop
@@ -508,6 +669,13 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.Web.ClientsTotal = m.sseClientsTotal.Load()
 	s.Web.Events = m.sseEvents.Load()
 	s.Web.SlowDrops = m.sseSlowDrops.Load()
+
+	s.Web.ViewerLatencyLast = ms(viewerLast)
+	s.Web.ViewerLatencyP50 = ms(viewerP50)
+	s.Web.ViewerLatencyP95 = ms(viewerP95)
+	s.Web.ViewerLatencyMax = ms(viewerMax)
+	s.Web.ViewerLatencyCount = viewerN
+	s.Web.ViewerReports = m.viewerReports.Load()
 
 	s.Transcript.Path = m.TranscriptPath
 	s.Transcript.Lines = m.transcriptLine.Load()

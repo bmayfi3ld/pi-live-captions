@@ -56,6 +56,13 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 		emit := func(t stt.Transcript) bool {
 			t.ReceivedAt = time.Now()
 			t.CapturedAt = frame.CapturedAt
+			// The mock has no upload phase, so SentAt == CapturedAt makes the
+			// upload span zero by construction and recognition absorb the
+			// whole (near-zero) span. That keeps the replay/mock dev loop on
+			// the same phase-recording code path as production, which
+			// matters: see specs/ for S2, a latency bug that hid for weeks
+			// because the dev loop skipped the real upload path.
+			t.SentAt = frame.CapturedAt
 			select {
 			case out <- t:
 				return true

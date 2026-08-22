@@ -847,4 +847,16 @@ loop:
 			"~1.5s gap before resume means connection 2 read connection 1's stale anchor "+
 			"instead of its own", delta)
 	}
+	if got.SentAt.IsZero() {
+		t.Fatal("SentAt was not stamped on the post-resume final")
+	}
+	// SentAt must fall between the chunk's CapturedAt and the transcript's
+	// ReceivedAt: it marks the moment between those two that the audio was
+	// handed to the socket, so it can only order between them.
+	if got.SentAt.Before(got.CapturedAt) {
+		t.Errorf("SentAt = %v is before CapturedAt = %v, want SentAt >= CapturedAt", got.SentAt, got.CapturedAt)
+	}
+	if got.SentAt.After(got.ReceivedAt) {
+		t.Errorf("SentAt = %v is after ReceivedAt = %v, want SentAt <= ReceivedAt", got.SentAt, got.ReceivedAt)
+	}
 }

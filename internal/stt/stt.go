@@ -30,6 +30,11 @@ type Transcript struct {
 	// pipeline. Zero when the engine could not resolve it; latency is then simply
 	// not recorded, because a wrong number is worse than no number.
 	CapturedAt time.Time
+	// SentAt is when the audio this transcript covers was released to the
+	// recognizer's socket. Together with CapturedAt and ReceivedAt it splits
+	// total latency into upload / recognition phases. Zero when the engine
+	// could not resolve it, in which case the split is simply not recorded.
+	SentAt time.Time
 }
 
 // End is the media time of the last sample this transcript covers.

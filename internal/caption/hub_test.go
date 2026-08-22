@@ -159,6 +159,33 @@ func TestSnapshotForLateJoiner(t *testing.T) {
 	}
 }
 
+// TestInterimEventCarriesAt guards against interim and status events shipping
+// with a zero At: a viewer needs At on interims to measure its own
+// publish->paint latency, since interims are what it sees first.
+func TestInterimEventCarriesAt(t *testing.T) {
+	h := NewHub(metrics.New("test", "test"))
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub) // discard the initial snapshot
+
+	h.Publish(stt.Transcript{Text: "in progress", Start: time.Second})
+
+	events := drain(sub)
+	var found bool
+	for _, ev := range events {
+		if ev.Kind != KindInterim {
+			continue
+		}
+		found = true
+		if ev.At.IsZero() {
+			t.Errorf("interim event At is zero, want a publish instant")
+		}
+	}
+	if !found {
+		t.Fatal("expected at least one interim event")
+	}
+}
+
 // TestHistoryIsBounded stops a long event from growing memory without limit.
 func TestHistoryIsBounded(t *testing.T) {
 	h := NewHub(metrics.New("test", "test"))

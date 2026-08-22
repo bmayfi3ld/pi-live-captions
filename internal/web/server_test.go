@@ -2,6 +2,7 @@ package web
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -447,6 +448,150 @@ func TestWakeVideoServedWithContentType(t *testing.T) {
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "video/mp4" {
 		t.Errorf("Content-Type = %q, want video/mp4", ct)
+	}
+}
+
+// TestAPITimeReturnsParseableRFC3339Nano covers the sole contract the viewer
+// depends on for its clock-offset estimate: the body decodes and "now"
+// parses as RFC3339Nano. A malformed or wrongly-formatted timestamp here
+// would silently poison every downstream viewer-latency measurement rather
+// than fail loudly, so this is the one thing worth pinning.
+func TestAPITimeReturnsParseableRFC3339Nano(t *testing.T) {
+	base, _, _ := startTestServer(t, newTestConfig())
+	resp, err := http.Get(base + "/api/time")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var got struct {
+		Now string `json:"now"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, got.Now); err != nil {
+		t.Errorf("now = %q does not parse as RFC3339Nano: %v", got.Now, err)
+	}
+}
+
+// TestViewerLatencyAcceptsValidReport covers the success path end to end:
+// a valid POST returns 204 and the value actually reaches the metrics the
+// admin page reads, via the same Snapshot() the rest of the surface uses.
+func TestViewerLatencyAcceptsValidReport(t *testing.T) {
+	base, _, m := startTestServer(t, newTestConfig())
+	resp, err := http.Post(base+"/api/viewer-latency", "application/json", strings.NewReader(`{"paint_ms": 123.5}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", resp.StatusCode)
+	}
+	snap := m.Snapshot()
+	if snap.Web.ViewerLatencyLast != 123.5 {
+		t.Errorf("viewer_latency_last_ms = %v, want 123.5", snap.Web.ViewerLatencyLast)
+	}
+	if snap.Web.ViewerLatencyCount != 1 {
+		t.Errorf("viewer_latency_samples = %d, want 1", snap.Web.ViewerLatencyCount)
+	}
+	if snap.Web.ViewerReports != 1 {
+		t.Errorf("viewer_reports_total = %d, want 1", snap.Web.ViewerReports)
+	}
+}
+
+// TestViewerLatencyRejectsBadReports is the guard-rail table: every shape of
+// bad input the endpoint must reject with 400, each leaving the metrics
+// untouched — an unauthenticated LAN endpoint must not let a malformed or
+// hostile body poison the p95 every viewer's paint figure feeds into.
+func TestViewerLatencyRejectsBadReports(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"malformed JSON", `{"paint_ms": `},
+		{"negative", `{"paint_ms": -1}`},
+		{"over max", `{"paint_ms": 60001}`},
+		// Go's json decoder rejects 1e999 outright (strconv.ParseFloat
+		// returns ErrRange, which encoding/json surfaces as a decode error)
+		// rather than rounding it to +Inf, so this exercises the same
+		// "malformed body" branch as truncated JSON above, not the
+		// IsInf/IsNaN guard.
+		{"overflow to Inf", `{"paint_ms": 1e999}`},
+		// A bare NaN token is not valid JSON syntax at all (JSON has no
+		// NaN/Infinity literals), so this fails at tokenizing, again via the
+		// "malformed body" branch rather than the IsNaN guard.
+		{"NaN literal", `{"paint_ms": NaN}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, _, m := startTestServer(t, newTestConfig())
+			resp, err := http.Post(base+"/api/viewer-latency", "application/json", strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", resp.StatusCode)
+			}
+			snap := m.Snapshot()
+			if snap.Web.ViewerLatencyCount != 0 {
+				t.Errorf("viewer_latency_samples = %d, want 0", snap.Web.ViewerLatencyCount)
+			}
+		})
+	}
+}
+
+// TestViewerLatencyWrongMethodRejected confirms the route is registered
+// POST-only. Go 1.22+'s ServeMux normally answers a method mismatch with
+// 405, but only when nothing else matches the path; this codebase also
+// registers a catch-all "GET /" (pageHandler, serving index.html or 404 for
+// an unknown path), which is itself a valid match for a GET request and
+// therefore wins before the mux's 405 logic ever triggers — confirmed with
+// a standalone net/http/httptest repro alongside this route both with and
+// without a catch-all present. So GET /api/viewer-latency actually reaches
+// pageHandler and gets its 404, not a 405 from the mux. Either way, the
+// point of this test — a GET must not be treated as a valid latency
+// report — holds, so it's asserted directly rather than pinned to 405.
+func TestViewerLatencyWrongMethodRejected(t *testing.T) {
+	base, _, m := startTestServer(t, newTestConfig())
+	resp, err := http.Get(base + "/api/viewer-latency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		t.Errorf("status = %d, want anything but 204 — a GET must never be accepted as a report", resp.StatusCode)
+	}
+	snap := m.Snapshot()
+	if snap.Web.ViewerLatencyCount != 0 {
+		t.Errorf("viewer_latency_samples = %d, want 0 after a GET", snap.Web.ViewerLatencyCount)
+	}
+}
+
+// TestViewerLatencyOversizedBodyRejected proves the MaxBytesReader guard is
+// actually wired up: a body past the 4 KiB cap must be rejected rather than
+// read into memory, which matters because this endpoint has no auth on a
+// LAN and is reachable by anything that can send it a request.
+func TestViewerLatencyOversizedBodyRejected(t *testing.T) {
+	base, _, m := startTestServer(t, newTestConfig())
+	// Pad well past the 4 KiB cap with a value that would otherwise be
+	// perfectly valid JSON, so a pass here can only be explained by the
+	// size limit, not by the value/shape guards.
+	huge := `{"paint_ms": 1, "pad": "` + strings.Repeat("x", 8192) + `"}`
+	resp, err := http.Post(base+"/api/viewer-latency", "application/json", bytes.NewReader([]byte(huge)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", resp.StatusCode)
+	}
+	snap := m.Snapshot()
+	if snap.Web.ViewerLatencyCount != 0 {
+		t.Errorf("viewer_latency_samples = %d, want 0", snap.Web.ViewerLatencyCount)
 	}
 }
 

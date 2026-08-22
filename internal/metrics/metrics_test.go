@@ -35,8 +35,10 @@ func TestPercentiles(t *testing.T) {
 
 // TestLatencyLastTracksIndependentlyOfMax guards a real distinction the
 // status line renders side by side ("lat 340ms p95 610ms"): Last is the most
-// recent sample, Max is the worst ever seen, and a smaller sample arriving
-// after a spike must not erase the spike from Max.
+// recent sample, Max is the worst still inside the window, and a smaller
+// sample arriving after a spike must not erase the spike from Max. Max ages
+// out with the window (see TestLatencySeriesEvictsSamplesOutsideWindow); what
+// it must never do is decay just because a quieter sample followed.
 func TestLatencyLastTracksIndependentlyOfMax(t *testing.T) {
 	m := New("v", "s")
 	m.ObserveLatency(400 * time.Millisecond) // the spike
@@ -51,31 +53,191 @@ func TestLatencyLastTracksIndependentlyOfMax(t *testing.T) {
 	}
 }
 
-// TestLatencyRingStaysBoundedAfterWrap is the property that keeps a
-// multi-hour session from growing memory without limit: the ring holds only
-// the most recent latencyRing samples, and percentiles computed after
-// wrapping must still describe that recent window, not stale history.
-func TestLatencyRingStaysBoundedAfterWrap(t *testing.T) {
+// TestLatencySeriesEvictsSamplesOutsideWindow guards the core property of the
+// windowed series: a sample old enough to fall outside latencyWindow is gone
+// not just from the count but from max too, so a spike from half an hour ago
+// can't go on defining the badge forever.
+func TestLatencySeriesEvictsSamplesOutsideWindow(t *testing.T) {
 	m := New("v", "s")
-	const total = latencyRing + 88 // wrap partway through a second pass
+	m.ObserveLatency(900 * time.Millisecond) // the old spike, to be aged out
+	m.ObserveLatency(10 * time.Millisecond)  // a retained, ordinary sample
+
+	// Back-date the spike (and only the spike) past the window.
+	m.mu.Lock()
+	m.latFinal.samples[0].at = time.Now().Add(-latencyWindow - time.Second)
+	m.mu.Unlock()
+
+	snap := m.Snapshot()
+	if snap.STT.LatencyCount != 1 {
+		t.Fatalf("count = %d, want 1 (stale sample must be evicted)", snap.STT.LatencyCount)
+	}
+	if got, want := snap.STT.LatencyMax, 10.0; got != want {
+		t.Errorf("max = %v, want %v (the aged-out spike must not still define max)", got, want)
+	}
+	if got, want := snap.STT.LatencyLast, 10.0; got != want {
+		t.Errorf("last = %v, want %v", got, want)
+	}
+	if got, want := snap.STT.LatencyP50, 10.0; got != want {
+		t.Errorf("p50 = %v, want %v", got, want)
+	}
+}
+
+// TestLatencySeriesCapsBurstInsideWindow checks the other bound: even when
+// every sample is fresh, a burst larger than latencyCap is still capped, so a
+// pathological rate can't grow memory without limit.
+func TestLatencySeriesCapsBurstInsideWindow(t *testing.T) {
+	m := New("v", "s")
+	const total = latencyCap + 88 // wrap partway through a second pass
 	for i := 1; i <= total; i++ {
 		m.ObserveLatency(time.Duration(i) * time.Millisecond)
 	}
 
 	snap := m.Snapshot()
-	if snap.STT.LatencyCount != latencyRing {
-		t.Fatalf("ring holds %d samples, want capped at %d", snap.STT.LatencyCount, latencyRing)
+	if snap.STT.LatencyCount != latencyCap {
+		t.Fatalf("series holds %d samples, want capped at %d", snap.STT.LatencyCount, latencyCap)
 	}
-	// Max is tracked outside the ring, so it must survive the wrap even
-	// though the sample that set it may have been evicted.
 	if got, want := snap.STT.LatencyMax, float64(total); got != want {
 		t.Errorf("max = %v, want %v", got, want)
 	}
-	// The ring now holds exactly {total-latencyRing+1 .. total}.
-	first := total - latencyRing + 1
-	wantP50 := float64(first + latencyRing/2)
+	// The series now holds exactly {total-latencyCap+1 .. total}.
+	first := total - latencyCap + 1
+	wantP50 := float64(first + latencyCap/2)
 	if got := snap.STT.LatencyP50; got != wantP50 {
-		t.Errorf("p50 after wrap = %v, want %v", got, wantP50)
+		t.Errorf("p50 after cap = %v, want %v", got, wantP50)
+	}
+}
+
+// TestLatencySeriesBackingArrayDoesNotGrowUnbounded guards the compaction in
+// trim: many observe+trim cycles, each aging out everything before it, must
+// not let the backing array's capacity climb forever.
+func TestLatencySeriesBackingArrayDoesNotGrowUnbounded(t *testing.T) {
+	m := New("v", "s")
+
+	for i := 0; i < 5000; i++ {
+		m.ObserveLatency(time.Duration(i) * time.Millisecond)
+		// Age every sample observed so far out of the window before the next
+		// one lands, forcing trim to compact on every call.
+		m.mu.Lock()
+		for j := range m.latFinal.samples {
+			m.latFinal.samples[j].at = time.Now().Add(-latencyWindow - time.Second)
+		}
+		arrCap := cap(m.latFinal.samples)
+		m.mu.Unlock()
+		if arrCap > latencyCap+1 {
+			t.Fatalf("iteration %d: backing array cap = %d, want bounded near latencyCap (%d)", i, arrCap, latencyCap)
+		}
+	}
+}
+
+// TestLatencySeriesIdleSessionEmpties checks that a window with nothing
+// recent in it reports as genuinely empty on Snapshot, not stale figures from
+// samples that happened to still be sitting in the slice.
+func TestLatencySeriesIdleSessionEmpties(t *testing.T) {
+	m := New("v", "s")
+	m.ObserveLatency(50 * time.Millisecond)
+	m.ObserveLatency(75 * time.Millisecond)
+
+	m.mu.Lock()
+	for i := range m.latFinal.samples {
+		m.latFinal.samples[i].at = time.Now().Add(-latencyWindow - time.Second)
+	}
+	m.mu.Unlock()
+
+	snap := m.Snapshot()
+	if snap.STT.LatencyCount != 0 {
+		t.Fatalf("count = %d, want 0 once every sample has aged out", snap.STT.LatencyCount)
+	}
+	if snap.STT.LatencyLast != 0 || snap.STT.LatencyP50 != 0 || snap.STT.LatencyP95 != 0 || snap.STT.LatencyMax != 0 {
+		t.Errorf("figures should all read 0 once idle, got last=%v p50=%v p95=%v max=%v",
+			snap.STT.LatencyLast, snap.STT.LatencyP50, snap.STT.LatencyP95, snap.STT.LatencyMax)
+	}
+}
+
+// TestFinalAndInterimLatencyAreIndependent guards the split: a sample fed to
+// one series must never leak into the other's percentiles.
+func TestFinalAndInterimLatencyAreIndependent(t *testing.T) {
+	m := New("v", "s")
+	m.ObserveLatency(100 * time.Millisecond)
+	m.ObserveInterimLatency(20 * time.Millisecond)
+	m.ObserveInterimLatency(30 * time.Millisecond)
+
+	snap := m.Snapshot()
+	if snap.STT.LatencyCount != 1 || snap.STT.LatencyLast != 100.0 {
+		t.Errorf("final series = count %d last %v, want count 1 last 100", snap.STT.LatencyCount, snap.STT.LatencyLast)
+	}
+	if snap.STT.InterimLatencyCount != 2 || snap.STT.InterimLatencyLast != 30.0 {
+		t.Errorf("interim series = count %d last %v, want count 2 last 30", snap.STT.InterimLatencyCount, snap.STT.InterimLatencyLast)
+	}
+}
+
+// TestObserveViewerLatencyFeedsWebAndCountsReports checks the browser-
+// reported publish->paint span lands in Web.ViewerLatency* and that
+// viewer_reports_total agrees with the series' own count, since both are
+// meant to describe the same accepted samples.
+func TestObserveViewerLatencyFeedsWebAndCountsReports(t *testing.T) {
+	m := New("v", "s")
+	m.ObserveViewerLatency(40 * time.Millisecond)
+	m.ObserveViewerLatency(60 * time.Millisecond)
+	m.ObserveViewerLatency(-5 * time.Millisecond) // rejected: must not count
+
+	snap := m.Snapshot()
+	if snap.Web.ViewerLatencyCount != 2 {
+		t.Errorf("viewer latency count = %d, want 2", snap.Web.ViewerLatencyCount)
+	}
+	if snap.Web.ViewerLatencyLast != 60.0 {
+		t.Errorf("viewer latency last = %v, want 60", snap.Web.ViewerLatencyLast)
+	}
+	if snap.Web.ViewerReports != 2 {
+		t.Errorf("viewer reports total = %d, want 2 (must match accepted samples)", snap.Web.ViewerReports)
+	}
+}
+
+// TestObservePhasesIsAllOrNothingOnNegative pins the stacked-bar invariant: a
+// negative argument in any one phase must drop all three, never just the bad
+// one, so the three series can never disagree about how many transcripts
+// they've split.
+func TestObservePhasesIsAllOrNothingOnNegative(t *testing.T) {
+	m := New("v", "s")
+	m.ObservePhases(10*time.Millisecond, 20*time.Millisecond, 30*time.Millisecond)
+	m.ObservePhases(-1*time.Millisecond, 20*time.Millisecond, 30*time.Millisecond) // rejected whole
+
+	snap := m.Snapshot()
+	if snap.STT.PhaseLatencyCount != 1 {
+		t.Fatalf("phase latency count = %d, want 1 (the negative call must be dropped entirely)", snap.STT.PhaseLatencyCount)
+	}
+	if snap.STT.UploadLatencyLast != 10.0 || snap.STT.RecognizeLatencyLast != 20.0 || snap.STT.AssembleLatencyLast != 30.0 {
+		t.Errorf("phase lasts = upload %v recognize %v assemble %v, want 10/20/30",
+			snap.STT.UploadLatencyLast, snap.STT.RecognizeLatencyLast, snap.STT.AssembleLatencyLast)
+	}
+}
+
+// TestObservePhasesAcceptsZero checks the boundary of the negative guard:
+// zero is a legitimate (if suspiciously fast) span and must be recorded, not
+// treated as invalid like a true negative.
+func TestObservePhasesAcceptsZero(t *testing.T) {
+	m := New("v", "s")
+	m.ObservePhases(0, 0, 0)
+
+	snap := m.Snapshot()
+	if snap.STT.PhaseLatencyCount != 1 {
+		t.Errorf("phase latency count = %d, want 1 (zero spans are valid)", snap.STT.PhaseLatencyCount)
+	}
+}
+
+// TestObserveLatencyRejectsNegativeAcceptsZero guards the boundary the old
+// ring also enforced: a negative sample (clock skew, ordering hiccup) must
+// never reach the series, while zero is a legitimate observation.
+func TestObserveLatencyRejectsNegativeAcceptsZero(t *testing.T) {
+	m := New("v", "s")
+	m.ObserveLatency(-1 * time.Millisecond)
+	m.ObserveLatency(0)
+
+	snap := m.Snapshot()
+	if snap.STT.LatencyCount != 1 {
+		t.Fatalf("count = %d, want 1 (negative sample must be dropped, zero must be kept)", snap.STT.LatencyCount)
+	}
+	if snap.STT.LatencyLast != 0 {
+		t.Errorf("last = %v, want 0", snap.STT.LatencyLast)
 	}
 }
 
@@ -316,6 +478,9 @@ func TestConcurrentAccessIsRaceFree(t *testing.T) {
 				m.STTBytesSent(10)
 				m.SetSTTError(errors.New("blip"))
 				m.ObserveLatency(time.Duration(i) * time.Millisecond)
+				m.ObserveInterimLatency(time.Duration(i) * time.Millisecond)
+				m.ObserveViewerLatency(time.Duration(i) * time.Millisecond)
+				m.ObservePhases(time.Duration(i)*time.Millisecond, time.Duration(i)*time.Millisecond, time.Duration(i)*time.Millisecond)
 				m.SSEConnect()
 				m.SSEDisconnect()
 				m.SSEEvent()

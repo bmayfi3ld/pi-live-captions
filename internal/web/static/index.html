@@ -278,6 +278,92 @@
   var statusLabel = statusEl.querySelector(".label");
   var debugEl = document.getElementById("debug");
 
+  // ---- clock offset estimation ----
+  // ev.at is the server's own wall clock; comparing it against this page's
+  // Date.now() without correction would measure the phone's clock skew
+  // (routinely seconds off on a device that's never synced NTP) instead of
+  // the network-plus-render latency the viewer-latency figure is meant to
+  // capture. Standard NTP-style measurement: t0/t1 bracket the round trip,
+  // the midpoint approximates when the server's clock read serverNow, and
+  // among several samples the lowest RTT is kept because the shortest round
+  // trip has the least asymmetry between the two legs, and is therefore the
+  // least biased estimate of the offset.
+  var clockOffsetMs = 0;
+  var clockOffsetKnown = false;
+  var clockOffsetRTT = Infinity;
+
+  function sampleClockOffset() {
+    var t0 = Date.now();
+    fetch("/api/time").then(function (r) { return r.json(); }).then(function (body) {
+      var t1 = Date.now();
+      var rtt = t1 - t0;
+      var serverNow = Date.parse(body && body.now);
+      if (isNaN(serverNow) || rtt >= clockOffsetRTT) return;
+      clockOffsetRTT = rtt;
+      clockOffsetMs = serverNow - (t0 + t1) / 2;
+      clockOffsetKnown = true;
+    }).catch(function () { /* offline: keep the last known offset rather than guessing */ });
+  }
+
+  var CLOCK_STARTUP_SAMPLES = 5;
+  for (var clockI = 0; clockI < CLOCK_STARTUP_SAMPLES; clockI++) {
+    setTimeout(sampleClockOffset, clockI * 150);
+  }
+  setInterval(sampleClockOffset, 60000);
+
+  // ---- viewer paint latency: this page's own measurement of publish->paint,
+  // POSTed back to the server so /admin can show the one leg of the pipeline
+  // the server has no visibility into. Telemetry only — a failure here must
+  // never affect caption rendering, so every step below swallows its errors.
+  var lastViewerPaintMs = NaN; // most recent measurement, shown in the debug overlay regardless of the report throttle below
+  var lastViewerReportAt = 0;
+  var VIEWER_REPORT_MIN_INTERVAL_MS = 1000;
+
+  function sendViewerLatency(paintMs) {
+    var payload = JSON.stringify({ paint_ms: paintMs });
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon("/api/viewer-latency", new Blob([payload], { type: "application/json" }));
+      } else {
+        fetch("/api/viewer-latency", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: payload,
+          keepalive: true
+        }).catch(function () {});
+      }
+    } catch (err) { /* telemetry must never break caption rendering */ }
+  }
+
+  // Called for "final" and "interim" SSE events only — never "snapshot",
+  // whose lines are a catch-up replay stamped with the subscribe instant, so
+  // a paint measurement against it would be measuring nothing real.
+  function schedulePaintReport(ev) {
+    if (!ev || !ev.at) return; // no timestamp to compare against; skip silently
+    var publishedAt = Date.parse(ev.at);
+    if (isNaN(publishedAt)) return;
+    // rAF fires for the first frame after the DOM write applyUtterance just
+    // made, which is what "paint" means here — not the microtask/macrotask
+    // the SSE handler itself runs in.
+    requestAnimationFrame(function () {
+      var paintMs = (Date.now() + clockOffsetMs) - publishedAt;
+      lastViewerPaintMs = paintMs;
+      // Don't report until an offset has actually been measured. Until then
+      // clockOffsetMs is 0, which silently means "assume this phone's clock
+      // agrees with the server's" — and a device running a couple of seconds
+      // BEHIND would produce a plausible-looking multi-second figure that
+      // passes the server's range check and drags the viewer p95 up. A phone
+      // running ahead is harmless by luck (negative, so rejected); this guard
+      // is what makes the other direction safe too. The startup burst settles
+      // within about a second, so this only skips the first event or two.
+      if (!clockOffsetKnown) return;
+      var now = Date.now();
+      if (now - lastViewerReportAt < VIEWER_REPORT_MIN_INTERVAL_MS) return;
+      lastViewerReportAt = now;
+      sendViewerLatency(paintMs);
+    });
+  }
+
   // ---- typesetter state ----
   // ledger is the append-only record of every word ever painted (frozen
   // entries are never touched again). The live tail — the words of the
@@ -690,9 +776,11 @@
         break;
       case "final":
         applyUtterance(ev.text || "", true, true);
+        schedulePaintReport(ev);
         break;
       case "interim":
         applyUtterance(ev.text || "", false, true);
+        schedulePaintReport(ev);
         break;
       case "status":
         hubState = ev.state || null;
@@ -829,6 +917,8 @@
           '<div class="drow"><span class="k">stt state</span><span>' + (stt.state || "—") + '</span></div>' +
           '<div class="drow"><span class="k">latency last</span><span>' + fmtMs(stt.latency_last_ms) + '</span></div>' +
           '<div class="drow"><span class="k">latency p50</span><span>' + fmtMs(stt.latency_p50_ms) + '</span></div>' +
+          '<div class="drow"><span class="k">viewer paint</span><span>' + fmtMs(lastViewerPaintMs) + '</span></div>' +
+          '<div class="drow"><span class="k">clock offset</span><span>' + fmtMs(clockOffsetKnown ? clockOffsetMs : NaN) + '</span></div>' +
           '<div class="drow"><span class="k">stale words</span><span>' + staleCount + '</span></div>' +
           '<div class="drow"><span class="k">wake</span><span>' + wakeDebugText() + '</span></div>';
       }).catch(function () {

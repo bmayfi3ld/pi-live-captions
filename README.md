@@ -122,7 +122,7 @@ beside the connection dot. Query parameters:
 | `?lines=N` | number of caption rows shown (overrides `--lines`) |
 | `?size=N` | base font size in `vw` |
 | `?theme=light` | light theme (default is dark) |
-| `?debug=1` | overlays measured latency |
+| `?debug=1` | overlays measured latency, plus this viewer's own measured publish→paint time and its estimated clock offset from the server |
 | `?logo=0` | hides the logo (e.g. for OBS, where branding is composited downstream) |
 | `?wake=0` | disables the screen wake lock entirely, gate included (OBS browser sources, wall-mounted displays — nobody there to tap it) |
 
@@ -133,8 +133,12 @@ become visible; captions are already streaming in behind it, so tapping reveals 
 rather than an empty page. `?wake=0` skips this entirely.
 
 `/admin` is a metrics dashboard (no auth) polling `/api/stats` once a second — restarts, xruns,
-STT reconnects, buffer drops, auto-pause count and total paused time, SSE client counts, latency
-percentiles. A status badge at the top reads `ok` / `degraded` / `paused` / `closed`: an auto-pause
+STT reconnects, buffer drops, auto-pause count and total paused time, SSE client counts, and
+latency: final-caption percentiles over a trailing 5-minute window headline the page, alongside a
+second row for interim ("first pixels") latency and viewer-reported publish→paint latency, plus a
+waterfall breaking a final caption's latency into upload / recognize / assemble phases (with the
+unmeasured capture leg drawn as a labelled hatched segment) and the separately-sampled viewer leg
+set off by a gap. A status badge at the top reads `ok` / `degraded` / `paused` / `closed`: an auto-pause
 shows as "STT Paused," not "Degraded" — it's expected, money-saving behaviour, not a fault — and a
 past blip (a reconnect, a buffer drop) only holds the badge at "Degraded" briefly rather than for
 the rest of the session. Check it during an event to confirm nothing is degrading silently.

@@ -353,8 +353,11 @@ func (e *Engine) writeLoop(
 			// after would leave a window where a fast server reply makes
 			// readLoop look up bytes the index doesn't know about yet. If the
 			// write then fails, the connection and this index are both
-			// discarded together, so a pre-recorded entry is harmless.
-			idx.Add(len(c.pcm), c.capturedAt)
+			// discarded together, so a pre-recorded entry is harmless. The
+			// same "before" instant also stamps sentAt: the buffered socket
+			// write itself only takes microseconds, but sentAt means "handed
+			// to the socket", not "delivered" or "acknowledged" by Deepgram.
+			idx.Add(len(c.pcm), c.capturedAt, time.Now())
 			if err := conn.Write(connCtx, websocket.MessageBinary, c.pcm); err != nil {
 				return err
 			}
@@ -408,13 +411,14 @@ func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- 
 			continue
 		}
 		t.ReceivedAt = time.Now()
-		// Anchor the transcript's media end-time to wall-clock capture time on
-		// THIS connection. UtteranceEnd decodes with zero Start/Duration and
-		// IsFinal == false, so At(0) on it either misses (nothing written yet)
-		// or resolves nonsense that observeLatency ignores anyway since
-		// IsFinal is false — either way it's harmless.
-		if capturedAt, ok := idx.At(t.End()); ok {
+		// Anchor the transcript's media end-time to wall-clock capture and
+		// send time on THIS connection. UtteranceEnd decodes with zero
+		// Start/Duration and IsFinal == false, so At(0) on it either misses
+		// (nothing written yet) or resolves nonsense that observeLatency
+		// ignores anyway since IsFinal is false — either way it's harmless.
+		if capturedAt, sentAt, ok := idx.At(t.End()); ok {
 			t.CapturedAt = capturedAt
+			t.SentAt = sentAt
 		}
 		select {
 		case out <- t:

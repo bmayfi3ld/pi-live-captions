@@ -119,6 +119,80 @@
   #spark-wrap .k { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.35rem; }
   #spark { width: 100%; height: 3.2rem; display: block; }
 
+  /* ---- latency hero, row 2: secondary series alongside the final-caption
+     figure above. Two peer stat groups, not two more cells crammed into the
+     first row's grid (that row's last column is pinned to the sparkline). */
+  #latency-secondary {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+    gap: 1.5rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem;
+    padding: 1rem 1.4rem; margin-bottom: 1.25rem;
+  }
+  .lat-group { display: flex; flex-direction: column; gap: 0.35rem; }
+  .lat-group .lg-label {
+    font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .lat-group .lg-vals { display: flex; gap: 1.5rem; }
+  .lat-group .lg-vals .lg-stat .k { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .lat-group .lg-vals .lg-stat .v { font-size: 1.3rem; font-weight: 700; line-height: 1.15; }
+
+  /* ---- latency waterfall ---- */
+  #waterfall-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem;
+    padding: 1.1rem 1.4rem; margin-bottom: 1.25rem;
+  }
+  #waterfall-card h2 { font-size: 0.95rem; margin-bottom: 0.2rem; }
+  #waterfall-card .wf-sub { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.9rem; }
+  #wf-empty { font-size: 0.85rem; color: var(--muted); padding: 0.5rem 0; }
+  #wf-bar-wrap { position: relative; }
+  #wf-bar {
+    display: flex; align-items: stretch; height: 1.8rem; border-radius: 0.35rem; overflow: hidden;
+    background: var(--surface-2); border: 1px solid var(--border);
+  }
+  .wf-seg { position: relative; height: 100%; min-width: 2px; }
+  .wf-seg.wf-capture {
+    background: repeating-linear-gradient(
+      45deg, var(--muted-soft), var(--muted-soft) 5px, transparent 5px, transparent 10px
+    );
+    border-right: 1px dashed var(--border);
+  }
+  .wf-seg.wf-upload { background: color-mix(in srgb, var(--accent) 45%, var(--surface-2)); }
+  .wf-seg.wf-recognize { background: var(--accent); }
+  .wf-seg.wf-assemble { background: color-mix(in srgb, var(--accent) 70%, #000 10%); }
+  /* The viewer figure is a separately-sampled population (different clock,
+     independently reporting phones) — a visible gap plus its own tint keeps
+     it from reading as a flush continuation of the server-side total. */
+  #wf-gap { width: 0.6rem; flex: 0 0 auto; }
+  .wf-seg.wf-viewer { background: var(--warn); border-radius: 0 0.35rem 0.35rem 0; }
+  /* First-pixels marker: a line across the bar, not a segment — it's a
+     prefix of the same total (the interim's own upload+recognize+assemble),
+     not an additional stage, so a segment would double-count it. */
+  #wf-marker {
+    position: absolute; top: -0.25rem; bottom: -0.25rem; width: 2px;
+    background: var(--fg); opacity: 0.55; pointer-events: none;
+  }
+  #wf-marker::after {
+    content: "first pixels"; position: absolute; top: -1.15rem; left: 50%; transform: translateX(-50%);
+    font-size: 0.65rem; color: var(--muted); white-space: nowrap;
+  }
+  #wf-legend {
+    display: flex; flex-wrap: wrap; gap: 0.9rem 1.5rem; margin-top: 1rem;
+  }
+  .wf-item { display: flex; flex-direction: column; gap: 0.15rem; min-width: 6rem; }
+  .wf-item .wf-swatch-row { display: flex; align-items: center; gap: 0.45em; }
+  .wf-swatch { width: 0.7em; height: 0.7em; border-radius: 0.2em; flex: 0 0 auto; }
+  .wf-swatch.wf-capture {
+    background: repeating-linear-gradient(45deg, var(--muted), var(--muted) 2px, transparent 2px, transparent 4px);
+    border: 1px solid var(--muted);
+  }
+  .wf-swatch.wf-upload { background: color-mix(in srgb, var(--accent) 45%, var(--surface-2)); }
+  .wf-swatch.wf-recognize { background: var(--accent); }
+  .wf-swatch.wf-assemble { background: color-mix(in srgb, var(--accent) 70%, #000 10%); }
+  .wf-swatch.wf-viewer { background: var(--warn); }
+  .wf-item .wf-name { font-size: 0.72rem; color: var(--muted); }
+  .wf-item .wf-nums { font-size: 0.8rem; font-weight: 600; }
+  .wf-item .wf-nums .wf-dim { color: var(--muted); font-weight: 500; }
+
   /* ---- card grid ---- */
   #grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
   .card {
@@ -177,6 +251,34 @@
     <div class="k">Trend (last / polled 1&#8203;s)</div>
     <svg id="spark" viewBox="0 0 300 48" preserveAspectRatio="none"></svg>
   </div>
+</div>
+
+<div id="latency-secondary">
+  <div class="lat-group">
+    <div class="lg-label">First pixels (interim)</div>
+    <div class="lg-vals">
+      <div class="lg-stat"><div class="k">p50</div><div class="v num" id="lat-interim-p50">—</div></div>
+      <div class="lg-stat"><div class="k">p95</div><div class="v num" id="lat-interim-p95">—</div></div>
+    </div>
+  </div>
+  <div class="lat-group">
+    <div class="lg-label">Viewer (publish&#8594;paint)</div>
+    <div class="lg-vals">
+      <div class="lg-stat"><div class="k">p50</div><div class="v num" id="lat-viewer-p50">—</div></div>
+      <div class="lg-stat"><div class="k">p95</div><div class="v num" id="lat-viewer-p95">—</div></div>
+    </div>
+  </div>
+</div>
+
+<div id="waterfall-card">
+  <h2><span class="eyebrow">Latency waterfall</span></h2>
+  <div class="wf-sub">Where the time goes, p50 per phase. The capture segment is not measured (see below); the viewer segment is a separately-sampled population, set off by a gap.</div>
+  <div id="wf-empty" style="display:none">Not enough data yet — waiting on server phase timings and/or a connected viewer to report paint latency.</div>
+  <div id="wf-bar-wrap">
+    <div id="wf-bar"></div>
+    <div id="wf-marker" style="display:none"></div>
+  </div>
+  <div id="wf-legend"></div>
 </div>
 
 <div id="grid">
@@ -345,6 +447,112 @@
       '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.6" fill="' + accent + '"></circle>';
   }
 
+  // ---- latency waterfall ----
+  // Fixed, non-proportional widths for the two pieces of the bar that are
+  // NOT to-scale measurements: the capture segment (genuinely uninstrumented,
+  // see specs/2026-08-20_analysis_caption_latency_measurement.md §3) always
+  // gets the same nominal width so nobody mistakes its size for a duration,
+  // and the gap before the viewer segment is a fixed visual divider, not data.
+  var WF_CAPTURE_PCT = 15;
+  var WF_GAP_PCT = 4;
+
+  function wfSeg(cls, pct, label, ms, ms95) {
+    var title = label + (typeof ms === "number" ? ": " + fmtMs(ms) + (typeof ms95 === "number" ? " p50 / " + fmtMs(ms95) + " p95" : " p50") : "");
+    return '<div class="wf-seg ' + cls + '" style="flex:0 0 ' + pct.toFixed(2) + '%" title="' + title.replace(/"/g, "&quot;") + '"></div>';
+  }
+
+  function wfLegendItem(cls, name, ms, ms95, note) {
+    var nums;
+    if (note) {
+      nums = '<span class="wf-dim">' + note + '</span>';
+    } else {
+      nums = fmtMs(ms) + ' <span class="wf-dim">/ ' + fmtMs(ms95) + ' p95</span>';
+    }
+    return '<div class="wf-item"><div class="wf-swatch-row"><span class="wf-swatch ' + cls + '"></span><span class="wf-name">' + name + '</span></div><div class="wf-nums">' + nums + '</div></div>';
+  }
+
+  function drawWaterfall(s) {
+    var stt = s.stt || {};
+    var web = s.web || {};
+    var bar = document.getElementById("wf-bar");
+    var wrap = document.getElementById("wf-bar-wrap");
+    var marker = document.getElementById("wf-marker");
+    var empty = document.getElementById("wf-empty");
+    var legend = document.getElementById("wf-legend");
+
+    var phaseN = stt.phase_latency_samples || 0;
+    var viewerN = web.viewer_latency_samples || 0;
+
+    // Constraint: an empty series contributes no segment. If NEITHER the
+    // server phases nor any viewer has ever reported, there is nothing this
+    // bar can honestly show — degrade to a plain empty state rather than
+    // drawing a bar that's all placeholder.
+    if (phaseN === 0 && viewerN === 0) {
+      wrap.style.display = "none";
+      legend.innerHTML = "";
+      empty.style.display = "block";
+      return;
+    }
+    empty.style.display = "none";
+    wrap.style.display = "";
+
+    var upload = stt.upload_latency_p50_ms, uploadP95 = stt.upload_latency_p95_ms;
+    var recognize = stt.recognize_latency_p50_ms, recognizeP95 = stt.recognize_latency_p95_ms;
+    var assemble = stt.assemble_latency_p50_ms, assembleP95 = stt.assemble_latency_p95_ms;
+    var viewer = web.viewer_latency_p50_ms, viewerP95 = web.viewer_latency_p95_ms;
+
+    var phaseTotal = phaseN > 0 ? (upload + recognize + assemble) : 0;
+    var poolTotal = phaseTotal + (viewerN > 0 ? viewer : 0);
+    var poolSafe = poolTotal > 0 ? poolTotal : 1; // guard div-by-zero; only matters when every p50 is exactly 0
+
+    var remainingPct = 100 - WF_CAPTURE_PCT - (viewerN > 0 ? WF_GAP_PCT : 0);
+    var phasesRegionPct = phaseN > 0 ? remainingPct * (phaseTotal / poolSafe) : 0;
+    var viewerRegionPct = viewerN > 0 ? remainingPct * (viewer / poolSafe) : 0;
+    // Rounding can leave the phases region a hair short/long of the pool
+    // split above; when phases are the ONLY series, give it 100% of what's
+    // left rather than leaving a sliver of dead space.
+    if (phaseN > 0 && viewerN === 0) phasesRegionPct = remainingPct;
+    if (viewerN > 0 && phaseN === 0) viewerRegionPct = remainingPct;
+
+    var html = wfSeg("wf-capture", WF_CAPTURE_PCT, "Capture (ADC → pipeline)");
+
+    if (phaseN > 0) {
+      var phaseTotalSafe = phaseTotal > 0 ? phaseTotal : 1;
+      html += wfSeg("wf-upload", phasesRegionPct * (upload / phaseTotalSafe), "Upload", upload, uploadP95);
+      html += wfSeg("wf-recognize", phasesRegionPct * (recognize / phaseTotalSafe), "Recognition", recognize, recognizeP95);
+      html += wfSeg("wf-assemble", phasesRegionPct * (assemble / phaseTotalSafe), "Assembly", assemble, assembleP95);
+    }
+
+    if (viewerN > 0) {
+      html += '<div id="wf-gap" style="flex:0 0 ' + WF_GAP_PCT.toFixed(2) + '%"></div>';
+      html += wfSeg("wf-viewer", viewerRegionPct, "Viewer (publish → paint)", viewer, viewerP95);
+    }
+
+    bar.innerHTML = html;
+
+    // First-pixels marker: a line, not a segment, placed at the interim's
+    // p50 position as a fraction of the measured phases region — it's a
+    // prefix of the same pipeline, so it must not draw its own width or it
+    // would double-count time already inside upload+recognize+assemble.
+    var interimN = stt.interim_latency_samples || 0;
+    if (phaseN > 0 && interimN > 0 && phaseTotal > 0) {
+      var frac = Math.min(1, Math.max(0, stt.interim_latency_p50_ms / phaseTotal));
+      var leftPct = WF_CAPTURE_PCT + phasesRegionPct * frac;
+      marker.style.left = leftPct.toFixed(2) + "%";
+      marker.style.display = "block";
+      marker.title = "First pixels (interim p50): " + fmtMs(stt.interim_latency_p50_ms);
+    } else {
+      marker.style.display = "none";
+    }
+
+    legend.innerHTML =
+      wfLegendItem("wf-capture", "Capture", null, null, "not measured") +
+      wfLegendItem("wf-upload", "Upload", upload, uploadP95, phaseN > 0 ? null : "—") +
+      wfLegendItem("wf-recognize", "Recognition", recognize, recognizeP95, phaseN > 0 ? null : "—") +
+      wfLegendItem("wf-assemble", "Assembly", assemble, assembleP95, phaseN > 0 ? null : "—") +
+      wfLegendItem("wf-viewer", "Viewer paint", viewer, viewerP95, viewerN > 0 ? null : "—");
+  }
+
   function render(s) {
     document.getElementById("offline").classList.remove("show");
 
@@ -388,6 +596,16 @@
       if (sparkHistory.length > SPARK_CAP) sparkHistory.shift();
     }
     drawSpark();
+
+    // ---- latency hero, row 2: first pixels (interim) + viewer paint ----
+    var web0 = s.web || {};
+    setText("lat-interim-p50", fmtMs(stt.interim_latency_p50_ms));
+    setText("lat-interim-p95", fmtMs(stt.interim_latency_p95_ms));
+    setText("lat-viewer-p50", fmtMs(web0.viewer_latency_p50_ms));
+    setText("lat-viewer-p95", fmtMs(web0.viewer_latency_p95_ms));
+
+    // ---- latency waterfall ----
+    drawWaterfall(s);
 
     // ---- source ----
     var src = s.source || {};

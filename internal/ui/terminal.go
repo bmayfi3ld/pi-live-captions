@@ -321,9 +321,12 @@ func (t *Terminal) Summary(s metrics.Snapshot, monitorEnabled bool) {
 			amber(s.STT.Reconnects, "%d stt reconnect%s", s.STT.Reconnects, plural(s.STT.Reconnects))),
 	})
 	if s.STT.LatencyCount > 0 {
+		// LatencyMax is a trailing-5-minute windowed max, not a session-
+		// lifetime peak, so a plain "max" label in a one-shot shutdown summary
+		// would overclaim what it's reporting.
 		rows = append(rows, BannerField{
 			Label: "latency",
-			Value: fmt.Sprintf("p50 %.0fms  p95 %.0fms  max %.0fms",
+			Value: fmt.Sprintf("p50 %.0fms  p95 %.0fms  max (last 5m) %.0fms",
 				s.STT.LatencyP50, s.STT.LatencyP95, s.STT.LatencyMax),
 		})
 	}

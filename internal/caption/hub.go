@@ -186,9 +186,14 @@ func (h *Hub) Flush() {
 	h.Publish(stt.Transcript{Text: "", SpeechFinal: true})
 }
 
+// newEventLocked stamps every event with a publish instant. Without this,
+// interim and status events shipped with no At at all — only final (which
+// overwrites it with the line's own At below) and snapshot set it — and a
+// viewer needs At on interims to measure its own publish->paint latency,
+// since interims are what it sees first.
 func (h *Hub) newEventLocked(k Kind) Event {
 	h.seq++
-	return Event{Seq: h.seq, Kind: k}
+	return Event{Seq: h.seq, Kind: k, At: time.Now()}
 }
 
 // Subscribe registers a new listener and returns its channel plus an
