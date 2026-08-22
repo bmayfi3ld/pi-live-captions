@@ -5,3 +5,4 @@ transcripts/*
 # named logo.png. Unanchored, it also swallowed internal/web/testdata/logo.png
 # and the web tests failed on any fresh clone.
 /logo.png
+bin/*
