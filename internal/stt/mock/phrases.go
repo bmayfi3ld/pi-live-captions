@@ -29,27 +29,36 @@ var phrases = []string{
 }
 
 const (
-	// How much audio a whole utterance represents.
-	utteranceAudio = 4500 * time.Millisecond
-	// How much audio passes between interim updates within an utterance.
-	interimAudio = 400 * time.Millisecond
-	// Silence between utterances, so the display isn't wall-to-wall text.
-	gapAudio = 900 * time.Millisecond
+	// Minimum media time between one segment's emission and the next, so
+	// segments arrive paced like a real recognizer's chunks rather than all
+	// at once.
+	segmentAudio = 400 * time.Millisecond
+	// Silence between utterances. Must clear --speech-break's 1.5s default
+	// so the mock actually produces the pause break the real display relies
+	// on — the dev loop should show the same row behaviour a real room will.
+	gapAudio = 2 * time.Second
 )
 
 // phraseState drives the canned-utterance state machine shared by both mock
 // engines: mock paces it off real frame offsets, mock-2 off a synthetic
-// level schedule instead, but the phrase timing, word reveal and gaps are
+// level schedule instead, but the phrase timing, segment split and gaps are
 // identical so the two engines look the same to a viewer.
 type phraseState struct {
 	rng *rand.Rand
 
-	phraseIdx    int
-	uttStart     time.Duration // media time this utterance began
-	nextInterim  time.Duration
-	wordsEmitted int
-	inGap        bool
-	gapUntil     time.Duration
+	phraseIdx int
+	// segments is the current phrase split into clause-sized, settled
+	// pieces — computed once per utterance, since a real recognizer doesn't
+	// re-segment text it has already committed to.
+	segments []string
+	segIdx   int
+	// segStart is the media time the pending segment's audio began, so its
+	// emitted Duration reflects that segment alone rather than the whole
+	// utterance so far.
+	segStart    time.Duration
+	nextSegment time.Duration
+	inGap       bool
+	gapUntil    time.Duration
 }
 
 func newPhraseState(rng *rand.Rand) *phraseState {
@@ -57,76 +66,91 @@ func newPhraseState(rng *rand.Rand) *phraseState {
 }
 
 // restart begins a fresh utterance at media time now, discarding whatever was
-// in flight. mock-2 calls this on resume from a pause: the stale uttStart is
-// by then a whole silent stretch in the past, so without it the first frame
-// back would fire a finished phrase instantly rather than easing back in the
-// way returning speech actually does. phraseIdx is left alone, so the
-// interrupted sentence starts over rather than being skipped.
+// in flight. mock-2 calls this on resume from a pause: the stale segment
+// timing is by then a whole silent stretch in the past, so without it the
+// first frame back would fire a finished phrase instantly rather than easing
+// back in the way returning speech actually does. phraseIdx is left alone, so
+// the interrupted sentence starts over rather than being skipped.
 func (p *phraseState) restart(now time.Duration) {
-	p.uttStart = now
-	p.nextInterim = now + interimAudio
-	p.wordsEmitted = 0
+	p.segments = splitSegments(phrases[p.phraseIdx%len(phrases)])
+	p.segIdx = 0
+	p.segStart = now
+	p.nextSegment = now + segmentAudio
 	p.inGap = false
 }
 
-// step advances the state machine to media time now, emitting an interim or
-// final transcript through emit as appropriate. It reports false only when
-// emit says the caller should stop (ctx cancelled); a step with nothing to
-// emit yet still reports true.
+// step advances the state machine to media time now, emitting one settled
+// segment through emit whenever its scheduled slot arrives. It reports false
+// only when emit says the caller should stop (ctx cancelled); a step with
+// nothing to emit yet still reports true.
 func (p *phraseState) step(now time.Duration, emit func(stt.Transcript) bool) bool {
 	if p.inGap {
 		if now < p.gapUntil {
 			return true
 		}
 		p.inGap = false
-		p.uttStart = now
-		p.nextInterim = now + interimAudio
-		p.wordsEmitted = 0
+		p.restart(now)
 	}
-	if p.uttStart == 0 && p.nextInterim == 0 {
-		p.uttStart, p.nextInterim = now, now+interimAudio
+	if p.segments == nil {
+		p.restart(now)
+	}
+	if now < p.nextSegment {
+		return true
 	}
 
-	words := strings.Fields(phrases[p.phraseIdx%len(phrases)])
-	elapsed := now - p.uttStart
+	seg := p.segments[p.segIdx]
+	if !emit(stt.Transcript{
+		Text:       seg,
+		Start:      p.segStart,
+		Duration:   now - p.segStart,
+		Confidence: 0.90 + p.rng.Float64()*0.09,
+	}) {
+		return false
+	}
 
-	// Finish the utterance: emit the full text as final.
-	if elapsed >= utteranceAudio {
-		if !emit(stt.Transcript{
-			Text:        phrases[p.phraseIdx%len(phrases)],
-			IsFinal:     true,
-			SpeechFinal: true,
-			Start:       p.uttStart,
-			Duration:    elapsed,
-			Confidence:  0.90 + p.rng.Float64()*0.09,
-		}) {
-			return false
-		}
+	p.segIdx++
+	if p.segIdx >= len(p.segments) {
 		p.phraseIdx++
 		p.inGap = true
 		p.gapUntil = now + gapAudio
 		return true
 	}
-
-	// Reveal words progressively, the way a real recognizer streams.
-	if now >= p.nextInterim {
-		p.nextInterim = now + interimAudio
-		// Spread the phrase's words across its audio duration.
-		want := int(float64(len(words)) * float64(elapsed) / float64(utteranceAudio))
-		if want > len(words) {
-			want = len(words)
-		}
-		if want > p.wordsEmitted && want > 0 {
-			p.wordsEmitted = want
-			if !emit(stt.Transcript{
-				Text:       strings.Join(words[:p.wordsEmitted], " "),
-				Start:      p.uttStart,
-				Duration:   elapsed,
-				Confidence: 0.75 + p.rng.Float64()*0.15,
-			}) {
-				return false
-			}
-		}
-	}
+	p.segStart = now
+	p.nextSegment = now + segmentAudio
 	return true
+}
+
+// splitSegments divides one phrase into clause-sized pieces the way endpointing
+// against real speech would: at ", " where the phrase has it, or into 2-3
+// roughly equal word runs otherwise. Only the last piece carries the phrase's
+// terminal punctuation, which needs no special handling — it's already
+// attached to the last word since nothing strips it.
+func splitSegments(phrase string) []string {
+	if parts := strings.Split(phrase, ", "); len(parts) > 1 {
+		for i := 0; i < len(parts)-1; i++ {
+			parts[i] += ","
+		}
+		return parts
+	}
+
+	words := strings.Fields(phrase)
+	n := 2
+	if len(words) >= 9 {
+		n = 3
+	}
+	if n > len(words) {
+		n = len(words)
+	}
+	segments := make([]string, 0, n)
+	base, extra := len(words)/n, len(words)%n
+	idx := 0
+	for i := 0; i < n; i++ {
+		size := base
+		if i < extra {
+			size++
+		}
+		segments = append(segments, strings.Join(words[idx:idx+size], " "))
+		idx += size
+	}
+	return segments
 }

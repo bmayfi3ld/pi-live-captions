@@ -44,7 +44,7 @@ func startTestServer(t *testing.T, cfg Config) (baseURL string, hub *caption.Hub
 func newTestConfig() Config {
 	m := metrics.New("test-version", "test-session")
 	return Config{
-		Hub:     caption.NewHub(m),
+		Hub:     caption.NewHub(m, time.Second),
 		Metrics: m,
 	}
 }
@@ -245,7 +245,7 @@ func TestEventsHeadersAndSnapshotFirst(t *testing.T) {
 	cfg := newTestConfig()
 	// Seed history before any client connects, so the snapshot has to carry
 	// something for a late joiner.
-	cfg.Hub.Publish(stt.Transcript{Text: "already said", IsFinal: true, SpeechFinal: true})
+	cfg.Hub.Publish(stt.Transcript{Text: "already said"})
 	base, _, _ := startTestServer(t, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -275,8 +275,8 @@ func TestEventsHeadersAndSnapshotFirst(t *testing.T) {
 	if ev.Kind != caption.KindSnapshot {
 		t.Fatalf("first event kind = %q, want snapshot", ev.Kind)
 	}
-	if len(ev.Lines) != 1 || ev.Lines[0].Text != "already said" {
-		t.Errorf("snapshot lines = %v, want the seeded history", ev.Lines)
+	if ev.Text != "already said" {
+		t.Errorf("snapshot text = %q, want the seeded history %q", ev.Text, "already said")
 	}
 }
 
@@ -297,15 +297,15 @@ func TestEventsDeliversPublishedEvents(t *testing.T) {
 	r := bufio.NewReader(resp.Body)
 	nextSSEData(t, r) // discard the initial snapshot
 
-	hub.Publish(stt.Transcript{Text: "live line", IsFinal: true, SpeechFinal: true})
+	hub.Publish(stt.Transcript{Text: "live line"})
 
 	data := nextSSEData(t, r)
 	var ev caption.Event
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		t.Fatalf("published event is not valid JSON: %v (%q)", err, data)
 	}
-	if ev.Kind != caption.KindFinal || ev.Text != "live line" {
-		t.Errorf("event = %+v, want a final event with text %q", ev, "live line")
+	if ev.Kind != caption.KindCaption || ev.Text != "live line" {
+		t.Errorf("event = %+v, want a caption event with text %q", ev, "live line")
 	}
 }
 
@@ -449,11 +449,54 @@ func TestWakeVideoServedWithContentType(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "video/mp4" {
 		t.Errorf("Content-Type = %q, want video/mp4", ct)
 	}
-	// The URL carries no version, so an immutable response would pin a stale
-	// asset on every phone that ever loaded the page — the failure mode that
-	// made the audio-track fix below look like it had done nothing.
+	// The URL carries no version, so an immutable response would pin an
+	// outdated asset on every phone that ever loaded the page — the failure
+	// mode that made the audio-track fix below look like it had done
+	// nothing.
 	if cc := resp.Header.Get("Cache-Control"); strings.Contains(cc, "immutable") {
 		t.Errorf("Cache-Control = %q, want a revalidating directive at an unversioned URL", cc)
+	}
+}
+
+// TestCaptionJSServedWithContentType covers the /caption.js route added
+// alongside the wake-video assets: staticAssetHandler now serves more than
+// one kind of file, and the typesetter both pages depend on must actually be
+// reachable at a fixed URL with a script Content-Type, or the page loads
+// with a blank stack and no console hint why.
+func TestCaptionJSServedWithContentType(t *testing.T) {
+	base, _, _ := startTestServer(t, newTestConfig())
+	resp, err := http.Get(base + "/caption.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/javascript") {
+		t.Errorf("Content-Type = %q, want a text/javascript prefix", ct)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("ETag header is empty, want a value")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("CaptionStack")) {
+		t.Error("caption.js body does not mention CaptionStack, want the factory this route exists to serve")
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, base+"/caption.js", nil)
+	req.Header.Set("If-None-Match", etag)
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotModified {
+		t.Errorf("conditional status = %d, want 304", resp2.StatusCode)
 	}
 }
 

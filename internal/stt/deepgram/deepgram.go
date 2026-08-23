@@ -412,10 +412,10 @@ func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- 
 		}
 		t.ReceivedAt = time.Now()
 		// Anchor the transcript's media end-time to wall-clock capture and
-		// send time on THIS connection. UtteranceEnd decodes with zero
-		// Start/Duration and IsFinal == false, so At(0) on it either misses
-		// (nothing written yet) or resolves nonsense that observeLatency
-		// ignores anyway since IsFinal is false — either way it's harmless.
+		// send time on THIS connection. Every transcript reaching this point
+		// carries a real Start/Duration now that UtteranceEnd is gone, which
+		// is also what makes the hub's gap arithmetic (media time minus the
+		// previous segment's end) trustworthy.
 		if capturedAt, sentAt, ok := idx.At(t.End()); ok {
 			t.CapturedAt = capturedAt
 			t.SentAt = sentAt
@@ -458,13 +458,17 @@ func (e *Engine) dialURL() string {
 	q.Set("channels", strconv.Itoa(e.cfg.Format.Channels))
 	q.Set("model", e.cfg.Model)
 	q.Set("language", e.cfg.Language)
-	q.Set("interim_results", "true")
+	// interim_results=false: the pipeline only paints is_final segments, so
+	// revisable text would be decoded and thrown away for nothing.
+	q.Set("interim_results", "false")
+	// punctuate and smart_format are load-bearing, not cosmetic: the hub
+	// closes transcript lines on terminal punctuation (§3 of the interim
+	// removal plan), so turning these off would silently degrade
+	// transcript.txt to the speech-gap fallback for every sentence.
 	q.Set("punctuate", "true")
 	q.Set("profanity_filter", "true")
 	q.Set("smart_format", "true")
-	q.Set("endpointing", "300")
-	q.Set("utterance_end_ms", "1000")
-	q.Set("vad_events", "true")
+	q.Set("endpointing", strconv.Itoa(int(e.cfg.Endpointing.Milliseconds())))
 	for _, k := range e.cfg.Keyterms {
 		q.Add("keyterm", k)
 	}
@@ -534,11 +538,10 @@ func writeJSON(ctx context.Context, conn *websocket.Conn, v any) error {
 	return conn.Write(ctx, websocket.MessageText, b)
 }
 
-// messageType is decoded first so the payload can be unmarshaled with a
-// shape matching its type: Results carries a "channel" object, but
-// UtteranceEnd and SpeechStarted carry "channel" as a plain index array, and
-// unmarshaling both through one struct would fail on whichever shape didn't
-// match.
+// messageType is decoded first so only the shape a message actually claims to
+// be attempts a full unmarshal: SpeechStarted carries "channel" as a plain
+// index array rather than the object Results uses, so blindly unmarshaling
+// everything as resultsMessage would fail on it.
 type messageType struct {
 	Type string `json:"type"`
 }
@@ -547,11 +550,10 @@ type messageType struct {
 // cares about; word timings and everything else are decoded straight through
 // and ignored.
 type resultsMessage struct {
-	IsFinal     bool    `json:"is_final"`
-	SpeechFinal bool    `json:"speech_final"`
-	Start       float64 `json:"start"`
-	Duration    float64 `json:"duration"`
-	Channel     struct {
+	IsFinal  bool    `json:"is_final"`
+	Start    float64 `json:"start"`
+	Duration float64 `json:"duration"`
+	Channel  struct {
 		Alternatives []struct {
 			Transcript string  `json:"transcript"`
 			Confidence float64 `json:"confidence"`
@@ -561,42 +563,42 @@ type resultsMessage struct {
 
 // decodeTranscript turns one server message into a Transcript. ok is false
 // for messages that carry nothing worth publishing: empty Results (no speech
-// yet), Metadata, SpeechStarted, and any other unrecognized type.
+// yet), a non-final Results, Metadata, SpeechStarted, and any other
+// unrecognized type.
 func decodeTranscript(data []byte) (t stt.Transcript, ok bool, err error) {
 	var head messageType
 	if err := json.Unmarshal(data, &head); err != nil {
 		return stt.Transcript{}, false, err
 	}
 
-	switch head.Type {
-	case "Results":
-		var msg resultsMessage
-		if err := json.Unmarshal(data, &msg); err != nil {
-			return stt.Transcript{}, false, err
-		}
-		if len(msg.Channel.Alternatives) == 0 {
-			return stt.Transcript{}, false, nil
-		}
-		alt := msg.Channel.Alternatives[0]
-		if alt.Transcript == "" {
-			return stt.Transcript{}, false, nil
-		}
-		return stt.Transcript{
-			Text:        alt.Transcript,
-			IsFinal:     msg.IsFinal,
-			SpeechFinal: msg.SpeechFinal,
-			Start:       secondsToDuration(msg.Start),
-			Duration:    secondsToDuration(msg.Duration),
-			Confidence:  alt.Confidence,
-		}, true, nil
-
-	case "UtteranceEnd":
-		// No text of its own; it closes whatever line the hub has pending.
-		return stt.Transcript{SpeechFinal: true}, true, nil
-
-	default:
+	if head.Type != "Results" {
 		return stt.Transcript{}, false, nil
 	}
+
+	var msg resultsMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return stt.Transcript{}, false, err
+	}
+	// Cheap defense-in-depth: interim_results=false means the wire should
+	// never carry is_final=false, but if that param is ever flipped on for
+	// debugging, this guard keeps revisable text from reaching the hub rather
+	// than relying on the query string alone.
+	if !msg.IsFinal {
+		return stt.Transcript{}, false, nil
+	}
+	if len(msg.Channel.Alternatives) == 0 {
+		return stt.Transcript{}, false, nil
+	}
+	alt := msg.Channel.Alternatives[0]
+	if alt.Transcript == "" {
+		return stt.Transcript{}, false, nil
+	}
+	return stt.Transcript{
+		Text:       alt.Transcript,
+		Start:      secondsToDuration(msg.Start),
+		Duration:   secondsToDuration(msg.Duration),
+		Confidence: alt.Confidence,
+	}, true, nil
 }
 
 func secondsToDuration(s float64) time.Duration {

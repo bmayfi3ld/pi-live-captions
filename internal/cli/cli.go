@@ -45,20 +45,54 @@ type STTFlags struct {
 	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`
 	SilenceDB   float64       `name:"silence-threshold-db" default:"-45" group:"Speech-to-text" help:"dBFS at or below which audio counts as silence."`
 	SilenceHold time.Duration `name:"silence-hold" default:"60s" group:"Speech-to-text" help:"How long the audio must stay silent before the connection is paused."`
+
+	// Endpointing and SpeechBreak are the two speech-timing thresholds, tuned
+	// together at a venue even though they plumb to different places:
+	// Endpointing into stt.Config, SpeechBreak into caption.NewHub.
+	Endpointing time.Duration `default:"100ms" group:"Speech-to-text" help:"Silence before Deepgram finalizes a chunk of speech. Lower puts words on screen sooner in smaller pieces."`
+	SpeechBreak time.Duration `name:"speech-break" default:"1.5s" group:"Speech-to-text" help:"Pause that counts as the speaker actually stopping. Breaks the caption row and closes a transcript line."`
 }
 
-// Validate rejects silence-detection settings that can't work. The gate counts
-// a frame as silence at or below the threshold, so 0 dBFS — full scale — would
-// classify every frame as silence and the session would sit paused forever
-// without transcribing a word. At the other end, -100 is the floor RMSDBFS
-// clamps digital silence to, so nothing can fall below it.
+// Validate rejects silence-detection and speech-timing settings that can't
+// work.
 func (f *STTFlags) Validate() error {
+	// The gate counts a frame as silence at or below the threshold, so 0 dBFS
+	// — full scale — would classify every frame as silence and the session
+	// would sit paused forever without transcribing a word. At the other
+	// end, -100 is the floor RMSDBFS clamps digital silence to, so nothing
+	// can fall below it.
 	if f.SilenceDB >= 0 || f.SilenceDB <= -100 {
 		return fmt.Errorf("--silence-threshold-db must be between -100 and 0, exclusive (got %g): "+
 			"0 dBFS is full scale, so a threshold there would treat all audio as silence", f.SilenceDB)
 	}
 	if f.SilenceHold <= 0 {
 		return fmt.Errorf("--silence-hold must be positive (got %s)", f.SilenceHold)
+	}
+	// Below Deepgram's floor, every inter-word gap ends a chunk.
+	if f.Endpointing < 10*time.Millisecond {
+		return fmt.Errorf("--endpointing must be at least 10ms (got %s): "+
+			"below Deepgram's floor, every inter-word gap ends a chunk", f.Endpointing)
+	}
+	// Past this the caption is far enough behind the speaker to be useless,
+	// since nothing paints until endpointing fires.
+	if f.Endpointing > 2*time.Second {
+		return fmt.Errorf("--endpointing must be at most 2s (got %s): "+
+			"past this the caption is far enough behind the speaker to be useless, "+
+			"since nothing paints until it fires", f.Endpointing)
+	}
+	// The break must be rarer than the chunk flush, or every chunk starts its
+	// own row and the display goes back to being ragged. This is the check
+	// that would have caught an earlier draft of this change fragmenting the
+	// transcript.
+	if f.SpeechBreak <= f.Endpointing {
+		return fmt.Errorf("--speech-break (%s) must be greater than --endpointing (%s): "+
+			"otherwise every chunk starts its own row and the display goes back to being ragged",
+			f.SpeechBreak, f.Endpointing)
+	}
+	// Below 200ms it fires on breaths; above 10s it never fires at all and
+	// the transcript falls back to the maxUtteranceChars guard.
+	if f.SpeechBreak < 200*time.Millisecond || f.SpeechBreak > 10*time.Second {
+		return fmt.Errorf("--speech-break must be between 200ms and 10s (got %s)", f.SpeechBreak)
 	}
 	return nil
 }

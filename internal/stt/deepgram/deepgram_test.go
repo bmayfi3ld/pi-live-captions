@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,40 +27,33 @@ func TestDecodeTranscript(t *testing.T) {
 		ok   bool
 	}{
 		{
-			name: "interim result",
-			json: `{"type":"Results","is_final":false,"speech_final":false,"start":1.5,"duration":0.4,
+			// interim_results=false means the wire should never carry this,
+			// but decodeTranscript must not trust that and paint it anyway:
+			// the IsFinal guard is defense-in-depth for a debug flip.
+			name: "is_final false is dropped",
+			json: `{"type":"Results","is_final":false,"start":1.5,"duration":0.4,
 				"channel":{"alternatives":[{"transcript":"hello there","confidence":0.82}]}}`,
-			want: stt.Transcript{
-				Text: "hello there", IsFinal: false, SpeechFinal: false,
-				Start: 1500 * time.Millisecond, Duration: 400 * time.Millisecond, Confidence: 0.82,
-			},
-			ok: true,
+			ok: false,
 		},
 		{
 			name: "final result",
-			json: `{"type":"Results","is_final":true,"speech_final":true,"start":0,"duration":2.1,
+			json: `{"type":"Results","is_final":true,"start":0,"duration":2.1,
 				"channel":{"alternatives":[{"transcript":"good morning everyone","confidence":0.95}]}}`,
 			want: stt.Transcript{
-				Text: "good morning everyone", IsFinal: true, SpeechFinal: true,
+				Text:  "good morning everyone",
 				Start: 0, Duration: 2100 * time.Millisecond, Confidence: 0.95,
 			},
 			ok: true,
 		},
 		{
 			name: "empty transcript is skipped",
-			json: `{"type":"Results","is_final":false,"channel":{"alternatives":[{"transcript":"","confidence":0}]}}`,
+			json: `{"type":"Results","is_final":true,"channel":{"alternatives":[{"transcript":"","confidence":0}]}}`,
 			ok:   false,
 		},
 		{
 			name: "no alternatives is skipped",
-			json: `{"type":"Results","channel":{"alternatives":[]}}`,
+			json: `{"type":"Results","is_final":true,"channel":{"alternatives":[]}}`,
 			ok:   false,
-		},
-		{
-			name: "utterance end closes the line",
-			json: `{"type":"UtteranceEnd","channel":[0],"last_word_end":2.5}`,
-			want: stt.Transcript{SpeechFinal: true},
-			ok:   true,
 		},
 		{
 			name: "metadata is ignored",
@@ -85,12 +79,48 @@ func TestDecodeTranscript(t *testing.T) {
 			if !ok {
 				return
 			}
-			if got.Text != tc.want.Text || got.IsFinal != tc.want.IsFinal ||
-				got.SpeechFinal != tc.want.SpeechFinal || got.Start != tc.want.Start ||
+			if got.Text != tc.want.Text || got.Start != tc.want.Start ||
 				got.Duration != tc.want.Duration || got.Confidence != tc.want.Confidence {
 				t.Errorf("got %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestDialURL_DropsInterimsAndUtteranceEnd pins the query string this engine
+// asks Deepgram for: no revisable text, no UtteranceEnd/vad_events backstop
+// (both require interim_results=true and are dead weight without it),
+// endpointing driven from Config, and punctuate/smart_format still on. The
+// last two are load-bearing now that the hub closes transcript lines on
+// punctuation — this assertion is what stops a future cleanup from silently
+// removing them.
+func TestDialURL_DropsInterimsAndUtteranceEnd(t *testing.T) {
+	eng := testEngine("wss://example.invalid")
+	eng.cfg.Endpointing = 150 * time.Millisecond
+
+	u, err := url.Parse(eng.dialURL())
+	if err != nil {
+		t.Fatalf("dialURL did not produce a valid URL: %v", err)
+	}
+	q := u.Query()
+
+	if got := q.Get("interim_results"); got != "false" {
+		t.Errorf("interim_results = %q, want %q", got, "false")
+	}
+	if q.Has("utterance_end_ms") {
+		t.Error("utterance_end_ms should not be present: it requires interim_results=true")
+	}
+	if q.Has("vad_events") {
+		t.Error("vad_events should not be present: its only signal is discarded by decodeTranscript")
+	}
+	if got := q.Get("endpointing"); got != "150" {
+		t.Errorf("endpointing = %q, want %q (from Config.Endpointing)", got, "150")
+	}
+	if got := q.Get("punctuate"); got != "true" {
+		t.Errorf("punctuate = %q, want %q: it is load-bearing for transcript line breaks now", got, "true")
+	}
+	if got := q.Get("smart_format"); got != "true" {
+		t.Errorf("smart_format = %q, want %q: it is load-bearing for transcript line breaks now", got, "true")
 	}
 }
 
@@ -178,9 +208,9 @@ func loudPCM(n int) []byte {
 	return pcm
 }
 
-func resultMsg(text string, isFinal, speechFinal bool, start, dur float64) map[string]any {
+func resultMsg(text string, isFinal bool, start, dur float64) map[string]any {
 	return map[string]any{
-		"type": "Results", "is_final": isFinal, "speech_final": speechFinal,
+		"type": "Results", "is_final": isFinal,
 		"start": start, "duration": dur,
 		"channel": map[string]any{
 			"alternatives": []map[string]any{{"transcript": text, "confidence": 0.9}},
@@ -213,9 +243,11 @@ func TestEngine_FullSession(t *testing.T) {
 			}
 		}()
 
-		sc.send(resultMsg("hello", false, false, 0, 0.4))
-		sc.send(resultMsg("hello world", true, false, 0, 1.0))
-		sc.send(map[string]any{"type": "UtteranceEnd", "channel": []int{0}, "last_word_end": 1.0})
+		// A non-final Results should never reach the hub: interim_results is
+		// requested false, but decodeTranscript's IsFinal guard drops it
+		// defensively regardless.
+		sc.send(resultMsg("hello", false, 0, 0.4))
+		sc.send(resultMsg("hello world", true, 0, 1.0))
 
 		select {
 		case <-closeSeen:
@@ -246,17 +278,11 @@ func TestEngine_FullSession(t *testing.T) {
 		got = append(got, tr)
 	}
 
-	if len(got) != 3 {
-		t.Fatalf("expected 3 transcripts, got %d: %+v", len(got), got)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 transcript (the non-final must be dropped), got %d: %+v", len(got), got)
 	}
-	if got[0].Text != "hello" || got[0].IsFinal {
-		t.Errorf("interim wrong: %+v", got[0])
-	}
-	if got[1].Text != "hello world" || !got[1].IsFinal || got[1].SpeechFinal {
-		t.Errorf("final segment wrong: %+v", got[1])
-	}
-	if got[2].Text != "" || !got[2].SpeechFinal {
-		t.Errorf("utterance end wrong: %+v", got[2])
+	if got[0].Text != "hello world" {
+		t.Errorf("final segment wrong: %+v", got[0])
 	}
 	if atomic.LoadInt64(&bytesReceived) == 0 {
 		t.Error("server never received audio")
@@ -271,7 +297,7 @@ func TestEngine_Reconnect(t *testing.T) {
 		if n == 1 {
 			// Simulate a mid-stream drop: one result, then the connection
 			// dies without a close handshake.
-			sc.send(resultMsg("first connection", false, false, 0, 0.3))
+			sc.send(resultMsg("first connection", true, 0, 0.3))
 			time.Sleep(50 * time.Millisecond)
 			sc.c.CloseNow()
 			return
@@ -279,7 +305,7 @@ func TestEngine_Reconnect(t *testing.T) {
 
 		done := make(chan struct{})
 		go sc.drainBinary(done)
-		sc.send(resultMsg("second connection", true, true, 0, 1.0))
+		sc.send(resultMsg("second connection", true, 0, 1.0))
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
@@ -335,7 +361,7 @@ loop:
 	if got[0].Text != "first connection" {
 		t.Errorf("first connection text = %q", got[0].Text)
 	}
-	if got[1].Text != "second connection" || !got[1].SpeechFinal {
+	if got[1].Text != "second connection" {
 		t.Errorf("second connection transcript wrong: %+v", got[1])
 	}
 	if eng.cfg.Metrics.Snapshot().STT.Reconnects == 0 {
@@ -609,7 +635,7 @@ func TestEngine_TranscriptCapturedAt(t *testing.T) {
 	srv := newTestServer(t, func(sc serverConn) {
 		done := make(chan struct{})
 		go sc.drainBinary(done)
-		sc.send(resultMsg("hello", true, true, 0, 0.1))
+		sc.send(resultMsg("hello", true, 0, 0.1))
 		select {
 		case <-done:
 			close(closeSeen)
@@ -642,7 +668,7 @@ func TestEngine_TranscriptCapturedAt(t *testing.T) {
 	var got stt.Transcript
 	found := false
 	for tr := range out {
-		if tr.IsFinal {
+		if tr.Text == "hello" {
 			got, found = tr, true
 		}
 	}
@@ -737,7 +763,7 @@ func TestEngine_S1ClockRestartAfterReconnect(t *testing.T) {
 		case <-firstBinary:
 		case <-time.After(2 * time.Second):
 		}
-		sc.send(resultMsg("resumed", true, true, 0, 0.02))
+		sc.send(resultMsg("resumed", true, 0, 0.02))
 		close(finalSent)
 
 		select {
@@ -823,7 +849,7 @@ loop:
 	for {
 		select {
 		case tr := <-out:
-			if tr.Text == "resumed" && tr.IsFinal {
+			if tr.Text == "resumed" {
 				got, found = tr, true
 				break loop
 			}

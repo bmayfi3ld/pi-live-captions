@@ -263,6 +263,15 @@ reports it, clock-skew-corrected, back to the server. See the 2026-08-22 status 
 the caveat this doesn't erase: it measures RTT-plus-render only for viewers that actually connect
 and report, not "the room" as a whole.
 
+> **Superseded (2026-08-22, later same day):** interim results were removed from the pipeline
+> entirely shortly after the fix described below landed — `interim_results=false` on the wire,
+> `Metrics.ObserveInterimLatency` and the `interim_total` / `interim_latency_*` fields deleted, and
+> the viewer now paints only settled `is_final` segments. There is one latency series again
+> (`stt.latency_*_ms`), and it *is* the time-to-first-pixels figure this section was chasing, since
+> there's no longer an earlier interim paint to be pessimistic about. See DESIGN.md §4 for the
+> current model. The finding and fix below are kept as the historical record of why the split
+> existed in the first place.
+
 ### S5 — Finals are timed; interims are what people see — **FIXED (2026-08-22)**
 
 **Original finding, still accurate as of 2026-08-20 (kept for the record):**

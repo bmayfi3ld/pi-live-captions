@@ -17,7 +17,7 @@ One linear flow. Each stage is a package, connected by channels, independently t
 ```
   ┌──────────────┐  chan audio.Frame  ┌────────────┐  chan stt.Transcript  ┌─────────┐
   │ audio.Source │ ─────────────────► │ stt.Engine │ ────────────────────► │   Hub   │
-  └──────────────┘  16 kHz mono s16le └────────────┘   interim + final     └────┬────┘
+  └──────────────┘  16 kHz mono s16le └────────────┘   settled segments    └────┬────┘
     file │ device                      deepgram │ mock                          │
          │                                                        ┌─────────────┼─────────────┐
          └──(tap)──► monitor                                      ▼             ▼             ▼
@@ -125,10 +125,13 @@ type Engine interface {
 Engines self-register (`stt.Register`) and `main` blank-imports them, so adding AssemblyAI or a
 local whisper.cpp touches no existing file.
 
-`Transcript` carries `IsFinal` (text won't be revised), `SpeechFinal` (natural end of utterance),
-media-time `Start`/`Duration` for ordering and display, and `CapturedAt`/`ReceivedAt` — the wall-clock
-pair latency is actually measured from (see section 6) — so replay and live measure latency
-identically regardless of `--speed`.
+`Transcript` is pure observation, with no control flags for the hub to interpret: the engine only
+ever emits text it will not revise, so there is nothing left to flag as final. It carries `Text`,
+media-time `Start`/`Duration` for ordering, display, and gap arithmetic (§4), `Confidence`, and
+`CapturedAt`/`ReceivedAt`/`SentAt` — the wall-clock instants latency is actually measured from (see
+section 6) — so replay and live measure latency identically regardless of `--speed`. Structure
+(when a display row breaks, when a transcript line closes) is derived downstream in the hub, not
+reported by the engine.
 
 `Run` owns its own reconnect logic: it returns only when the context is cancelled or frames run
 out, never on a dropped connection.
@@ -139,8 +142,7 @@ out, never on a dropped connection.
 
 ```
 encoding=linear16&sample_rate=16000&channels=1&model=nova-3&language=en-US
-&interim_results=true&punctuate=true&smart_format=true
-&endpointing=300&utterance_end_ms=1000&vad_events=true
+&interim_results=false&punctuate=true&smart_format=true&endpointing=100
 ```
 
 **WebSocket library: `github.com/coder/websocket`.** Worth recording why, since gorilla/websocket
@@ -195,9 +197,12 @@ that's mistuned for a noisy room — are visible rather than inferred from a Dee
 
 ### Mock (`internal/stt/mock`)
 
-Emits canned phrases with realistic interim → final progression, driven entirely by media time from
-the frames — never wall clock — so output is identical at any `--speed` and reproducible in tests.
-This is what the web layer is developed against.
+Emits canned phrases as settled, punctuated segments — clause-sized chunks separated by realistic
+gaps, only the last segment of a phrase carrying terminal punctuation — driven entirely by media
+time from the frames, never wall clock, so output is identical at any `--speed` and reproducible in
+tests. The inter-phrase gap (2s) is deliberately above `--speech-break`'s default (1.5s), so the
+mock exercises the pause break the same way a real room does. This is what the web layer is
+developed against.
 
 ### Mock-2 (`--engine mock-2`)
 
@@ -215,24 +220,116 @@ write engine-level tests against it, without paying for a single second of real 
 
 ## 4. Caption hub
 
-A recognizer emits many interims per utterance, then one or more `is_final` segments, then
-`speech_final`. The hub (`internal/caption/hub.go`) turns that into stable display lines:
+The pipeline used to paint Deepgram's `is_final: false` interim hypotheses — text the recognizer
+would go on to revise. That cost the audience words swapping under them mid-sentence, and cost the
+code a diffing typesetter that could retroactively re-tag an already-painted word as contradicted.
+Deepgram's `is_final: true` is the fastest text it will ever commit to, so that is now the only
+thing painted (§3's `interim_results=false`). The hub (`internal/caption/hub.go`) turns a stream of
+these settled segments into a display and a transcript.
 
-| input | effect |
-|---|---|
-| interim | replaces the uncommitted tail only |
-| `is_final` | commits a segment; line stays open |
-| `speech_final` / `UtteranceEnd` | closes the line, appends to history |
+### The visual model
 
-Only `speech_final` closes a line — otherwise captions flicker and split mid-sentence. `Flush()` at
-shutdown closes anything still open.
+This is the part that drives every other decision, so it comes first.
+
+**Text rolls.** Segments arrive ~100ms behind the speaker (`--endpointing`) and append to the
+current row. When the next word doesn't fit, the row freezes, the stack glides up one, and the word
+starts the new row. Rows are always full edge to edge.
+
+```
+| ...thank you all for coming out  |
+| today. We're going to start with |
+| a few announcements before the   |   <- filling
+```
+
+**A real pause breaks the row.** The speaker stops for at least `--speech-break` (default 1.5s).
+The current row freezes where it is, even half-full, and the stack glides. New speech starts clean:
+
+```
+| a few announcements before the   |
+| main session.                    |   <- frozen short, by the pause
+| If you can't hear me at the back |   <- new thought, new row
+```
+
+Nothing else breaks a row. Not punctuation, not endpointing, not any other signal.
+
+**Words never change once painted.** That is the whole point of dropping interims, and with an
+append-only client (`internal/web/static/caption.js`) it is true by construction rather than by
+careful diffing.
+
+### One signal per job
+
+The interim/`is_final`/`speech_final` model conflated three separate questions into one threshold.
+Splitting them is the core of the redesign:
+
+| job | signal | why |
+|---|---|---|
+| flush text to screen | every `is_final` segment (`--endpointing`, default 100ms) | fastest never-revised text there is |
+| break a display row | row width, **or** a `--speech-break` gap (default 1.5s) | a caption stack should read as continuous, and reset only when the speaker actually stops |
+| close a transcript line | terminal punctuation, or that same gap, or a 1000-char guard | a file read later wants sentences; a screen watched live wants continuity |
+
+The gap is free: `stt.Transcript` already carries `Start` and `Duration`, so the hub computes
+`t.Start - prevEnd` as arithmetic — no timers, no goroutines. A **negative** gap means the media
+clock restarted (a reconnect or an auto-pause resume), which is a real discontinuity and breaks the
+row too, so that case falls out of the same comparison (`isBreakLocked`) rather than needing its
+own branch.
+
+The break is evaluated, and the line it closes flushed, *before* the new segment is appended — that
+ordering is the subtlest part of `Publish`: it's what makes the pause separate the two utterances
+rather than land inside one. A segment arriving right after a pause can itself be a complete
+sentence ("Good morning."), so `Publish` runs the punctuation/length check a second time,
+unconditionally, after appending — a single call can close two transcript lines: the pause closes
+the utterance already in progress, and the segment that follows closes itself
+(`TestPauseAndPunctuationBothClose` in `hub_test.go`). Skipping that second check whenever the pause
+already closed something would leave the new sentence open until some later segment happened to
+arrive.
+
+`Flush()` at shutdown calls the same close path unconditionally, so the tail of a session isn't
+lost when the speaker was still talking.
 
 **Fan-out never blocks.** Subscribers get a 16-deep buffered channel; one that can't keep up is
 dropped and counted (`slow_disconnects_total`) rather than backpressured. `EventSource` reconnects
 on its own and receives a fresh snapshot, so the cost of a drop is one round trip.
 
-History is capped at 200 lines for late-joiner snapshots — a browser refreshed mid-session is never
-blank.
+History is capped at 20 lines for late-joiner snapshots — far more than the 3 rows a viewer shows,
+and the snapshot event is now its only reader (`Hub.Snapshot()` had no other callers and is gone).
+
+### `--endpointing` / `--speech-break`
+
+The two speech-timing thresholds plumb to different places — `Endpointing` into `stt.Config`
+(Deepgram's own chunking), `SpeechBreak` into `caption.NewHub` (the hub's gap arithmetic) — but
+they get tuned together at a venue, so they live in one `Speech-to-text` flag group and are
+validated against each other: `SpeechBreak` must stay comfortably above `Endpointing`
+(`STTFlags.Validate` in `internal/cli/cli.go`), or every chunk Deepgram commits to would also count
+as a pause, and the display goes back to being ragged — the exact bug an early draft of this design
+shipped before the check existed. Concretely: `Endpointing` sets how fast text lands on screen;
+`SpeechBreak` sets when a pause is meaningful enough to freeze a row and close a line. Conflating
+them is what fragmented the transcript before this split.
+
+### Signals we deliberately don't use
+
+Four trades a future reader would otherwise re-litigate, each recorded with its condition for
+reversal:
+
+1. **`utterance_end_ms` / `vad_events`** — dropped. `UtteranceEnd` is derived from word-timing gaps
+   in the interim stream, so it cannot be kept without turning `interim_results` back on at the
+   wire and filtering revisable text back out in `decodeTranscript`. It's a backstop for *noisy*
+   room-mic audio, where endpointing's energy-based VAD never sees true silence; this deployment
+   runs off a soundboard or lapel feed, where the mic hears the speaker and not the room, so
+   inter-phrase gaps are real digital silence and the hub's own gap arithmetic (above) already
+   covers it. Reconsider if a future deployment target is a noisy room mic rather than a clean
+   feed.
+2. **`punctuate` / `smart_format`** — kept, but no longer cosmetic: they are what lets `closeLocked`
+   detect terminal punctuation, so turning them off would silently degrade `transcript.txt` to the
+   speech-gap fallback for every sentence.
+3. **`speech_final`** — deliberately unused as an utterance boundary. At `--endpointing=100ms` it
+   fires on every small hesitation; treating it as a boundary would shred `transcript.txt` into
+   fragments, which is exactly what an earlier draft of this design did before the mistake was
+   caught. It only becomes meaningful again if `--endpointing` is raised toward something closer to
+   a full utterance pause, at which point revisiting it might be worthwhile.
+4. **Interim results themselves (`is_final: false`)** — the whole point of this design: no revised
+   text ever reaches the hub, so there is nothing to diff. `decodeTranscript` keeps one guard,
+   `if !msg.IsFinal { return }`, purely as defense-in-depth — if `interim_results` is ever flipped
+   back on for debugging, revisable text still can't reach the pipeline.
 
 ---
 
@@ -257,15 +354,24 @@ closing the connection.
 Event wire format:
 
 ```json
-{"seq":42,"kind":"final","id":"u17","text":"...","offset_ms":91230,"at":"2026-08-19T09:31:05.912Z"}
-{"seq":43,"kind":"interim","text":"partial words so far","at":"2026-08-19T09:31:06.001Z"}
-{"seq":44,"kind":"status","state":"reconnecting","detail":"stt websocket closed","at":"2026-08-19T09:31:10.442Z"}
-{"seq":45,"kind":"status","state":"paused","detail":"","at":"2026-08-19T09:31:40.000Z"}
+{"seq":42,"kind":"caption","text":"a few announcements before the","break":false,"at":"2026-08-19T09:31:05.912Z"}
+{"seq":43,"kind":"caption","text":"main session.","break":false,"at":"2026-08-19T09:31:06.301Z"}
+{"seq":44,"kind":"caption","text":"If you can't hear me at the back","break":true,"at":"2026-08-19T09:31:08.912Z"}
+{"seq":45,"kind":"status","state":"reconnecting","detail":"stt websocket closed","at":"2026-08-19T09:31:10.442Z"}
+{"seq":46,"kind":"status","state":"paused","detail":"","at":"2026-08-19T09:31:40.000Z"}
+{"seq":47,"kind":"snapshot","text":"...history joined, plus the open committed text","state":"connected","at":"2026-08-19T09:31:41.000Z"}
 ```
 
-`at` (the publish instant) is stamped on every kind by `newEventLocked`, not just `final` and
-`snapshot` — it used to be absent from `interim` and `status` entirely (the field is `omitzero`),
-until the viewer-latency work needed it on interims too, since that's what a viewer sees first.
+`kind: "final"` and `kind: "interim"` are gone; there is one text-carrying event kind now,
+`caption`. Its `text` is always the new segment only — never the accumulated utterance — so the
+client can append it blindly, and `break` asks the viewer to freeze the current row before
+appending: the speaker actually stopped (§4). `Event` dropped from ten fields to seven along with
+`id`, `offset_ms`, `lines` and `pending`: a `caption` event carries nothing about utterance
+structure any more, because there's no revision left to protect the client from.
+
+`at` (the publish instant) is stamped on every event kind by `newEventLocked`, unconditionally —
+there is no longer a "which kinds get a timestamp" question, since every event kind is
+latency-relevant to some viewer measurement.
 
 `detail` is deliberately left empty for `paused`: the server reports *that* the state changed, but
 the wording shown for it ("no audio" on the viewer, "paused (no audio)" on `/admin`) is a
@@ -275,26 +381,37 @@ Pages are `//go:embed`-ed so the binary ships standalone; `--dev-static` serves 
 iterating.
 
 **Viewer.** The page typesets itself instead of trusting the browser to wrap: one
-`CanvasRenderingContext2D` measures each candidate word against the row width before placing it.
-A browser reflow moves words the reader has already passed sideways and downward on every
-interim; measuring client-side and never re-wrapping avoids that class of motion entirely.
+`CanvasRenderingContext2D` measures each candidate word against the row width before placing it —
+a browser reflow would move words the reader has already passed sideways and downward, and
+measuring client-side avoids that class of motion entirely.
 
-A row closes on exactly two triggers — the next word doesn't fit, or the utterance ends — and both
-run the same freeze-and-glide path: the active row is marked frozen, a new row is appended below
-it, and the whole stack glides up by exactly one row height. The governing invariant: a word, once
-painted, never changes font, never moves sideways, and never moves down. It only ever moves up.
+The typesetter (`internal/web/static/caption.js`) is shared between the viewer and `/admin`, which
+must render identically — one file, two mounts, `window.CaptionStack(opts)`, rather than the
+`/admin` copy silently drifting from a bugfix the viewer got. It used to also be where Deepgram's
+revisable hypotheses were diffed against what was already on screen — a word could change color,
+get yanked back out of a frozen row, or get retroactively re-tagged as contradicted if a later
+revision disagreed with it (`commonPrefixLen`, `removeFromActiveRow`, a three-state `live` /
+`settled` / `stale` word model). All of that is gone: the server now only ever publishes committed,
+never-revised text (§4), so the typesetter has exactly one job — lay words out left-to-right into
+fixed-height rows, and glide the stack up by one row when the current row either runs out of width
+or the server reports the speaker actually paused (`Event.Break`).
 
-State (`live` / `settled` / `stale`) is carried by **color only**, never by font — changing glyph
-metrics mid-word reflows text the reader is already reading. This replaced the old italic
-"pending" line. The trade-off: an interim can still retroactively rewrite earlier words in the
-open row, but once a word has scrolled into a frozen row it is never corrected — it is darkened
-(`stale`) instead, so a reader can see the recognizer disowned it without any layout moving.
+A row closes on exactly two triggers — the next word doesn't fit (`pushWord`), or the server sent
+`break: true` (`breakRow`) — and both run the same `freezeAndGlide` path: the active row is marked
+frozen, a new row is appended below it, and the whole stack glides up by exactly one row height. The
+governing invariant: a word, once painted, is never touched again — it doesn't change color, doesn't
+change font, doesn't move sideways or down. It only ever moves up, by construction rather than by
+careful diffing, since `appendSegment` is the *only* way text enters and nothing calls it with
+anything but a fresh segment. Row opacity by age is the only recency cue left, since there's no more
+revision state for word color to carry.
 
 `computeMetrics()` calibrates canvas measurement against a hidden probe row's real rendered width,
 because canvas resolves a font stack independently of layout and an under-measure would clip a
 word rather than wrap it. `retypeset()`, debounced off `ResizeObserver` and `visualViewport`
-resize, is the only path that ever reflows text — everything else only appends. `?lines=` now
-means visible rows, not utterances.
+resize, is the only path that ever reflows already-painted text — everything else only appends —
+and it no longer needs to replay utterance-boundary metadata to reconstruct rows after a resize,
+because with words immutable and pause breaks not recorded per-word, row structure is purely a
+function of width. `?lines=` means visible rows, not utterances.
 
 The phone is the primary viewer, so it sets the defaults rather than being an afterthought: type
 is larger in portrait (`4vw` is unreadable at phone widths), the visible row count is capped by
@@ -343,7 +460,7 @@ dropped 3 % of its audio must not look identical to a clean one.
 |---|---|
 | source | frames/bytes/seconds, `frames_dropped_total`, `ffmpeg_restarts_total`, `xruns_total`, `ffmpeg_last_stderr` |
 | monitor | `enabled`, `device`, `buffer_ms`, `alive`, `frames_dropped_total` |
-| stt | `state` (now including `paused`), `reconnects_total`, `buffer_drops_total`, `pauses_total`, `paused_sec`, `interim_total`, `final_total`, `bytes_sent_total`, `last_error`, final latency last/p50/p95/max/samples, interim latency last/p50/p95/max/samples, per-phase (upload/recognize/assemble) latency last/p50/p95/max plus `phase_latency_samples` |
+| stt | `state` (now including `paused`), `reconnects_total`, `buffer_drops_total`, `pauses_total`, `paused_sec`, `segments_total`, `lines_total`, `bytes_sent_total`, `last_error`, latency last/p50/p95/max/samples, per-phase (upload/recognize/assemble) latency last/p50/p95/max plus `phase_latency_samples` |
 | web | `sse_clients`, `sse_clients_total`, `events_total`, `slow_disconnects_total`, viewer-reported latency last/p50/p95/max/samples, `viewer_reports_total` |
 | transcript | `path`, `lines_written`, `bytes_written`, `last_write_error` |
 | process | `version`, `session_id`, `started_at`, `uptime`, `goroutines`, `health` |
@@ -372,27 +489,30 @@ samples) as a memory bound; both percentiles and `max` are computed over that wi
 and trimming happens on every read too, so an idle session's window actually empties out rather
 than showing stale figures forever. There used to be a non-decaying session-lifetime max; it's
 gone on purpose. With `--auto-pause` on by default, `writeLoop` flushes up to ~2 s of
-genuinely-old ring pre-roll after every resume (§3), so the first final after each silence is a
+genuinely-old ring pre-roll after every resume (§3), so the first segment after each silence is a
 true but large latency reading — under a non-decaying max that dragged `p95`/`max` up permanently
 on a schedule tied to room silence, not to any actual pipeline problem. Windowing lets that spike
 age out instead of defining the headline figure for the rest of the session.
 
-Interim and final latency are recorded as separate series (`stt.interim_latency_*_ms` vs
-`stt.latency_*_ms`). A viewer sees interim text well before the `SpeechFinal` that closes a line,
-so timing finals alone was pessimistic about perceived latency; `observeLatency`
-(`internal/cli/run.go`) now measures `ReceivedAt − CapturedAt` for every transcript with non-empty
-`Text` and routes the sample to the interim or final series by `IsFinal`. (The empty-`Text` guard
-exists because Deepgram's synthetic `UtteranceEnd` transcript carries no real media range —
-`anchorIndex.At(0)` on it can resolve an unrelated capture instant — see the spec's 2026-08-22
-update for how that surfaced.)
+There is one latency series now, not two (`stt.latency_*_ms`), because there is only one kind of
+segment left to time: every transcript the pipeline emits is already settled, so the headline
+figure *is* time-to-first-pixels — there is no earlier, more optimistic interim paint to also
+track, and no need to reconcile two figures that used to describe different moments. `observeLatency`
+(`internal/cli/run.go`) measures `ReceivedAt − CapturedAt` for every transcript with non-empty
+`Text`. (The empty-`Text` guard is now belt-and-braces rather than load-bearing: it used to exist
+because Deepgram's synthetic `UtteranceEnd` transcript carried no real media range and could let
+`anchorIndex.At(0)` resolve an unrelated capture instant; `UtteranceEnd` is gone — see §4's "Signals
+we deliberately don't use" — and `decodeTranscript` already rejects a Results message with an empty
+alternative, so nothing in this pipeline can reach the guard today. It stays as a defense against a
+future engine emitting a synthetic zero-range result.)
 
-For finals, `observeLatency` additionally splits the total into three phases using
+`observeLatency` additionally splits the total into three phases using
 `Transcript.SentAt` — the wall-clock instant the audio was handed to the recognizer's socket,
 carried alongside `CapturedAt` through `anchorIndex.Add`/`At` — plus the hub's own publish
 instant: upload (`CapturedAt → SentAt`), recognize (`SentAt → ReceivedAt`), assemble
 (`ReceivedAt → publish`). `Metrics.ObservePhases` records all three under one lock or none at
-all, so the split is exact *per sample*: for any one final, upload + recognize + assemble equals
-that final's own `CapturedAt`→publish span. A partial write would let a segment describe a
+all, so the split is exact *per sample*: for any one segment, upload + recognize + assemble equals
+that segment's own `CapturedAt`→publish span. A partial write would let a segment describe a
 different transcript than its neighbours, which is why the three are all-or-nothing.
 
 Note the limit of that guarantee: it is per-sample, not per-percentile. The `/admin` waterfall
@@ -417,9 +537,11 @@ check on the value, and a rate limit shared across all clients rather than per-c
 `web.viewer_latency_*_ms` and `web.viewer_reports_total`.
 
 See `specs/2026-08-20_analysis_caption_latency_measurement.md` for the full accuracy analysis
-this anchor came from, updated 2026-08-22: the anchor-bug findings, the windowed ring/max, the
-interim/final split, and the browser-side instrumentation described above are all now fixed.
-Only the capture side — ADC/USB/audio-server delay before `CapturedAt`, and recovering ffmpeg's
+this anchor came from, updated 2026-08-22: the anchor-bug findings, the windowed ring/max, and the
+browser-side instrumentation described above are all now fixed. That record's interim/final split
+was itself superseded shortly after by the removal of interim results altogether (see §4, above) —
+the spec's own S5 section carries a note pointing here. Only the capture side — ADC/USB/audio-server
+delay before `CapturedAt`, and recovering ffmpeg's
 own PTS — remains open, deliberately deferred as the smallest term in the latency budget; see
 "Remaining work" there.
 
@@ -510,8 +632,9 @@ ready — Ctrl-C to stop
 ▶ 00:04:31 / 31:51 │ stt ● connected │ lat 340ms p95 610ms │ 2 viewers │ 47 lines
 ```
 
-**Interim results are never printed to the terminal** — they'd flood the scrollback, and the web
-page is what they're for.
+**Only closed transcript lines are printed to the terminal, never individual segments** — at
+`--endpointing=100ms` a line can be several segments, and printing each as it lands would flood the
+scrollback; the web page is what the segment-by-segment view is for.
 
 Log levels, each earning its place:
 
@@ -534,8 +657,10 @@ No per-frame logging at any level — at 100 ms chunks that's 10 lines/sec of no
   biggest lever, and costs nothing.
 - **Deepgram bills by streamed audio duration**, and replay at 1.0× costs exactly what live costs.
   Use `--engine mock` for all UI work.
-- If captions feel late, `endpointing` and `utterance_end_ms` are the knobs: lower closes lines
-  sooner at the cost of more mid-sentence breaks. Tune by ear with `--monitor` *before* the event.
+- If captions feel late, `--endpointing` is the knob: lower puts text on screen sooner in smaller
+  pieces, at the cost of `segments_total / lines_total` climbing on `/admin` as phrases fragment.
+  `--speech-break` is the companion knob for when a pause reads as a paragraph break rather than a
+  breath — see §4. Tune both by ear with `--monitor` *before* the event.
 - 401 on first connect is the most likely first-run failure — check `DEEPGRAM_API_KEY`.
 
 ## 11. Layout

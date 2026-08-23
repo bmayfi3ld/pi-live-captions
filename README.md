@@ -97,6 +97,21 @@ warm, or raise `--silence-hold` if quiet-room pauses are firing during ordinary 
 `/admin` and the status line report `pauses_total` and `paused_sec` so a mistuned gate is visible
 rather than inferred from the Deepgram bill.
 
+### Speech timing
+
+Two flags, tuned together at a venue since they're the two speech-timing thresholds — even though
+they control different things (see DESIGN.md §4):
+
+| flag | default | effect |
+|---|---|---|
+| `--endpointing` | `100ms` | Silence before Deepgram finalizes a chunk of speech. Lower puts words on screen sooner in smaller pieces. |
+| `--speech-break` | `1.5s` | Pause that counts as the speaker actually stopping. Freezes the caption row where it is and closes a transcript line. |
+
+`--speech-break` must stay well above `--endpointing` — the CLI rejects a value that isn't, since
+otherwise every chunk Deepgram commits to would also count as a pause and the display goes back to
+being ragged. Watch `Segments / lines` on `/admin` while tuning `--endpointing`: roughly 1–3
+segments per line is healthy, and a ratio climbing well past that means phrases are fragmenting.
+
 ### `version`
 
 ```bash
@@ -134,11 +149,16 @@ rather than an empty page. `?wake=0` skips this entirely.
 
 `/admin` is a metrics dashboard (no auth) polling `/api/stats` once a second — restarts, xruns,
 STT reconnects, buffer drops, auto-pause count and total paused time, SSE client counts, and
-latency: final-caption percentiles over a trailing 5-minute window headline the page, alongside a
-second row for interim ("first pixels") latency and viewer-reported publish→paint latency, plus a
-waterfall breaking a final caption's latency into upload / recognize / assemble phases (with the
-unmeasured capture leg drawn as a labelled hatched segment) and the separately-sampled viewer leg
-set off by a gap. A status badge at the top reads `ok` / `degraded` / `paused` / `closed`: an auto-pause
+latency: caption-segment percentiles over a trailing 5-minute window headline the page — since
+every segment reaching the display is already settled text, that figure *is* time-to-first-pixels,
+with no separate interim reading to reconcile it against — alongside a second row for
+viewer-reported publish→paint latency, plus a waterfall breaking a segment's latency into upload /
+recognize / assemble phases (with the unmeasured capture leg drawn as a labelled hatched segment)
+and the separately-sampled viewer leg set off by a gap. A `Segments / lines` stat shows
+`segments_total` against `lines_total` — the fragmentation readout for `--endpointing`: roughly
+1–3 segments per line is healthy, and a ratio climbing well past that means phrases are splitting
+on every hesitation and `--endpointing` should go up. A status badge at the top reads `ok` /
+`degraded` / `paused` / `closed`: an auto-pause
 shows as "STT Paused," not "Degraded" — it's expected, money-saving behaviour, not a fault — and a
 past blip (a reconnect, a buffer drop) only holds the badge at "Degraded" briefly rather than for
 the rest of the session. Check it during an event to confirm nothing is degrading silently.
@@ -175,10 +195,11 @@ written to `transcripts/<session>/transcript.txt`.
 - **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
   / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
   fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.
-- **Captions lagging** — Deepgram's `endpointing` (300 ms) and `utterance_end_ms` (1000 ms) control
-  how quickly a line closes; they're constants in `internal/stt/deepgram/deepgram.go` rather than
-  flags. Lowering them closes lines sooner at the cost of more mid-sentence breaks. Tune by ear
-  with `--monitor` before the event, and see DESIGN.md §10.
+- **Captions lagging** — `--endpointing` (default `100ms`) controls how long Deepgram waits for
+  silence before it commits a chunk of speech; lowering it puts words on screen sooner in smaller
+  pieces. Watch `Segments / lines` on `/admin` while you tune it — a ratio climbing well past a
+  few segments per line means it's too low and phrases are fragmenting. Tune by ear with
+  `--monitor` before the event, and see DESIGN.md §4.
 - **First word after a quiet spell is missing/late, or the connection pauses during ordinary
   pauses for breath** — auto-pause; loosen it with a lower `--silence-threshold-db` (more negative)
   or a longer `--silence-hold`, or disable it with `--no-auto-pause`. See "Auto-pause" above.

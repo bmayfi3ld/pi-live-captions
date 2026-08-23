@@ -13,13 +13,13 @@ import (
 	"livecaption/internal/metrics"
 )
 
-// Transcript is one result from the recognizer. A single utterance normally
-// arrives as many interim results, then one or more IsFinal segments, then a
-// SpeechFinal marking the natural end of speech.
+// Transcript is one settled segment of speech: the engine only emits text it
+// will not revise, so this is pure observation — what was heard and when —
+// with no control flags left for the hub to interpret. Structure (row breaks,
+// transcript line breaks) is derived downstream from Start/Duration and
+// punctuation, not reported here.
 type Transcript struct {
-	Text        string
-	IsFinal     bool // the engine will not revise this text
-	SpeechFinal bool // natural end of an utterance
+	Text string
 	// Start and Duration are media time, so latency can be measured the same
 	// way for a replayed file and a live capture.
 	Start      time.Duration
@@ -42,14 +42,17 @@ func (t Transcript) End() time.Duration { return t.Start + t.Duration }
 
 // Config is what every engine needs to know to start recognizing.
 type Config struct {
-	Format         audio.Format
-	Model          string
-	Language       string
-	InterimResults bool
-	Keyterms       []string // event-specific proper nouns
-	APIKey         string
-	Metrics        *metrics.Metrics
-	Pause          PauseConfig
+	Format   audio.Format
+	Model    string
+	Language string
+	Keyterms []string // event-specific proper nouns
+	APIKey   string
+	Metrics  *metrics.Metrics
+	Pause    PauseConfig
+	// Endpointing is how long Deepgram waits for silence before finalizing a
+	// chunk of speech. Lower puts words on screen sooner in smaller pieces;
+	// see cli.STTFlags.Endpointing for the validated range.
+	Endpointing time.Duration
 }
 
 // Engine consumes PCM frames and emits transcripts.
