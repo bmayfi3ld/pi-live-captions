@@ -267,9 +267,13 @@ func (e *Engine) runConnection(
 	// makes readLoop of connection N structurally unable to consult the index
 	// of connection N+1, and there is no reset path to race.
 	idx := newAnchorIndex(e.cfg.Format)
+	// pt has the same lifetime for the same reason: a stable prefix is a
+	// statement about what THIS connection's revisions have settled on, and a
+	// reconnect must not carry that state into what is really a fresh window.
+	pt := newPrefixTracker()
 
 	readErr := make(chan error, 1)
-	go func() { readErr <- e.readLoop(connCtx, conn, out, met, log, idx) }()
+	go func() { readErr <- e.readLoop(connCtx, conn, out, met, log, idx, pt) }()
 
 	writeErr := make(chan error, 1)
 	go func() { writeErr <- e.writeLoop(ctx, connCtx, conn, buf, framesClosed, met, gate, idx) }()
@@ -395,14 +399,16 @@ func (e *Engine) writeLoop(
 }
 
 // readLoop decodes server messages into Transcripts until the connection
-// fails or ctx is cancelled.
-func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, met *metrics.Metrics, log *slog.Logger, idx *anchorIndex) error {
+// fails or ctx is cancelled. Every decoded message passes through pt first:
+// pt is what turns Deepgram's revisable interim/final stream into the
+// append-only segments out and everything downstream expect.
+func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, met *metrics.Metrics, log *slog.Logger, idx *anchorIndex, pt *prefixTracker) error {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
 			return err
 		}
-		t, ok, err := decodeTranscript(data)
+		t, isFinal, ok, err := decodeTranscript(data)
 		if err != nil {
 			log.Debug("deepgram: undecodable message", "err", err)
 			continue
@@ -410,18 +416,24 @@ func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- 
 		if !ok {
 			continue
 		}
-		t.ReceivedAt = time.Now()
-		// Anchor the transcript's media end-time to wall-clock capture and
-		// send time on THIS connection. Every transcript reaching this point
-		// carries a real Start/Duration now that UtteranceEnd is gone, which
-		// is also what makes the hub's gap arithmetic (media time minus the
-		// previous segment's end) trustworthy.
-		if capturedAt, sentAt, ok := idx.At(t.End()); ok {
-			t.CapturedAt = capturedAt
-			t.SentAt = sentAt
+		seg, ok := pt.update(t, isFinal)
+		if !ok {
+			// Nothing past the already-published prefix and holdback is
+			// stable yet; wait for the next interim or the final.
+			continue
+		}
+		seg.ReceivedAt = time.Now()
+		// Anchor the segment's media end-time to wall-clock capture and send
+		// time on THIS connection. seg.End() lines up exactly with t.End() of
+		// whichever message triggered the publish, so this is as precise as
+		// the message-level anchor index can be even though seg itself only
+		// covers the newly published tokens.
+		if capturedAt, sentAt, ok := idx.At(seg.End()); ok {
+			seg.CapturedAt = capturedAt
+			seg.SentAt = sentAt
 		}
 		select {
-		case out <- t:
+		case out <- seg:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -458,9 +470,11 @@ func (e *Engine) dialURL() string {
 	q.Set("channels", strconv.Itoa(e.cfg.Format.Channels))
 	q.Set("model", e.cfg.Model)
 	q.Set("language", e.cfg.Language)
-	// interim_results=false: the pipeline only paints is_final segments, so
-	// revisable text would be decoded and thrown away for nothing.
-	q.Set("interim_results", "false")
+	// interim_results=true: prefixTracker (see prefix.go) needs the revisable
+	// stream to publish a stable prefix well before is_final, which is what
+	// keeps text landing at a natural speech cadence instead of arriving in
+	// multi-second bursts gated on Deepgram's own finalization window.
+	q.Set("interim_results", "true")
 	// punctuate and smart_format are load-bearing, not cosmetic: the hub
 	// closes transcript lines on terminal punctuation (§3 of the interim
 	// removal plan), so turning these off would silently degrade
@@ -468,7 +482,7 @@ func (e *Engine) dialURL() string {
 	q.Set("punctuate", "true")
 	q.Set("profanity_filter", "true")
 	q.Set("smart_format", "true")
-	q.Set("endpointing", strconv.Itoa(int(e.cfg.Endpointing.Milliseconds())))
+	// q.Set("endpointing", strconv.Itoa(int(e.cfg.Endpointing.Milliseconds())))
 	for _, k := range e.cfg.Keyterms {
 		q.Add("keyterm", k)
 	}
@@ -561,44 +575,39 @@ type resultsMessage struct {
 	} `json:"channel"`
 }
 
-// decodeTranscript turns one server message into a Transcript. ok is false
-// for messages that carry nothing worth publishing: empty Results (no speech
-// yet), a non-final Results, Metadata, SpeechStarted, and any other
-// unrecognized type.
-func decodeTranscript(data []byte) (t stt.Transcript, ok bool, err error) {
+// decodeTranscript turns one server message into a Transcript plus whether it
+// was Deepgram's is_final for that window. ok is false for messages that
+// carry nothing worth publishing: empty Results (no speech yet), Metadata,
+// SpeechStarted, and any other unrecognized type. Both interim and final
+// Results decode with ok=true — deciding which of their words are actually
+// safe to publish is prefixTracker's job (see prefix.go), not this one's.
+func decodeTranscript(data []byte) (t stt.Transcript, isFinal bool, ok bool, err error) {
 	var head messageType
 	if err := json.Unmarshal(data, &head); err != nil {
-		return stt.Transcript{}, false, err
+		return stt.Transcript{}, false, false, err
 	}
 
 	if head.Type != "Results" {
-		return stt.Transcript{}, false, nil
+		return stt.Transcript{}, false, false, nil
 	}
 
 	var msg resultsMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		return stt.Transcript{}, false, err
-	}
-	// Cheap defense-in-depth: interim_results=false means the wire should
-	// never carry is_final=false, but if that param is ever flipped on for
-	// debugging, this guard keeps revisable text from reaching the hub rather
-	// than relying on the query string alone.
-	if !msg.IsFinal {
-		return stt.Transcript{}, false, nil
+		return stt.Transcript{}, false, false, err
 	}
 	if len(msg.Channel.Alternatives) == 0 {
-		return stt.Transcript{}, false, nil
+		return stt.Transcript{}, false, false, nil
 	}
 	alt := msg.Channel.Alternatives[0]
 	if alt.Transcript == "" {
-		return stt.Transcript{}, false, nil
+		return stt.Transcript{}, false, false, nil
 	}
 	return stt.Transcript{
 		Text:       alt.Transcript,
 		Start:      secondsToDuration(msg.Start),
 		Duration:   secondsToDuration(msg.Duration),
 		Confidence: alt.Confidence,
-	}, true, nil
+	}, msg.IsFinal, true, nil
 }
 
 func secondsToDuration(s float64) time.Duration {

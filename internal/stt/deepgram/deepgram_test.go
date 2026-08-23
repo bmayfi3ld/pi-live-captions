@@ -21,19 +21,25 @@ import (
 
 func TestDecodeTranscript(t *testing.T) {
 	cases := []struct {
-		name string
-		json string
-		want stt.Transcript
-		ok   bool
+		name      string
+		json      string
+		want      stt.Transcript
+		wantFinal bool
+		ok        bool
 	}{
 		{
-			// interim_results=false means the wire should never carry this,
-			// but decodeTranscript must not trust that and paint it anyway:
-			// the IsFinal guard is defense-in-depth for a debug flip.
-			name: "is_final false is dropped",
+			// Deciding what to do with a revisable interim is prefixTracker's
+			// job now; decodeTranscript's only job is to decode it faithfully
+			// and report isFinal alongside it.
+			name: "is_final false decodes as an interim",
 			json: `{"type":"Results","is_final":false,"start":1.5,"duration":0.4,
 				"channel":{"alternatives":[{"transcript":"hello there","confidence":0.82}]}}`,
-			ok: false,
+			want: stt.Transcript{
+				Text:  "hello there",
+				Start: 1500 * time.Millisecond, Duration: 400 * time.Millisecond, Confidence: 0.82,
+			},
+			wantFinal: false,
+			ok:        true,
 		},
 		{
 			name: "final result",
@@ -43,7 +49,8 @@ func TestDecodeTranscript(t *testing.T) {
 				Text:  "good morning everyone",
 				Start: 0, Duration: 2100 * time.Millisecond, Confidence: 0.95,
 			},
-			ok: true,
+			wantFinal: true,
+			ok:        true,
 		},
 		{
 			name: "empty transcript is skipped",
@@ -69,7 +76,7 @@ func TestDecodeTranscript(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok, err := decodeTranscript([]byte(tc.json))
+			got, isFinal, ok, err := decodeTranscript([]byte(tc.json))
 			if err != nil {
 				t.Fatalf("decodeTranscript: %v", err)
 			}
@@ -79,6 +86,9 @@ func TestDecodeTranscript(t *testing.T) {
 			if !ok {
 				return
 			}
+			if isFinal != tc.wantFinal {
+				t.Errorf("isFinal = %v, want %v", isFinal, tc.wantFinal)
+			}
 			if got.Text != tc.want.Text || got.Start != tc.want.Start ||
 				got.Duration != tc.want.Duration || got.Confidence != tc.want.Confidence {
 				t.Errorf("got %+v, want %+v", got, tc.want)
@@ -87,14 +97,15 @@ func TestDecodeTranscript(t *testing.T) {
 	}
 }
 
-// TestDialURL_DropsInterimsAndUtteranceEnd pins the query string this engine
-// asks Deepgram for: no revisable text, no UtteranceEnd/vad_events backstop
-// (both require interim_results=true and are dead weight without it),
-// endpointing driven from Config, and punctuate/smart_format still on. The
-// last two are load-bearing now that the hub closes transcript lines on
-// punctuation — this assertion is what stops a future cleanup from silently
-// removing them.
-func TestDialURL_DropsInterimsAndUtteranceEnd(t *testing.T) {
+// TestDialURL_RequestsInterimsForPrefixTracker pins the query string this
+// engine asks Deepgram for: interim_results=true, since prefixTracker (see
+// prefix.go) needs the revisable stream to publish a stable prefix ahead of
+// is_final; still no UtteranceEnd/vad_events backstop, since prefixTracker
+// gets everything it needs from Results messages alone; and punctuate/
+// smart_format still on, load-bearing now that the hub closes transcript
+// lines on punctuation — this assertion is what stops a future cleanup from
+// silently removing them.
+func TestDialURL_RequestsInterimsForPrefixTracker(t *testing.T) {
 	eng := testEngine("wss://example.invalid")
 	eng.cfg.Endpointing = 150 * time.Millisecond
 
@@ -104,11 +115,11 @@ func TestDialURL_DropsInterimsAndUtteranceEnd(t *testing.T) {
 	}
 	q := u.Query()
 
-	if got := q.Get("interim_results"); got != "false" {
-		t.Errorf("interim_results = %q, want %q", got, "false")
+	if got := q.Get("interim_results"); got != "true" {
+		t.Errorf("interim_results = %q, want %q", got, "true")
 	}
 	if q.Has("utterance_end_ms") {
-		t.Error("utterance_end_ms should not be present: it requires interim_results=true")
+		t.Error("utterance_end_ms should not be present: prefixTracker doesn't need it")
 	}
 	if q.Has("vad_events") {
 		t.Error("vad_events should not be present: its only signal is discarded by decodeTranscript")
@@ -243,9 +254,12 @@ func TestEngine_FullSession(t *testing.T) {
 			}
 		}()
 
-		// A non-final Results should never reach the hub: interim_results is
-		// requested false, but decodeTranscript's IsFinal guard drops it
-		// defensively regardless.
+		// The interim never reaches out on its own: "hello" is only one
+		// token, and prefixTracker needs two agreeing interims (minus
+		// holdback) before it publishes anything. The final then flushes
+		// everything unconditionally, so exactly one transcript is expected
+		// below, with the interim's contribution folded into it rather than
+		// dropped by a separate guard.
 		sc.send(resultMsg("hello", false, 0, 0.4))
 		sc.send(resultMsg("hello world", true, 0, 1.0))
 
