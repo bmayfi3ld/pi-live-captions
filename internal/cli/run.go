@@ -13,6 +13,7 @@ import (
 
 	"livecaption/internal/audio"
 	"livecaption/internal/caption"
+	"livecaption/internal/mdns"
 	"livecaption/internal/metrics"
 	"livecaption/internal/stt"
 	"livecaption/internal/ui"
@@ -32,6 +33,9 @@ type session struct {
 	met     *metrics.Metrics
 	term    *ui.Terminal
 	log     *slog.Logger
+
+	mdnsPub  *mdns.Publisher
+	mdnsName string
 
 	bannerFields []ui.BannerField
 }
@@ -92,6 +96,7 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 	s := &session{
 		src: o.source, monitor: o.monitor, engine: engine,
 		hub: hub, met: met, term: term, log: log,
+		mdnsName: o.server.MDNSName,
 	}
 
 	// Transcripts are recorded for every session unless explicitly disabled.
@@ -155,6 +160,9 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 		ui.BannerField{Label: "viewer", Value: base},
 		ui.BannerField{Label: "admin", Value: base + "/admin"},
 	)
+	if o.server.MDNSName != "" {
+		fields = append(fields, ui.BannerField{Label: "mdns", Value: o.server.MDNSName + ".local"})
+	}
 	s.bannerFields = fields
 	return s, nil
 }
@@ -173,6 +181,7 @@ func (s *session) run(ctx context.Context, openBrowser bool, addr string) error 
 			s.log.Error("web server stopped", "err", err)
 		}
 	}()
+	s.mdnsPub = mdns.Start(s.mdnsName, s.log)
 
 	if s.monitor != nil {
 		if err := s.monitor.Start(ctx); err != nil {
@@ -284,6 +293,8 @@ func (s *session) shutdown() {
 		_ = s.monitor.Close()
 	}
 	_ = s.src.Close()
+
+	s.mdnsPub.Stop()
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

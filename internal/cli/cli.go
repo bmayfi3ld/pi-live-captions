@@ -70,6 +70,7 @@ type ServerFlags struct {
 	Logo      string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
 	Open      bool   `group:"Server" help:"Open the viewer in a browser on start."`
 	DevStatic string `hidden:"" group:"Server" help:"Serve web assets from this directory instead of the embedded copy."`
+	MDNSName  string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
 }
 
 // OutputFlags configure transcript recording, which is on by default.
