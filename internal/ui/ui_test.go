@@ -52,6 +52,21 @@ func TestQuietSuppressesCaptions(t *testing.T) {
 	}
 }
 
+// TestSuppressCaptionsHidesLiveStream covers the default (info-level) case:
+// captions must not reach stdout when SuppressCaptions is set, e.g. from
+// Setup() at anything above debug level, but plain Options{} (its zero value)
+// must keep behaving exactly as before.
+func TestSuppressCaptionsHidesLiveStream(t *testing.T) {
+	var out, errBuf bytes.Buffer
+	term := NewTerminal(Options{Out: &out, Err: &errBuf, SuppressCaptions: true})
+
+	term.Caption(time.Second, "should not appear")
+
+	if out.Len() != 0 {
+		t.Errorf("stdout should be empty with SuppressCaptions, got %q", out.String())
+	}
+}
+
 // TestNoTTYProducesNoANSI is what makes piping to a log file usable: with TTY
 // false (or colour off), output must be plain text, not escape sequences a
 // log viewer would render as garbage.

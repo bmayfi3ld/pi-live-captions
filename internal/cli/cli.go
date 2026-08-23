@@ -27,9 +27,9 @@ type CLI struct {
 
 // Globals apply to every command.
 type Globals struct {
-	LogLevel  string `enum:"debug,info,warn,error" default:"info" group:"Logging" help:"Diagnostic verbosity."`
+	LogLevel  string `enum:"debug,info,warn,error" default:"info" group:"Logging" help:"Diagnostic verbosity. debug also prints the live caption stream to stdout."`
 	LogFormat string `enum:"auto,pretty,json" default:"auto" group:"Logging" help:"auto = pretty on a terminal, JSON when piped."`
-	Verbose   bool   `short:"v" group:"Logging" help:"Shorthand for --log-level=debug."`
+	Verbose   bool   `short:"v" group:"Logging" help:"Shorthand for --log-level=debug, which also shows live captions on stdout."`
 	Quiet     bool   `short:"q" group:"Logging" help:"Suppress captions and status line; warnings and errors only."`
 	NoColor   bool   `env:"NO_COLOR" group:"Logging" help:"Disable coloured output."`
 }

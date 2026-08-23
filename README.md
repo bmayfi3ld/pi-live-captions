@@ -152,6 +152,11 @@ cleanly:
 livecaption replay recording.mp3 > captions.txt 2> run.log
 ```
 
+At the default log level, stdout carries no captions — watching a session only shows the status
+line on stderr, so the terminal doesn't fill up with caption text. Pass `-v` / `--log-level=debug`
+to get the live stream on stdout (e.g. for the redirect above). Either way, every line is also
+written to `transcripts/<session>/transcript.txt`.
+
 ## Running an event: a short checklist
 
 - **Feed a mono aux/matrix send of the mics, not the main mix.** `-ac 1` will happily downmix

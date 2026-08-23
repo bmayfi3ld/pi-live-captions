@@ -5,6 +5,11 @@
 // `livecaption replay f.mp3 > captions.txt 2> run.log` splits cleanly and
 // piping never mixes the two.
 //
+// The live caption stream is hidden from stdout at the default log level, so
+// watching a session only shows the status line; pass --log-level=debug (or
+// -v) to see captions scroll by too. The transcript file gets every line
+// regardless, so nothing is lost by leaving the default level alone.
+//
 // Everything that writes to the terminal goes through one mutex here. The
 // status line and the log handler both target stderr, and without a single
 // owner they interleave into garbage.
@@ -42,6 +47,10 @@ type Terminal struct {
 	color bool
 	quiet bool
 
+	// suppressCaptions hides the live caption stream from stdout, e.g. at the
+	// default log level; the transcript file still records every line.
+	suppressCaptions bool
+
 	mu          sync.Mutex
 	statusText  string
 	statusShown bool
@@ -50,10 +59,11 @@ type Terminal struct {
 }
 
 type Options struct {
-	Out, Err io.Writer
-	TTY      bool
-	Color    bool
-	Quiet    bool
+	Out, Err         io.Writer
+	TTY              bool
+	Color            bool
+	Quiet            bool
+	SuppressCaptions bool
 }
 
 func NewTerminal(o Options) *Terminal {
@@ -64,12 +74,13 @@ func NewTerminal(o Options) *Terminal {
 		o.Err = os.Stderr
 	}
 	return &Terminal{
-		out:   o.Out,
-		err:   o.Err,
-		tty:   o.TTY,
-		color: o.Color && o.TTY,
-		quiet: o.Quiet,
-		done:  make(chan struct{}),
+		out:              o.Out,
+		err:              o.Err,
+		tty:              o.TTY,
+		color:            o.Color && o.TTY,
+		quiet:            o.Quiet,
+		suppressCaptions: o.SuppressCaptions,
+		done:             make(chan struct{}),
 	}
 }
 
@@ -84,9 +95,10 @@ func (t *Terminal) c(code, s string) string {
 
 // Caption prints one finalized line to stdout. Interim results are never
 // printed: they would flood the scrollback, and the web page is what they are
-// for.
+// for. Hidden below --log-level=debug (see suppressCaptions); the transcript
+// file gets the line regardless.
 func (t *Terminal) Caption(offset time.Duration, text string) {
-	if t.quiet {
+	if t.quiet || t.suppressCaptions {
 		return
 	}
 	t.mu.Lock()

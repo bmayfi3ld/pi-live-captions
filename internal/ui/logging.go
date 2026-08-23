@@ -59,17 +59,20 @@ func Setup(c LogConfig) (*Terminal, *slog.Logger) {
 
 	color := !c.NoColor && isTTY && os.Getenv("TERM") != "dumb"
 
-	t := NewTerminal(Options{
-		TTY:   isTTY && pretty,
-		Color: color,
-		Quiet: c.Quiet,
-	})
-
 	// --quiet means warnings and errors only, whatever the level flag says.
 	level := c.level()
 	if c.Quiet && level < slog.LevelWarn {
 		level = slog.LevelWarn
 	}
+
+	t := NewTerminal(Options{
+		TTY:   isTTY && pretty,
+		Color: color,
+		Quiet: c.Quiet,
+		// The live caption stream only shows on stdout at debug level (--verbose
+		// or --log-level=debug); otherwise only the status line is visible.
+		SuppressCaptions: level > slog.LevelDebug,
+	})
 
 	var h slog.Handler
 	if pretty {
