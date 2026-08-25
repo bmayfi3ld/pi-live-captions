@@ -93,10 +93,10 @@ func (t *Terminal) c(code, s string) string {
 
 // --- Captions ---
 
-// Caption prints one finalized line to stdout. Interim results are never
-// printed: they would flood the scrollback, and the web page is what they are
-// for. Hidden below --log-level=debug (see suppressCaptions); the transcript
-// file gets the line regardless.
+// Caption prints one finalized transcript line to stdout, once the hub closes
+// it — never a mid-utterance segment, which would flood the scrollback and is
+// what the web page is for. Hidden below --log-level=debug (see
+// suppressCaptions); the transcript file gets the line regardless.
 func (t *Terminal) Caption(offset time.Duration, text string) {
 	if t.quiet || t.suppressCaptions {
 		return
@@ -255,7 +255,7 @@ func renderStatus(t *Terminal, s metrics.Snapshot) string {
 	fmt.Fprintf(&b, "%d viewer%s", s.Web.Clients, plural(s.Web.Clients))
 
 	b.WriteString(t.c(ansiDim, " │ "))
-	fmt.Fprintf(&b, "%d line%s", s.STT.Final, plural(s.STT.Final))
+	fmt.Fprintf(&b, "%d line%s", s.STT.Lines, plural(s.STT.Lines))
 
 	// Surface silent degradation right on the status line, not just /admin.
 	if drops := s.Source.FramesDropped + s.Monitor.FramesDropped + s.Web.SlowDrops + s.STT.BufferDrops; drops > 0 {
@@ -329,7 +329,7 @@ func (t *Terminal) Summary(s metrics.Snapshot, monitorEnabled bool) {
 	}
 	rows = append(rows, BannerField{
 		Label: "captions",
-		Value: fmt.Sprintf("%d line%s, %s", s.STT.Final, plural(s.STT.Final),
+		Value: fmt.Sprintf("%d line%s, %s", s.STT.Lines, plural(s.STT.Lines),
 			amber(s.STT.Reconnects, "%d stt reconnect%s", s.STT.Reconnects, plural(s.STT.Reconnects))),
 	})
 	if s.STT.LatencyCount > 0 {

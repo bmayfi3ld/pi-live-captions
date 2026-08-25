@@ -207,6 +207,58 @@ func TestSilenceHoldValidation(t *testing.T) {
 	}
 }
 
+// TestSpeechTimingValidation covers the four rejections STTFlags.Validate()
+// enforces around --endpointing / --speech-break, especially the one that
+// would have caught an earlier draft of this change fragmenting the
+// transcript: SpeechBreak <= Endpointing.
+func TestSpeechTimingValidation(t *testing.T) {
+	file := writeTempFile(t)
+
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"endpointing below floor", []string{"--endpointing", "9ms"}},
+		{"endpointing above ceiling", []string{"--endpointing", "2001ms"}},
+		{"speech-break not greater than endpointing", []string{"--endpointing", "150ms", "--speech-break", "150ms"}},
+		{"speech-break less than endpointing", []string{"--endpointing", "150ms", "--speech-break", "100ms"}},
+		{"speech-break below floor", []string{"--speech-break", "199ms"}},
+		{"speech-break above ceiling", []string{"--speech-break", "10001ms"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			args := append([]string{"replay", file}, tc.args...)
+			if _, _, err := Parse(args); err == nil {
+				t.Errorf("%v should be rejected", tc.args)
+			}
+		})
+	}
+
+	// The defaults, and a sane explicit combination, must be accepted.
+	if _, _, err := Parse([]string{"replay", file}); err != nil {
+		t.Errorf("default --endpointing/--speech-break should be accepted: %v", err)
+	}
+	if _, _, err := Parse([]string{"replay", file, "--endpointing", "150ms", "--speech-break", "2s"}); err != nil {
+		t.Errorf("--endpointing 150ms --speech-break 2s should be accepted: %v", err)
+	}
+}
+
+// TestSpeechTimingDefaults guards the plan's chosen defaults directly, since
+// a wrong default here silently changes every session's behavior.
+func TestSpeechTimingDefaults(t *testing.T) {
+	file := writeTempFile(t)
+	_, c, err := Parse([]string{"replay", file})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Replay.Endpointing != 100*time.Millisecond {
+		t.Errorf("Endpointing default = %v, want 100ms", c.Replay.Endpointing)
+	}
+	if c.Replay.SpeechBreak != 1500*time.Millisecond {
+		t.Errorf("SpeechBreak default = %v, want 1.5s", c.Replay.SpeechBreak)
+	}
+}
+
 func TestChunkDurationBounds(t *testing.T) {
 	if _, err := chunkDuration(100); err != nil {
 		t.Errorf("100ms should be valid: %v", err)

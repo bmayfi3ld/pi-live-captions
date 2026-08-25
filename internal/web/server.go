@@ -87,13 +87,19 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.Handle("GET /admin", pageHandler(static, "admin.html"))
 	mux.Handle("GET /", pageHandler(static, "index.html"))
 
-	wakeMP4, err := wakeAssetHandler(static, "wake.mp4", "video/mp4")
+	captionJS, err := staticAssetHandler(static, "caption.js", "text/javascript; charset=utf-8")
+	if err != nil {
+		return nil, err
+	}
+	mux.Handle("GET /caption.js", captionJS)
+
+	wakeMP4, err := staticAssetHandler(static, "wake.mp4", "video/mp4")
 	if err != nil {
 		return nil, err
 	}
 	mux.Handle("GET /wake.mp4", wakeMP4)
 
-	wakeWebm, err := wakeAssetHandler(static, "wake.webm", "video/webm")
+	wakeWebm, err := staticAssetHandler(static, "wake.webm", "video/webm")
 	if err != nil {
 		return nil, err
 	}
@@ -162,18 +168,20 @@ func logoHandler(path string) (http.Handler, error) {
 	}), nil
 }
 
-// wakeAssetHandler serves one of the wake-lock video assets (Backend B, the
-// silent-looping-video wake lock used over plain HTTP) out of the embedded
-// static FS. Read once at startup, same shape as logoHandler.
+// staticAssetHandler serves one file out of the embedded static FS — the
+// wake-lock video assets (Backend B, the silent-looping-video wake lock used
+// over plain HTTP) and caption.js alike. Read once at startup, same shape as
+// logoHandler.
 //
 // Deliberately revalidated rather than cached immutably: the bytes are fixed
 // for a given binary, but the URL is not versioned, so a build that changes
 // the asset (adding the silent audio track Gecko and WebKit require to grant
-// the lock, say) would otherwise never reach a phone that had already cached
-// the old file — the exact failure that made an earlier fix look like a
-// no-op. no-cache still lets the ETag turn the repeat request into a 304, and
-// the file is a few KB on a LAN.
-func wakeAssetHandler(static fs.FS, name, contentType string) (http.Handler, error) {
+// the wake lock, say, or shipping a caption.js fix) would otherwise never
+// reach a phone that had already cached the old file — the exact failure
+// that made an earlier wake-lock fix look like a no-op. no-cache still lets
+// the ETag turn the repeat request into a 304, and every asset served here
+// is a few KB on a LAN.
+func staticAssetHandler(static fs.FS, name, contentType string) (http.Handler, error) {
 	body, err := fs.ReadFile(static, name)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)

@@ -9,8 +9,6 @@
     --bg: #05070a;
     --fg: #f5f7fa;
     --dim: #7c8896;
-    --live: #93b4d8;
-    --stale: #3a4451;
     --warn: #f5a623;
     --bad: #ef4444;
     --ok: #22c55e;
@@ -21,8 +19,6 @@
     --bg: #f4f5f7;
     --fg: #0c0f14;
     --dim: #6b7280;
-    --live: #3b6ea5;
-    --stale: #aeb4bc;
     --ok: #16a34a;
   }
 
@@ -82,13 +78,10 @@
     font-size: clamp(1.35rem, var(--size), 7.5rem);
   }
 
-  /* Word state is color only. No rule here may touch font-style, font-weight,
-     font-size, font-family or letter-spacing between states — that would move
-     glyphs the reader is mid-way through, which is the bug this page fixes. */
-  .w { transition: color 180ms linear; }
-  .w.live { color: var(--live); }
-  .w.settled { color: var(--fg); }
-  .w.stale { color: var(--stale); }
+  /* Words never change once painted (append-only client, commit-only wire),
+     so the only thing color transitions here is the row-glide's opacity fade
+     brushing past a word during its 200ms animation — not a state change. */
+  .w { transition: color 180ms linear; color: var(--fg); }
 
   /* Off-screen probe used only to read computed font metrics; never painted. */
   .row-probe {
@@ -268,6 +261,7 @@
     <div class="gate-sub">Tap to start captions</div>
   </div>
 
+<script src="/caption.js"></script>
 <script>
 (function () {
   "use strict";
@@ -356,14 +350,14 @@
     } catch (err) { /* telemetry must never break caption rendering */ }
   }
 
-  // Called for "final" and "interim" SSE events only — never "snapshot",
-  // whose lines are a catch-up replay stamped with the subscribe instant, so
-  // a paint measurement against it would be measuring nothing real.
+  // Called for "caption" SSE events only — never "snapshot", whose text is a
+  // catch-up replay stamped with the subscribe instant, so a paint
+  // measurement against it would be measuring nothing real.
   function schedulePaintReport(ev) {
     if (!ev || !ev.at) return; // no timestamp to compare against; skip silently
     var publishedAt = Date.parse(ev.at);
     if (isNaN(publishedAt)) return;
-    // rAF fires for the first frame after the DOM write applyUtterance just
+    // rAF fires for the first frame after the DOM write appendSegment just
     // made, which is what "paint" means here — not the microtask/macrotask
     // the SSE handler itself runs in.
     requestAnimationFrame(function () {
@@ -385,329 +379,29 @@
     });
   }
 
-  // ---- typesetter state ----
-  // ledger is the append-only record of every word ever painted (frozen
-  // entries are never touched again). The live tail — the words of the
-  // utterance still in progress — is the one exception: it may be truncated
-  // and re-pushed as revisions arrive, but only back to the first frozen
-  // word, which is immutable, full stop.
-  var ledger = [];          // [{text, state:"live"|"settled", stale, frozen, span, lastOfUtt}]
-  var uttStartIndex = 0;    // ledger index where the open utterance begins
-  var rows = [];            // [{el, words:[entry,...], frozen}], only the last is unfrozen
-  var staleCount = 0;       // debug-only: contradicted-frozen-word counter
-  var LEDGER_CAP = 4000;    // ~200 rows of headroom, mirrors the old 200-line cap
-
-  var ctx = document.createElement("canvas").getContext("2d");
-  var rowH = 0;
-  var usableWidth = 0;
-  var fontScale = 1;
-  var maxRows = requestedLines;
-
-  function tokenize(text) {
-    var t = text.replace(/^\s+|\s+$/g, "");
-    return t ? t.split(/\s+/) : [];
-  }
-
-  function commonPrefixLen(a, b) {
-    var n = a.length < b.length ? a.length : b.length;
-    var i = 0;
-    while (i < n && a[i] === b[i]) i++;
-    return i;
-  }
-
-  function measureWidth(s) {
-    return ctx.measureText(s).width * fontScale;
-  }
-
-  function activeRow() {
-    return rows[rows.length - 1];
-  }
-
-  function rowText(row) {
-    var parts = [];
-    for (var i = 0; i < row.words.length; i++) parts.push(row.words[i].text);
-    return parts.join(" ");
-  }
-
-  function wordClass(entry) {
-    return "w " + (entry.stale ? "stale" : entry.state);
-  }
-
-  function placeInRow(row, entry) {
-    if (row.words.length) row.el.appendChild(document.createTextNode(" "));
-    var span = document.createElement("span");
-    span.className = wordClass(entry);
-    span.textContent = entry.text;
-    row.el.appendChild(span);
-    entry.span = span;
-    row.words.push(entry);
-  }
-
-  function removeFromActiveRow(entry) {
-    var row = activeRow();
-    row.words.pop();
-    if (entry.span && entry.span.parentNode) row.el.removeChild(entry.span);
-    if (row.words.length) {
-      var last = row.el.lastChild;
-      if (last && last.nodeType === 3) row.el.removeChild(last);
-    }
-    entry.span = null;
-  }
-
-  function applyRowOpacities() {
-    var n = rows.length;
-    var levels = [1, 0.85, 0.7];
-    for (var i = 0; i < n; i++) {
-      var age = n - 1 - i;
-      var op = age < levels.length ? levels[age] : 0.55;
-      rows[i].el.style.opacity = String(op);
-    }
-  }
-
-  function makeEmptyRow() {
-    var d = document.createElement("div");
-    d.className = "row";
-    return { el: d, words: [], frozen: false };
-  }
-
-  function trimRows() {
-    while (rows.length > maxRows + 1) {
-      var old = rows.shift();
-      if (old.el.parentNode) old.el.parentNode.removeChild(old.el);
-    }
-  }
-
-  function trimLedger() {
-    var over = ledger.length - LEDGER_CAP;
-    if (over > 0) {
-      ledger.splice(0, over);
-      uttStartIndex = Math.max(0, uttStartIndex - over);
-    }
-  }
-
-  // A row is closed by exactly two triggers — the next word doesn't fit
-  // (pushWord below), or the utterance ends (applyUtterance below) — and
-  // both call this single function. Skipping empty rows means a `final`
-  // landing right on a row boundary can never emit a blank row.
-  function freezeAndGlide(animate) {
-    var row = activeRow();
-    if (!row || row.words.length === 0) return;
-    row.frozen = true;
-    for (var i = 0; i < row.words.length; i++) row.words[i].frozen = true;
-
-    var next = makeEmptyRow();
-    stack.appendChild(next.el);
-    rows.push(next);
-    applyRowOpacities();
-
-    var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (animate && !reduced) {
-      stack.style.transition = "none";
-      stack.style.transform = "translateY(" + rowH + "px)";
-      void stack.offsetHeight; // force reflow before the transition kicks in
-      stack.style.transition = "transform 200ms cubic-bezier(.22,.61,.36,1)";
-      stack.style.transform = "translateY(0)";
-    } else {
-      stack.style.transition = "none";
-      stack.style.transform = "translateY(0)";
-      trimRows();
-    }
-  }
-
-  stack.addEventListener("transitionend", function (e) {
-    if (e.target === stack && e.propertyName === "transform") trimRows();
+  // ---- caption typesetter ----
+  // The rolling-display / pause-break typesetter itself lives in the shared
+  // caption.js (loaded below), so /admin can mount the exact same code and
+  // is guaranteed to render identically rather than drifting from a second
+  // copy. requestedLines is handed in as a getter, not a frozen number,
+  // because the /api/config fetch further down can still raise it after
+  // this page has already mounted the stack.
+  var captionStack = window.CaptionStack({
+    stack: stack,
+    viewport: viewport,
+    page: page,
+    probe: probe,
+    requestedLines: function () { return requestedLines; }
   });
-
-  // pushWord is the only way text reaches the screen.
-  function pushWord(text, state, animate) {
-    var row = activeRow();
-    var cand = row.words.length ? rowText(row) + " " + text : text;
-    if (measureWidth(cand) <= usableWidth) {
-      var entry = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
-      ledger.push(entry);
-      placeInRow(row, entry);
-    } else {
-      freezeAndGlide(animate); // doesn't-fit trigger
-      row = activeRow();
-      if (measureWidth(text) > usableWidth) {
-        hardSplit(text, state, animate);
-      } else {
-        var e2 = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
-        ledger.push(e2);
-        placeInRow(row, e2);
-      }
-    }
-    trimLedger();
-  }
-
-  // Rare case: a single "word" (URL, long compound) wider than the row.
-  // Split it into chunks that fit; each full chunk freezes its own row.
-  function hardSplit(word, state, animate) {
-    var i = 0;
-    while (i < word.length) {
-      var row = activeRow();
-      var end = i + 1;
-      while (end <= word.length && measureWidth(word.slice(i, end)) <= usableWidth) end++;
-      end = end - 1;
-      if (end <= i) end = i + 1; // guarantee progress even for an oversize glyph
-      var chunk = word.slice(i, end);
-      var entry = { text: chunk, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
-      ledger.push(entry);
-      placeInRow(row, entry);
-      i = end;
-      if (i < word.length) freezeAndGlide(animate);
-    }
-  }
-
-  // Handles both "interim" and "final" SSE kinds, which both carry the
-  // WHOLE current utterance text, never a delta (hub.go Publish). Diffs the
-  // incoming text against what is displayed: active-row words past the
-  // common prefix are removed and re-pushed; frozen words the revision
-  // contradicts stay exactly where they are and are re-tagged stale.
-  function applyUtterance(text, isFinal, animate) {
-    var newWords = tokenize(text);
-    var oldEntries = ledger.slice(uttStartIndex);
-    var oldWords = [];
-    var i;
-    for (i = 0; i < oldEntries.length; i++) oldWords.push(oldEntries[i].text);
-    var common = commonPrefixLen(oldWords, newWords);
-    var frozenCount = 0;
-    while (frozenCount < oldEntries.length && oldEntries[frozenCount].frozen) frozenCount++;
-    var keep = common > frozenCount ? common : frozenCount;
-
-    for (i = 0; i < frozenCount; i++) {
-      var fe = oldEntries[i];
-      var shouldBeStale = i >= common;
-      if (shouldBeStale && !fe.stale) {
-        fe.stale = true;
-        if (fe.span) fe.span.className = wordClass(fe);
-        staleCount++;
-      } else if (!shouldBeStale && fe.stale) {
-        fe.stale = false; // a later revision re-confirmed it
-        if (fe.span) fe.span.className = wordClass(fe);
-      }
-    }
-
-    var removeCount = oldEntries.length - keep; // always within the active row: keep >= frozenCount
-    for (i = 0; i < removeCount; i++) {
-      removeFromActiveRow(ledger.pop());
-    }
-
-    for (i = keep; i < newWords.length; i++) {
-      pushWord(newWords[i], "live", animate);
-    }
-
-    if (isFinal) {
-      for (i = uttStartIndex; i < ledger.length; i++) {
-        var e = ledger[i];
-        if (!e.stale && e.state === "live") {
-          e.state = "settled";
-          if (e.span) e.span.className = wordClass(e);
-        }
-      }
-      if (ledger.length > uttStartIndex) ledger[ledger.length - 1].lastOfUtt = true;
-      freezeAndGlide(animate); // utterance-ended trigger; no-ops if active row is empty
-      uttStartIndex = ledger.length;
-    }
-    trimLedger();
-  }
-
-  // Clears the ledger *and* the rows built from it. Both must go together:
-  // EventSource reconnects on its own and every reconnect delivers a fresh
-  // snapshot, so keeping the old rows would replay history on top of itself.
-  function resetAll() {
-    ledger = [];
-    uttStartIndex = 0;
-    staleCount = 0;
-    rebuild();
-  }
-
-  // ---- measurement & layout ----
-  function adjustMaxRows() {
-    var rh = rowH || 1;
-    var fitRows = Math.floor(page.clientHeight / rh) || 1;
-    maxRows = Math.max(1, Math.min(requestedLines, fitRows));
-    viewport.style.height = (maxRows * rowH) + "px";
-  }
-
-  function computeMetrics() {
-    var cs = getComputedStyle(probe);
-    ctx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
-    var box = probe.getBoundingClientRect();
-    var measuredH = Math.ceil(box.height);
-    if (measuredH > 0) {
-      rowH = measuredH;
-      document.documentElement.style.setProperty("--row-h", rowH + "px");
-    }
-    // Canvas resolves a font stack independently of layout — generic families
-    // like ui-sans-serif in particular often don't match — so calibrate
-    // against the real rendered probe. If canvas under-measures, a row that
-    // "fits" would be clipped by overflow:hidden instead of wrapping; the
-    // no-wrap invariant would survive but the reader would lose a word.
-    var canvasW = ctx.measureText(probe.textContent).width;
-    fontScale = (box.width > 0 && canvasW > 0) ? box.width / canvasW : 1;
-    usableWidth = Math.max(1, page.clientWidth - 1);
-    adjustMaxRows();
-  }
-
-  // Rebuilds rows from the ledger from scratch, animation suppressed. Used
-  // at startup, after a snapshot, and by retypeset(). This — plus the
-  // initial build — are the only places row DOM is created outside of
-  // pushWord/freezeAndGlide's normal live-streaming path.
-  function rebuild() {
-    stack.style.transition = "none";
-    stack.style.transform = "translateY(0)";
-    stack.replaceChildren();
-    rows = [];
-    var row = makeEmptyRow();
-    stack.appendChild(row.el);
-    rows.push(row);
-
-    for (var idx = 0; idx < ledger.length; idx++) {
-      var entry = ledger[idx];
-      entry.span = null;
-      entry.frozen = false;
-      row = activeRow();
-      var cand = row.words.length ? rowText(row) + " " + entry.text : entry.text;
-      var fits = row.words.length === 0 || measureWidth(cand) <= usableWidth;
-      if (!fits) {
-        row.frozen = true;
-        for (var k = 0; k < row.words.length; k++) row.words[k].frozen = true;
-        row = makeEmptyRow();
-        stack.appendChild(row.el);
-        rows.push(row);
-      }
-      placeInRow(row, entry);
-      if (entry.lastOfUtt) {
-        row.frozen = true;
-        for (var m = 0; m < row.words.length; m++) row.words[m].frozen = true;
-        row = makeEmptyRow();
-        stack.appendChild(row.el);
-        rows.push(row);
-      }
-    }
-    trimRows();
-    applyRowOpacities();
-  }
-
-  // retypeset() is the ONLY path that reflows text. It runs on resize and
-  // rotation, never mid-stream: nothing in the SSE handling below calls it.
-  function retypeset() {
-    computeMetrics();
-    rebuild();
-  }
 
   var retypesetTimer = null;
   function scheduleRetypeset() {
     if (retypesetTimer) clearTimeout(retypesetTimer);
     retypesetTimer = setTimeout(function () {
       retypesetTimer = null;
-      retypeset();
+      captionStack.retypeset();
     }, 120);
   }
-
-  computeMetrics();
-  rebuild();
 
   if (window.ResizeObserver) {
     new ResizeObserver(scheduleRetypeset).observe(page);
@@ -721,11 +415,8 @@
   fetch("/api/config").then(function (r) { return r.json(); }).then(function (cfg) {
     if (!cfg) return;
     if (!hasLinesParam && cfg.lines > 0) {
-      // Changing the visible row count doesn't touch font metrics or word
-      // wrap, so this is a cheap re-derive, not a full retypeset().
       requestedLines = cfg.lines;
-      adjustMaxRows();
-      trimRows();
+      captionStack.retypeset();
     }
     if (cfg.logo && params.get("logo") !== "0") {
       logoEl.onerror = function () { logoEl.hidden = true; };
@@ -781,11 +472,8 @@
     try { ev = JSON.parse(e.data); } catch (err) { return; }
     switch (ev.kind) {
       case "snapshot":
-        resetAll();
-        (ev.lines || []).forEach(function (line) {
-          applyUtterance(line.text || "", true, false);
-        });
-        applyUtterance(ev.pending || "", false, false);
+        captionStack.resetAll();
+        if (ev.text) captionStack.appendSegment(ev.text, false);
         sseOpen = true;
         // Replay the server's last-known state: a client that (re)connects
         // mid-pause would otherwise sit on hubState's initial null and
@@ -795,12 +483,9 @@
         // don't clobber a state this client already knows about.
         if (ev.state) { hubState = ev.state; }
         break;
-      case "final":
-        applyUtterance(ev.text || "", true, true);
-        schedulePaintReport(ev);
-        break;
-      case "interim":
-        applyUtterance(ev.text || "", false, true);
+      case "caption":
+        if (ev.break) captionStack.breakRow(true);
+        captionStack.appendSegment(ev.text || "", true);
         schedulePaintReport(ev);
         break;
       case "status":
@@ -976,7 +661,6 @@
           '<div class="drow"><span class="k">latency p50</span><span>' + fmtMs(stt.latency_p50_ms) + '</span></div>' +
           '<div class="drow"><span class="k">viewer paint</span><span>' + fmtMs(lastViewerPaintMs) + '</span></div>' +
           '<div class="drow"><span class="k">clock offset</span><span>' + fmtMs(clockOffsetKnown ? clockOffsetMs : NaN) + '</span></div>' +
-          '<div class="drow"><span class="k">stale words</span><span>' + staleCount + '</span></div>' +
           '<div class="drow"><span class="k">wake</span><span>' + wakeDebugText() + '</span></div>';
       }).catch(function () {
         debugEl.innerHTML = '<div class="drow"><span class="k">debug</span><span>stats unavailable</span></div>';

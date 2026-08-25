@@ -64,7 +64,7 @@ func TestLatencySeriesEvictsSamplesOutsideWindow(t *testing.T) {
 
 	// Back-date the spike (and only the spike) past the window.
 	m.mu.Lock()
-	m.latFinal.samples[0].at = time.Now().Add(-latencyWindow - time.Second)
+	m.latCaption.samples[0].at = time.Now().Add(-latencyWindow - time.Second)
 	m.mu.Unlock()
 
 	snap := m.Snapshot()
@@ -118,10 +118,10 @@ func TestLatencySeriesBackingArrayDoesNotGrowUnbounded(t *testing.T) {
 		// Age every sample observed so far out of the window before the next
 		// one lands, forcing trim to compact on every call.
 		m.mu.Lock()
-		for j := range m.latFinal.samples {
-			m.latFinal.samples[j].at = time.Now().Add(-latencyWindow - time.Second)
+		for j := range m.latCaption.samples {
+			m.latCaption.samples[j].at = time.Now().Add(-latencyWindow - time.Second)
 		}
-		arrCap := cap(m.latFinal.samples)
+		arrCap := cap(m.latCaption.samples)
 		m.mu.Unlock()
 		if arrCap > latencyCap+1 {
 			t.Fatalf("iteration %d: backing array cap = %d, want bounded near latencyCap (%d)", i, arrCap, latencyCap)
@@ -138,8 +138,8 @@ func TestLatencySeriesIdleSessionEmpties(t *testing.T) {
 	m.ObserveLatency(75 * time.Millisecond)
 
 	m.mu.Lock()
-	for i := range m.latFinal.samples {
-		m.latFinal.samples[i].at = time.Now().Add(-latencyWindow - time.Second)
+	for i := range m.latCaption.samples {
+		m.latCaption.samples[i].at = time.Now().Add(-latencyWindow - time.Second)
 	}
 	m.mu.Unlock()
 
@@ -150,23 +150,6 @@ func TestLatencySeriesIdleSessionEmpties(t *testing.T) {
 	if snap.STT.LatencyLast != 0 || snap.STT.LatencyP50 != 0 || snap.STT.LatencyP95 != 0 || snap.STT.LatencyMax != 0 {
 		t.Errorf("figures should all read 0 once idle, got last=%v p50=%v p95=%v max=%v",
 			snap.STT.LatencyLast, snap.STT.LatencyP50, snap.STT.LatencyP95, snap.STT.LatencyMax)
-	}
-}
-
-// TestFinalAndInterimLatencyAreIndependent guards the split: a sample fed to
-// one series must never leak into the other's percentiles.
-func TestFinalAndInterimLatencyAreIndependent(t *testing.T) {
-	m := New("v", "s")
-	m.ObserveLatency(100 * time.Millisecond)
-	m.ObserveInterimLatency(20 * time.Millisecond)
-	m.ObserveInterimLatency(30 * time.Millisecond)
-
-	snap := m.Snapshot()
-	if snap.STT.LatencyCount != 1 || snap.STT.LatencyLast != 100.0 {
-		t.Errorf("final series = count %d last %v, want count 1 last 100", snap.STT.LatencyCount, snap.STT.LatencyLast)
-	}
-	if snap.STT.InterimLatencyCount != 2 || snap.STT.InterimLatencyLast != 30.0 {
-		t.Errorf("interim series = count %d last %v, want count 2 last 30", snap.STT.InterimLatencyCount, snap.STT.InterimLatencyLast)
 	}
 }
 
@@ -473,12 +456,11 @@ func TestConcurrentAccessIsRaceFree(t *testing.T) {
 				m.SetLastStderr("glitch")
 				m.SetSTTState(StateConnected)
 				m.STTReconnect()
-				m.STTInterim()
-				m.STTFinal()
+				m.STTSegment()
+				m.STTLine()
 				m.STTBytesSent(10)
 				m.SetSTTError(errors.New("blip"))
 				m.ObserveLatency(time.Duration(i) * time.Millisecond)
-				m.ObserveInterimLatency(time.Duration(i) * time.Millisecond)
 				m.ObserveViewerLatency(time.Duration(i) * time.Millisecond)
 				m.ObservePhases(time.Duration(i)*time.Millisecond, time.Duration(i)*time.Millisecond, time.Duration(i)*time.Millisecond)
 				m.SSEConnect()

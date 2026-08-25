@@ -74,8 +74,8 @@ type Metrics struct {
 	sttState       atomic.Int32
 	sttStateHook   atomic.Pointer[func(ConnState)]
 	sttReconnect   atomic.Int64
-	sttInterim     atomic.Int64
-	sttFinal       atomic.Int64
+	sttSegments    atomic.Int64
+	sttLines       atomic.Int64
 	sttBytesSent   atomic.Int64
 	sttPauses      atomic.Int64
 	sttBufferDrops atomic.Int64
@@ -98,8 +98,7 @@ type Metrics struct {
 	sttPauseStart  time.Time     // zero when no pause is currently open
 	sttPausedTotal time.Duration // accumulated from completed pauses only
 	transcriptErr  string
-	latFinal       latencySeries // finals: the headline figure
-	latInterim     latencySeries // interims: what a viewer actually sees first
+	latCaption     latencySeries // one series now that there's only one kind of segment: the headline figure
 	latViewer      latencySeries // browser-reported publish->paint, POSTed by viewers
 	latUpload      latencySeries // CapturedAt -> released to the recognizer's socket
 	latRecognize   latencySeries // released -> ReceivedAt
@@ -279,8 +278,16 @@ func (m *Metrics) STTReconnect() {
 	m.markDegradedLocked()
 	m.mu.Unlock()
 }
-func (m *Metrics) STTInterim()        { m.sttInterim.Add(1) }
-func (m *Metrics) STTFinal()          { m.sttFinal.Add(1) }
+
+// STTSegment counts a caption segment painted to the display. Kept
+// deliberately distinct from STTLine: segments_total / lines_total is the
+// direct readout for whether --endpointing is sane — a ratio climbing well
+// past a few segments per line means it is too low and phrases are
+// fragmenting.
+func (m *Metrics) STTSegment() { m.sttSegments.Add(1) }
+
+// STTLine counts a transcript line closed by the hub.
+func (m *Metrics) STTLine()           { m.sttLines.Add(1) }
 func (m *Metrics) STTBytesSent(n int) { m.sttBytesSent.Add(int64(n)) }
 
 // STTBufferDrop records an eviction from the reconnect ring that happened
@@ -337,19 +344,13 @@ func (m *Metrics) STTPauseEnd() {
 	m.sttPauseStart = time.Time{}
 }
 
-// ObserveLatency records how far behind wall clock a final caption arrived —
-// the headline figure.
+// ObserveLatency records how far behind wall clock a caption segment
+// arrived. There is only one series now, since every segment the pipeline
+// emits is already settled: the headline figure IS time-to-first-pixels,
+// with no earlier, more optimistic paint to also track.
 func (m *Metrics) ObserveLatency(d time.Duration) {
 	m.mu.Lock()
-	m.latFinal.observe(d, time.Now())
-	m.mu.Unlock()
-}
-
-// ObserveInterimLatency records how far behind wall clock an interim caption
-// arrived — what a viewer actually sees first, before the final replaces it.
-func (m *Metrics) ObserveInterimLatency(d time.Duration) {
-	m.mu.Lock()
-	m.latInterim.observe(d, time.Now())
+	m.latCaption.observe(d, time.Now())
 	m.mu.Unlock()
 }
 
@@ -462,8 +463,8 @@ type Snapshot struct {
 		State        string  `json:"state"`
 		Reconnects   int64   `json:"reconnects_total"`
 		BufferDrops  int64   `json:"buffer_drops_total"`
-		Interim      int64   `json:"interim_total"`
-		Final        int64   `json:"final_total"`
+		Segments     int64   `json:"segments_total"`
+		Lines        int64   `json:"lines_total"`
 		BytesSent    int64   `json:"bytes_sent_total"`
 		LastError    string  `json:"last_error"`
 		LastErrorAt  string  `json:"last_error_at"`
@@ -472,12 +473,6 @@ type Snapshot struct {
 		LatencyP95   float64 `json:"latency_p95_ms"`
 		LatencyMax   float64 `json:"latency_max_ms"`
 		LatencyCount int     `json:"latency_samples"`
-
-		InterimLatencyLast  float64 `json:"interim_latency_last_ms"`
-		InterimLatencyP50   float64 `json:"interim_latency_p50_ms"`
-		InterimLatencyP95   float64 `json:"interim_latency_p95_ms"`
-		InterimLatencyMax   float64 `json:"interim_latency_max_ms"`
-		InterimLatencyCount int     `json:"interim_latency_samples"`
 
 		UploadLatencyLast float64 `json:"upload_latency_last_ms"`
 		UploadLatencyP50  float64 `json:"upload_latency_p50_ms"`
@@ -549,8 +544,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	// actually empty out, rather than showing stale figures forever.
 	m.mu.Lock()
 	now := time.Now()
-	finalLast, finalP50, finalP95, finalMax, finalN := m.latFinal.stats(now)
-	interimLast, interimP50, interimP95, interimMax, interimN := m.latInterim.stats(now)
+	capLast, capP50, capP95, capMax, capN := m.latCaption.stats(now)
 	viewerLast, viewerP50, viewerP95, viewerMax, viewerN := m.latViewer.stats(now)
 	uploadLast, uploadP50, uploadP95, uploadMax, uploadN := m.latUpload.stats(now)
 	recognizeLast, recognizeP50, recognizeP95, recognizeMax, _ := m.latRecognize.stats(now)
@@ -596,24 +590,18 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.STT.State = ConnState(m.sttState.Load()).String()
 	s.STT.Reconnects = m.sttReconnect.Load()
 	s.STT.BufferDrops = m.sttBufferDrops.Load()
-	s.STT.Interim = m.sttInterim.Load()
-	s.STT.Final = m.sttFinal.Load()
+	s.STT.Segments = m.sttSegments.Load()
+	s.STT.Lines = m.sttLines.Load()
 	s.STT.BytesSent = m.sttBytesSent.Load()
 	s.STT.LastError = sttErr
 	if !sttErrAt.IsZero() {
 		s.STT.LastErrorAt = sttErrAt.Format(time.RFC3339)
 	}
-	s.STT.LatencyLast = ms(finalLast)
-	s.STT.LatencyP50 = ms(finalP50)
-	s.STT.LatencyP95 = ms(finalP95)
-	s.STT.LatencyMax = ms(finalMax)
-	s.STT.LatencyCount = finalN
-
-	s.STT.InterimLatencyLast = ms(interimLast)
-	s.STT.InterimLatencyP50 = ms(interimP50)
-	s.STT.InterimLatencyP95 = ms(interimP95)
-	s.STT.InterimLatencyMax = ms(interimMax)
-	s.STT.InterimLatencyCount = interimN
+	s.STT.LatencyLast = ms(capLast)
+	s.STT.LatencyP50 = ms(capP50)
+	s.STT.LatencyP95 = ms(capP95)
+	s.STT.LatencyMax = ms(capMax)
+	s.STT.LatencyCount = capN
 
 	s.STT.UploadLatencyLast = ms(uploadLast)
 	s.STT.UploadLatencyP50 = ms(uploadP50)

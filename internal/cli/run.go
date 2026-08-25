@@ -68,7 +68,7 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 		met.MonitorEnabled = true
 	}
 
-	hub := caption.NewHub(met)
+	hub := caption.NewHub(met, o.stt.SpeechBreak)
 
 	// Wired before anything starts so the very first SetSTTState call (idle ->
 	// connecting) already reaches the viewer. Hub.PublishStatus takes its own
@@ -76,13 +76,13 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 	met.SetSTTStateHook(func(s metrics.ConnState) { hub.PublishStatus(s.String(), "") })
 
 	engine, err := stt.New(o.stt.Engine, stt.Config{
-		Format:         audio.PipelineFormat,
-		Model:          o.stt.Model,
-		Language:       o.stt.Language,
-		InterimResults: true,
-		Keyterms:       o.stt.Keyterm,
-		APIKey:         o.stt.APIKey,
-		Metrics:        met,
+		Format:      audio.PipelineFormat,
+		Model:       o.stt.Model,
+		Language:    o.stt.Language,
+		Keyterms:    o.stt.Keyterm,
+		APIKey:      o.stt.APIKey,
+		Metrics:     met,
+		Endpointing: o.stt.Endpointing,
 		Pause: stt.PauseConfig{
 			Enabled:     o.stt.AutoPause,
 			ThresholdDB: o.stt.SilenceDB,
@@ -243,30 +243,28 @@ func (s *session) run(ctx context.Context, openBrowser bool, addr string) error 
 }
 
 // observeLatency records the wall-clock delay between the audio being
-// captured and the caption for it arriving, for both interims (their own
-// series, since that's what a viewer sees first) and finals (the headline
-// figure). Anchoring on the frame's capture instant — rather than on media
-// time plus a stream origin — is what makes the figure survive auto-pause,
-// reconnects, dropped frames and ffmpeg restarts, all of which move the
-// recognizer's media clock relative to the wall.
+// captured and the caption segment for it arriving — the headline figure,
+// and now the only one: every segment reaching the hub is already settled,
+// so there is no earlier, more optimistic paint to track separately.
+// Anchoring on the frame's capture instant — rather than on media time plus a
+// stream origin — is what makes the figure survive auto-pause, reconnects,
+// dropped frames and ffmpeg restarts, all of which move the recognizer's
+// media clock relative to the wall.
 //
-// For finals it additionally splits the total into upload / recognize /
-// assemble phases using SentAt and publishedAt, when both are available.
+// It additionally splits the total into upload / recognize / assemble phases
+// using SentAt and publishedAt, when both are available.
 func (s *session) observeLatency(t stt.Transcript, publishedAt time.Time) {
-	// An empty Text excludes Deepgram's synthetic UtteranceEnd, which carries
-	// no media range: idx.At(0) can resolve an unrelated capture instant, and
-	// recording that as a latency sample would be pure noise. This used to be
-	// harmless only because UtteranceEnd has IsFinal == false and the old
-	// filter dropped every interim.
+	// The empty-Text guard used to exist for Deepgram's synthetic
+	// UtteranceEnd, which carried no media range and would let idx.At(0)
+	// resolve an unrelated capture instant. UtteranceEnd is gone and
+	// decodeTranscript already rejects a Results message with an empty
+	// alternative, so nothing in this pipeline can reach here with an empty
+	// Text today — this is now belt-and-braces against a future engine
+	// emitting a synthetic zero-range result.
 	if t.ReceivedAt.IsZero() || t.CapturedAt.IsZero() || t.Text == "" {
 		return
 	}
-	d := t.ReceivedAt.Sub(t.CapturedAt)
-	if !t.IsFinal {
-		s.met.ObserveInterimLatency(d)
-		return
-	}
-	s.met.ObserveLatency(d)
+	s.met.ObserveLatency(t.ReceivedAt.Sub(t.CapturedAt))
 
 	// The phase split needs SentAt as well; without it the total above is
 	// still sound, we just can't attribute it.
@@ -276,8 +274,8 @@ func (s *session) observeLatency(t stt.Transcript, publishedAt time.Time) {
 	// upload + recognize + assemble must exactly equal publishedAt - CapturedAt:
 	// the stacked bar on /admin sits directly under the headline total, so any
 	// drift between them would be visible and wrong. Note the phase total
-	// spans CapturedAt->publishedAt while the headline final latency above
-	// spans CapturedAt->ReceivedAt — that's intended, the bar shows one stage
+	// spans CapturedAt->publishedAt while the headline latency above spans
+	// CapturedAt->ReceivedAt — that's intended, the bar shows one stage
 	// further than the headline.
 	s.met.ObservePhases(
 		t.SentAt.Sub(t.CapturedAt),

@@ -1,5 +1,5 @@
-// Package caption turns a stream of recognizer results into stable display
-// lines and fans them out to subscribers.
+// Package caption turns a stream of settled recognizer segments into stable
+// display lines and fans them out to subscribers.
 package caption
 
 import (
@@ -11,38 +11,39 @@ import (
 	"livecaption/internal/stt"
 )
 
-// Kind distinguishes the three things a subscriber can receive.
+// Kind distinguishes the things a subscriber can receive.
 type Kind string
 
 const (
-	KindInterim  Kind = "interim"  // in-progress line, will be replaced
-	KindFinal    Kind = "final"    // closed line, will never change
+	KindCaption  Kind = "caption"  // one settled segment, append-only
 	KindStatus   Kind = "status"   // connection state changed
 	KindSnapshot Kind = "snapshot" // catch-up sent to a new subscriber
 )
 
 // Event is what goes over SSE. One JSON object per message.
 type Event struct {
-	Seq      int64  `json:"seq"`
-	Kind     Kind   `json:"kind"`
-	ID       string `json:"id,omitempty"`
-	Text     string `json:"text,omitempty"`
-	OffsetMS int64  `json:"offset_ms,omitempty"`
+	Seq  int64 `json:"seq"`
+	Kind Kind  `json:"kind"`
+	// Text is the new segment only on a caption event — never the
+	// accumulated utterance — so the client can append it blindly. On a
+	// snapshot event it is the whole replay flow instead: history joined
+	// plus the open committed text.
+	Text string `json:"text,omitempty"`
+	// Break asks the viewer to freeze the current row before appending Text:
+	// the speaker actually stopped. It is the ONLY thing that breaks a row
+	// other than running out of width.
+	Break bool `json:"break,omitempty"`
 	// omitzero, not omitempty: omitempty has no effect on a struct, so an
 	// unset time would serialize as "0001-01-01T00:00:00Z".
 	At time.Time `json:"at,omitzero"`
 
-	// Status events only.
+	// Status and snapshot events only.
 	State  string `json:"state,omitempty"`
 	Detail string `json:"detail,omitempty"`
-
-	// Snapshot events only: the recent finalized lines plus any pending text,
-	// so a browser that reconnects mid-sentence isn't left blank.
-	Lines   []Line `json:"lines,omitempty"`
-	Pending string `json:"pending,omitempty"`
 }
 
-// Line is one finalized caption.
+// Line is one finalized caption: the OnFinal payload for the transcript
+// writer and terminal. It never appears on the wire.
 type Line struct {
 	ID       string    `json:"id"`
 	Text     string    `json:"text"`
@@ -50,30 +51,50 @@ type Line struct {
 	At       time.Time `json:"at"`
 }
 
-// historyLimit is how many finalized lines are kept for late joiners. The
-// viewer shows two or three; the rest is headroom for a page that wants more.
-const historyLimit = 200
+// historyLimit is how many finalized lines are kept for late joiners, and
+// with Hub.Snapshot() gone this is also the whole replay window: a snapshot
+// event is its only reader, so a second "how much to replay" constant would
+// be dead weight. 20 is far more than the 3 rows a viewer shows.
+const historyLimit = 20
 
 // subscriberBuffer is how far a subscriber may fall behind before being
 // dropped. Captions are realtime — a browser that cannot keep up is better off
 // reconnecting and getting a fresh snapshot than receiving stale text.
 const subscriberBuffer = 16
 
+// maxUtteranceChars force-closes a transcript line if neither punctuation nor
+// a speech gap ever does, so a misrecognition or an unusually long
+// unpunctuated ramble can't grow a single line without bound.
+const maxUtteranceChars = 1000
+
 // Hub assembles utterances and broadcasts them.
 //
-// A recognizer emits many interim results per utterance, then one or more
-// IsFinal segments, then a SpeechFinal. Only SpeechFinal closes a display
-// line, so captions don't flicker mid-sentence.
+// The engine only emits settled, never-revised segments (see stt.Transcript),
+// so there is nothing left to diff — a segment is painted once and stays on
+// screen unchanged, which is the whole point of the append-only wire format
+// below. What the hub derives is structure — when a display row breaks and
+// when a transcript line closes — from media-time gaps and terminal
+// punctuation, since the engine itself no longer reports either.
 type Hub struct {
 	mu      sync.RWMutex
 	seq     int64
 	uttSeq  int64
 	history []Line
-	// pending is the text of the utterance in progress: finalized segments
-	// already committed, plus the latest interim tail.
+	// committed is the text of the transcript line in progress.
 	committed string
-	interim   string
 	uttStart  time.Duration
+	// prevEnd is the media time the last segment covered, so the gap to the
+	// next one can be measured without a clock.
+	prevEnd time.Duration
+	// breakGap is how long the audio must go quiet before it counts as the
+	// speaker actually stopping, rather than drawing breath. It drives both
+	// the viewer's row break and the transcript's fallback line break.
+	//
+	// Deliberately far above --endpointing: endpointing decides how big a
+	// chunk Deepgram commits to (100ms, so text lands fast), while this
+	// decides when a pause is meaningful to a reader. Conflating the two is
+	// what made an earlier draft of this change fragment the transcript.
+	breakGap time.Duration
 	// lastState/lastDetail are the most recent status published via
 	// PublishStatus. Subscribe replays them into the snapshot event so a
 	// client that connects (or reconnects) mid-pause learns the current
@@ -88,79 +109,122 @@ type Hub struct {
 	OnFinal func(Line)
 }
 
-func NewHub(m *metrics.Metrics) *Hub {
-	return &Hub{subs: make(map[chan Event]struct{}), metrics: m}
+func NewHub(m *metrics.Metrics, breakGap time.Duration) *Hub {
+	return &Hub{subs: make(map[chan Event]struct{}), metrics: m, breakGap: breakGap}
 }
 
-// Publish feeds one recognizer result into the hub.
+// Publish feeds one settled segment into the hub. The straight-line shape
+// below is deliberate: there is exactly one thing to do with a segment, not
+// three branches keyed off control flags the engine no longer reports.
 func (h *Hub) Publish(t stt.Transcript) {
 	text := strings.TrimSpace(t.Text)
-
-	h.mu.Lock()
-	if h.committed == "" && h.interim == "" {
-		h.uttStart = t.Start
+	if text == "" {
+		return
 	}
 
-	switch {
-	case t.SpeechFinal:
-		// Natural end of speech: close the line.
-		full := joinText(h.committed, text)
-		h.committed, h.interim = "", ""
-		if full == "" {
-			h.mu.Unlock()
-			return
-		}
-		h.uttSeq++
-		line := Line{
-			ID:       "u" + itoa(h.uttSeq),
-			Text:     full,
-			OffsetMS: h.uttStart.Milliseconds(),
-			At:       time.Now(),
-		}
-		h.history = append(h.history, line)
-		if len(h.history) > historyLimit {
-			h.history = h.history[len(h.history)-historyLimit:]
-		}
-		ev := h.newEventLocked(KindFinal)
-		ev.ID, ev.Text, ev.OffsetMS, ev.At = line.ID, line.Text, line.OffsetMS, line.At
-		onFinal := h.OnFinal
-		h.mu.Unlock()
+	h.mu.Lock()
+	// The break must be evaluated, and the line it closes flushed, BEFORE
+	// this segment is appended — otherwise a pause lands inside the new
+	// utterance instead of separating it from the old one.
+	broke := h.isBreakLocked(t)
+	before, closedBefore := h.closeLocked(broke) // flush what came before the pause
+	if h.committed == "" {
+		h.uttStart = t.Start
+	}
+	h.committed = joinText(h.committed, text)
+	h.prevEnd = t.End()
 
+	ev := h.newEventLocked(KindCaption)
+	ev.Text, ev.Break = text, broke // the delta, never the accumulation
+
+	// Deliberately unconditional, not gated on the flush above having been a
+	// no-op: a segment arriving right after a pause can itself be a whole
+	// sentence ("Good morning."), so both lines close in this one call.
+	// Skipping this whenever the pause already closed something would leave
+	// that sentence open until the next segment happened to arrive, delaying
+	// its transcript write and terminal print by a whole utterance.
+	after, closedAfter := h.closeLocked(false) // punctuation / length
+	onFinal := h.OnFinal
+	h.mu.Unlock()
+
+	if h.metrics != nil {
+		h.metrics.STTSegment()
+	}
+	h.broadcast(ev)
+
+	closeLine := func(l Line) {
 		if h.metrics != nil {
-			h.metrics.STTFinal()
+			h.metrics.STTLine()
 		}
 		if onFinal != nil {
-			onFinal(line)
+			onFinal(l)
 		}
-		h.broadcast(ev)
+	}
+	if closedBefore {
+		closeLine(before)
+	}
+	if closedAfter {
+		closeLine(after)
+	}
+}
 
-	case t.IsFinal:
-		// A settled segment, but speech continues. Commit it and keep going;
-		// the display shows the accumulated text as still-in-progress.
-		h.committed = joinText(h.committed, text)
-		h.interim = ""
-		ev := h.newEventLocked(KindInterim)
-		ev.Text = h.committed
-		h.mu.Unlock()
-		if h.metrics != nil {
-			h.metrics.STTInterim()
-		}
-		h.broadcast(ev)
+// isBreakLocked reports whether the gap between the previous segment and t
+// counts as the speaker actually stopping. A negative gap means the media
+// clock restarted — a reconnect or an auto-pause resume — which is a real
+// discontinuity and breaks the row too, so that case falls out of the same
+// comparison rather than needing its own branch.
+//
+// Callers must hold h.mu.
+func (h *Hub) isBreakLocked(t stt.Transcript) bool {
+	gap := t.Start - h.prevEnd
+	return gap < 0 || gap >= h.breakGap
+}
 
+// closeLocked ends the open transcript line. Three signals, each suited to
+// its job — and note speech_final is NOT among them: at --endpointing=100ms
+// it fires on every hesitation, which would fragment transcript.txt.
+//
+//   - endsSentence: the semantic boundary, and what fires in normal speech.
+//     Deepgram punctuates every segment (punctuate + smart_format in
+//     dialURL).
+//   - broke: the speaker stopped for breakGap. Covers unpunctuated speech —
+//     fragments, lists, a speaker trailing off.
+//   - maxUtteranceChars: the guard, if neither ever fires.
+//
+// Callers must hold h.mu.
+func (h *Hub) closeLocked(broke bool) (Line, bool) {
+	if h.committed == "" {
+		return Line{}, false
+	}
+	if !broke && !endsSentence(h.committed) && len(h.committed) < maxUtteranceChars {
+		return Line{}, false
+	}
+
+	h.uttSeq++
+	line := Line{
+		ID:       "u" + itoa(h.uttSeq),
+		Text:     h.committed,
+		OffsetMS: h.uttStart.Milliseconds(),
+		At:       time.Now(),
+	}
+	h.history = append(h.history, line)
+	if len(h.history) > historyLimit {
+		h.history = h.history[len(h.history)-historyLimit:]
+	}
+	h.committed = ""
+	return line, true
+}
+
+// endsSentence reports whether s ends with terminal sentence punctuation.
+func endsSentence(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[len(s)-1] {
+	case '.', '?', '!':
+		return true
 	default:
-		// Interim: replaces only the uncommitted tail.
-		if text == "" {
-			h.mu.Unlock()
-			return
-		}
-		h.interim = text
-		ev := h.newEventLocked(KindInterim)
-		ev.Text = joinText(h.committed, h.interim)
-		h.mu.Unlock()
-		if h.metrics != nil {
-			h.metrics.STTInterim()
-		}
-		h.broadcast(ev)
+		return false
 	}
 }
 
@@ -177,20 +241,25 @@ func (h *Hub) PublishStatus(state, detail string) {
 // Flush closes any in-progress utterance. Called at shutdown so the tail of a
 // session is not lost when the speaker was still talking.
 func (h *Hub) Flush() {
-	h.mu.RLock()
-	pending := joinText(h.committed, h.interim)
-	h.mu.RUnlock()
-	if pending == "" {
+	h.mu.Lock()
+	line, closed := h.closeLocked(true)
+	onFinal := h.OnFinal
+	h.mu.Unlock()
+	if !closed {
 		return
 	}
-	h.Publish(stt.Transcript{Text: "", SpeechFinal: true})
+	if h.metrics != nil {
+		h.metrics.STTLine()
+	}
+	if onFinal != nil {
+		onFinal(line)
+	}
 }
 
-// newEventLocked stamps every event with a publish instant. Without this,
-// interim and status events shipped with no At at all — only final (which
-// overwrites it with the line's own At below) and snapshot set it — and a
-// viewer needs At on interims to measure its own publish->paint latency,
-// since interims are what it sees first.
+// newEventLocked stamps every event with a publish instant. At is now
+// unconditional on every event kind, not just some — a viewer measures its
+// own publish->paint latency off it regardless of which kind taught it about
+// the text.
 func (h *Hub) newEventLocked(k Kind) Event {
 	h.seq++
 	return Event{Seq: h.seq, Kind: k, At: time.Now()}
@@ -204,8 +273,10 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	h.mu.Lock()
 	h.seq++
 	snap := Event{Seq: h.seq, Kind: KindSnapshot, At: time.Now()}
-	snap.Lines = append([]Line(nil), h.history...)
-	snap.Pending = joinText(h.committed, h.interim)
+	// The replay flow: history joined, plus the open committed text. The
+	// client just appends it — there is no lines/pending distinction left
+	// now that a caption event's Text is always a flat string too.
+	snap.Text = joinHistory(h.history, h.committed)
 	// Replay the last published status so a subscriber who connects (or
 	// reconnects) mid-pause sees the correct indicator immediately, rather
 	// than defaulting to "ok" until the state happens to change again.
@@ -260,11 +331,21 @@ func (h *Hub) broadcast(ev Event) {
 	}
 }
 
-// Snapshot returns the current history and pending text.
-func (h *Hub) Snapshot() ([]Line, string) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return append([]Line(nil), h.history...), joinText(h.committed, h.interim)
+func joinHistory(history []Line, committed string) string {
+	var b strings.Builder
+	for _, l := range history {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(l.Text)
+	}
+	if committed != "" {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(committed)
+	}
+	return b.String()
 }
 
 func joinText(a, b string) string {

@@ -20,7 +20,6 @@ func TestObserveLatency_UsesCapturedAt(t *testing.T) {
 
 	s.observeLatency(stt.Transcript{
 		Text:       "hello",
-		IsFinal:    true,
 		ReceivedAt: now,
 		CapturedAt: now.Add(-300 * time.Millisecond),
 	}, time.Time{})
@@ -42,35 +41,11 @@ func TestObserveLatency_IgnoresZeroCapturedAt(t *testing.T) {
 	// figure.
 	s.observeLatency(stt.Transcript{
 		Text:       "hello",
-		IsFinal:    true,
 		ReceivedAt: time.Now(),
 	}, time.Time{})
 
 	if got := s.met.Snapshot().STT.LatencyCount; got != 0 {
 		t.Errorf("LatencyCount = %d, want 0 for a zero CapturedAt", got)
-	}
-}
-
-// TestObserveLatency_RoutesInterimsToInterimSeries replaces the old
-// "IgnoresInterims" test: interims are no longer dropped, they go to their
-// own series, since that's what a viewer actually sees first.
-func TestObserveLatency_RoutesInterimsToInterimSeries(t *testing.T) {
-	s := newLatencySession()
-	now := time.Now()
-
-	s.observeLatency(stt.Transcript{
-		Text:       "hello",
-		IsFinal:    false,
-		ReceivedAt: now,
-		CapturedAt: now.Add(-300 * time.Millisecond),
-	}, time.Time{})
-
-	snap := s.met.Snapshot()
-	if snap.STT.LatencyCount != 0 {
-		t.Errorf("LatencyCount = %d, want 0 for an interim", snap.STT.LatencyCount)
-	}
-	if snap.STT.InterimLatencyCount != 1 {
-		t.Errorf("InterimLatencyCount = %d, want 1 for an interim", snap.STT.InterimLatencyCount)
 	}
 }
 
@@ -83,7 +58,6 @@ func TestObserveLatency_KeepsSmallSample(t *testing.T) {
 	// time.Now() in-process and Sub uses the monotonic reading.
 	s.observeLatency(stt.Transcript{
 		Text:       "hello",
-		IsFinal:    true,
 		ReceivedAt: now,
 		CapturedAt: now.Add(-2 * time.Millisecond),
 	}, time.Time{})
@@ -97,29 +71,24 @@ func TestObserveLatency_KeepsSmallSample(t *testing.T) {
 	}
 }
 
-// TestObserveLatency_IgnoresEmptyText is the regression guard for Deepgram's
-// synthetic UtteranceEnd shape: SpeechFinal true, IsFinal false, empty Text,
-// zero Start/Duration, but real ReceivedAt/CapturedAt. Without the Text guard
-// idx.At(0) can resolve an unrelated capture instant, which would record pure
-// noise into the interim series.
+// TestObserveLatency_IgnoresEmptyText guards against a future engine
+// emitting a synthetic zero-range result with real ReceivedAt/CapturedAt but
+// no text — decodeTranscript already rejects an empty alternative today, so
+// this is belt-and-braces: without the Text guard, idx.At(0) could resolve
+// an unrelated capture instant and record pure noise into the series.
 func TestObserveLatency_IgnoresEmptyText(t *testing.T) {
 	s := newLatencySession()
 	now := time.Now()
 
 	s.observeLatency(stt.Transcript{
-		Text:        "",
-		IsFinal:     false,
-		SpeechFinal: true,
-		ReceivedAt:  now,
-		CapturedAt:  now.Add(-300 * time.Millisecond),
+		Text:       "",
+		ReceivedAt: now,
+		CapturedAt: now.Add(-300 * time.Millisecond),
 	}, time.Time{})
 
 	snap := s.met.Snapshot()
 	if snap.STT.LatencyCount != 0 {
 		t.Errorf("LatencyCount = %d, want 0 for empty Text", snap.STT.LatencyCount)
-	}
-	if snap.STT.InterimLatencyCount != 0 {
-		t.Errorf("InterimLatencyCount = %d, want 0 for empty Text", snap.STT.InterimLatencyCount)
 	}
 }
 
@@ -138,7 +107,6 @@ func TestObserveLatency_PhasesSumToTotal(t *testing.T) {
 
 	s.observeLatency(stt.Transcript{
 		Text:       "hello",
-		IsFinal:    true,
 		CapturedAt: captured,
 		SentAt:     sent,
 		ReceivedAt: received,
@@ -165,7 +133,6 @@ func TestObserveLatency_ZeroSentAtRecordsTotalNoPhases(t *testing.T) {
 
 	s.observeLatency(stt.Transcript{
 		Text:       "hello",
-		IsFinal:    true,
 		ReceivedAt: now,
 		CapturedAt: now.Add(-300 * time.Millisecond),
 	}, now.Add(305*time.Millisecond))

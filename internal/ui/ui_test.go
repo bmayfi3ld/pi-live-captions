@@ -112,7 +112,7 @@ func TestSummaryRendersDegradationCounts(t *testing.T) {
 	snap.Source.FramesDropped = 3
 	snap.Source.FFmpegRestarts = 1
 	snap.STT.Reconnects = 2
-	snap.STT.Final = 47
+	snap.STT.Lines = 47
 
 	term.Summary(snap, false)
 	got := errBuf.String()
@@ -132,7 +132,7 @@ func TestSummaryCleanSessionReportsZero(t *testing.T) {
 	term := NewTerminal(Options{Out: &out, Err: &errBuf, TTY: true})
 
 	var snap metrics.Snapshot
-	snap.STT.Final = 5
+	snap.STT.Lines = 5
 
 	term.Summary(snap, false)
 	got := errBuf.String()

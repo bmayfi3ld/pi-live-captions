@@ -164,17 +164,6 @@
      it from reading as a flush continuation of the server-side total. */
   #wf-gap { width: 0.6rem; flex: 0 0 auto; }
   .wf-seg.wf-viewer { background: var(--warn); border-radius: 0 0.35rem 0.35rem 0; }
-  /* First-pixels marker: a line across the bar, not a segment — it's a
-     prefix of the same total (the interim's own upload+recognize+assemble),
-     not an additional stage, so a segment would double-count it. */
-  #wf-marker {
-    position: absolute; top: -0.25rem; bottom: -0.25rem; width: 2px;
-    background: var(--fg); opacity: 0.55; pointer-events: none;
-  }
-  #wf-marker::after {
-    content: "first pixels"; position: absolute; top: -1.15rem; left: 50%; transform: translateX(-50%);
-    font-size: 0.65rem; color: var(--muted); white-space: nowrap;
-  }
   #wf-legend {
     display: flex; flex-wrap: wrap; gap: 0.9rem 1.5rem; margin-top: 1rem;
   }
@@ -201,13 +190,18 @@
   }
   .card.dim { opacity: 0.55; }
   .card h2 { font-size: 0.95rem; margin-bottom: 0.7rem; }
-  .row {
+  /* Named .stat-row, not .row: caption.js (mounted below for the live
+     transcript card) creates its own row divs with the plain class "row",
+     and CSS class matching doesn't care which file defined it — an
+     unscoped .row here would leak flex/border/padding styling onto every
+     caption row inside #lt-stack. */
+  .stat-row {
     display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
     padding: 0.28rem 0; border-bottom: 1px dashed var(--border);
   }
-  .row:last-child { border-bottom: none; }
-  .row .k { color: var(--muted); font-size: 0.82rem; }
-  .row .v { font-weight: 600; text-align: right; }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-row .k { color: var(--muted); font-size: 0.82rem; }
+  .stat-row .v { font-weight: 600; text-align: right; }
   .chip {
     display: inline-flex; align-items: center; gap: 0.35em;
     padding: 0.1em 0.55em; border-radius: 999px; font-weight: 700;
@@ -245,23 +239,32 @@
   #lt-status.crit { background: var(--crit-soft); color: var(--crit); }
   #lt-status.crit .dot { background: var(--crit); }
 
-  #lt-page { overflow: hidden; }
+  /* caption.js sizes #lt-viewport itself (maxRows * measured row height), but
+     it derives maxRows FROM #lt-page's clientHeight — so #lt-page needs a
+     real, CSS-driven height of its own, or the two would be circular (page
+     height following viewport height which follows page height). 3 here is
+     LT_MAX_ROWS below; the two are meant to move together. --row-h is set by
+     caption.js's computeMetrics() before this is ever read, so the 1.6em
+     fallback only matters for a style pass that never actually happens. */
+  #lt-page { height: calc(3 * var(--row-h, 1.6em)); overflow: hidden; }
   #lt-viewport { overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
   #lt-stack { display: flex; flex-direction: column; }
 
-  #lt-stack .lt-line {
-    height: var(--lt-row-h, 1.6em);
-    line-height: var(--lt-row-h, 1.6em);
+  /* --row-h and the .row class name are caption.js's, not admin's own — the
+     shared typesetter it mounts below sets/reads both, and #lt-page's height
+     rule further down depends on --row-h landing here too. Container styling
+     (card, page, viewport, probe) is admin's; row/word styling has to speak
+     the vocabulary caption.js actually renders. */
+  #lt-stack .row {
+    height: var(--row-h, 1.6em);
+    line-height: var(--row-h, 1.6em);
     white-space: pre;
     overflow: hidden;
     font-weight: 600;
     font-size: 1.05rem;
   }
 
-  #lt-stack .w { transition: color 180ms linear; }
-  #lt-stack .w.live    { color: var(--accent); }
-  #lt-stack .w.settled { color: var(--fg); }
-  #lt-stack .w.stale   { color: var(--muted); }
+  #lt-stack .w { transition: color 180ms linear; color: var(--fg); }
 
   .lt-probe {
     position: absolute; left: -9999px; top: 0; visibility: hidden;
@@ -298,13 +301,6 @@
 
 <div id="latency-secondary">
   <div class="lat-group">
-    <div class="lg-label">First pixels (interim)</div>
-    <div class="lg-vals">
-      <div class="lg-stat"><div class="k">p50</div><div class="v num" id="lat-interim-p50">—</div></div>
-      <div class="lg-stat"><div class="k">p95</div><div class="v num" id="lat-interim-p95">—</div></div>
-    </div>
-  </div>
-  <div class="lat-group">
     <div class="lg-label">Viewer (publish&#8594;paint)</div>
     <div class="lg-vals">
       <div class="lg-stat"><div class="k">p50</div><div class="v num" id="lat-viewer-p50">—</div></div>
@@ -319,7 +315,6 @@
   <div id="wf-empty" style="display:none">Not enough data yet — waiting on server phase timings and/or a connected viewer to report paint latency.</div>
   <div id="wf-bar-wrap">
     <div id="wf-bar"></div>
-    <div id="wf-marker" style="display:none"></div>
   </div>
   <div id="wf-legend"></div>
 </div>
@@ -328,64 +323,64 @@
 
   <div class="card" id="card-source">
     <h2><span class="eyebrow">Source</span></h2>
-    <div class="row"><span class="k">Kind</span><span class="v num" id="src-kind">—</span></div>
-    <div class="row"><span class="k">Spec</span><span class="v num" id="src-spec">—</span></div>
-    <div class="row"><span class="k">Format</span><span class="v num" id="src-format">—</span></div>
-    <div class="row"><span class="k">Frames</span><span class="v num" id="src-frames">—</span></div>
-    <div class="row"><span class="k">Audio received</span><span class="v num" id="src-bytes">—</span></div>
-    <div class="row"><span class="k">Media processed</span><span class="v num" id="src-seconds">—</span></div>
+    <div class="stat-row"><span class="k">Kind</span><span class="v num" id="src-kind">—</span></div>
+    <div class="stat-row"><span class="k">Spec</span><span class="v num" id="src-spec">—</span></div>
+    <div class="stat-row"><span class="k">Format</span><span class="v num" id="src-format">—</span></div>
+    <div class="stat-row"><span class="k">Frames</span><span class="v num" id="src-frames">—</span></div>
+    <div class="stat-row"><span class="k">Audio received</span><span class="v num" id="src-bytes">—</span></div>
+    <div class="stat-row"><span class="k">Media processed</span><span class="v num" id="src-seconds">—</span></div>
     <div id="src-progress-wrap" style="display:none">
       <div class="progress"><i id="src-progress" style="width:0%"></i></div>
     </div>
-    <div class="row"><span class="k">ffmpeg restarts</span><span class="v num" id="src-restarts">—</span></div>
-    <div class="row"><span class="k">Xruns</span><span class="v num" id="src-xruns">—</span></div>
+    <div class="stat-row"><span class="k">ffmpeg restarts</span><span class="v num" id="src-restarts">—</span></div>
+    <div class="stat-row"><span class="k">Xruns</span><span class="v num" id="src-xruns">—</span></div>
     <div class="diag err" id="src-stderr" style="display:none"></div>
   </div>
 
   <div class="card" id="card-monitor">
     <h2><span class="eyebrow">Monitor</span></h2>
-    <div class="row"><span class="k">Device</span><span class="v num" id="mon-device">—</span></div>
-    <div class="row"><span class="k">Buffer</span><span class="v num" id="mon-buffer">—</span></div>
-    <div class="row"><span class="k">Playback</span><span class="v num" id="mon-alive">—</span></div>
-    <div class="row"><span class="k">Frames dropped</span><span class="v num" id="mon-dropped">—</span></div>
+    <div class="stat-row"><span class="k">Device</span><span class="v num" id="mon-device">—</span></div>
+    <div class="stat-row"><span class="k">Buffer</span><span class="v num" id="mon-buffer">—</span></div>
+    <div class="stat-row"><span class="k">Playback</span><span class="v num" id="mon-alive">—</span></div>
+    <div class="stat-row"><span class="k">Frames dropped</span><span class="v num" id="mon-dropped">—</span></div>
   </div>
 
   <div class="card" id="card-stt">
     <h2><span class="eyebrow">STT</span></h2>
-    <div class="row"><span class="k">Engine</span><span class="v num" id="stt-engine">—</span></div>
-    <div class="row"><span class="k">State</span><span class="v num" id="stt-state">—</span></div>
-    <div class="row"><span class="k">Interim / final</span><span class="v num" id="stt-counts">—</span></div>
-    <div class="row"><span class="k">Audio sent</span><span class="v num" id="stt-sent">—</span></div>
-    <div class="row"><span class="k">Reconnects</span><span class="v num" id="stt-reconnects">—</span></div>
-    <div class="row"><span class="k">Buffer drops</span><span class="v num" id="stt-buffer-drops">—</span></div>
-    <div class="row"><span class="k">Auto-pauses</span><span class="v num" id="stt-pauses">—</span></div>
-    <div class="row"><span class="k">Paused time</span><span class="v num" id="stt-paused-sec">—</span></div>
+    <div class="stat-row"><span class="k">Engine</span><span class="v num" id="stt-engine">—</span></div>
+    <div class="stat-row"><span class="k">State</span><span class="v num" id="stt-state">—</span></div>
+    <div class="stat-row"><span class="k">Segments / lines</span><span class="v num" id="stt-counts">—</span></div>
+    <div class="stat-row"><span class="k">Audio sent</span><span class="v num" id="stt-sent">—</span></div>
+    <div class="stat-row"><span class="k">Reconnects</span><span class="v num" id="stt-reconnects">—</span></div>
+    <div class="stat-row"><span class="k">Buffer drops</span><span class="v num" id="stt-buffer-drops">—</span></div>
+    <div class="stat-row"><span class="k">Auto-pauses</span><span class="v num" id="stt-pauses">—</span></div>
+    <div class="stat-row"><span class="k">Paused time</span><span class="v num" id="stt-paused-sec">—</span></div>
     <div class="diag err" id="stt-error" style="display:none"></div>
   </div>
 
   <div class="card" id="card-web">
     <h2><span class="eyebrow">Web</span></h2>
-    <div class="row"><span class="k">Viewers now</span><span class="v num" id="web-clients">—</span></div>
-    <div class="row"><span class="k">Viewers total</span><span class="v num" id="web-clients-total">—</span></div>
-    <div class="row"><span class="k">Events sent</span><span class="v num" id="web-events">—</span></div>
-    <div class="row"><span class="k">Slow disconnects</span><span class="v num" id="web-slowdrops">—</span></div>
+    <div class="stat-row"><span class="k">Viewers now</span><span class="v num" id="web-clients">—</span></div>
+    <div class="stat-row"><span class="k">Viewers total</span><span class="v num" id="web-clients-total">—</span></div>
+    <div class="stat-row"><span class="k">Events sent</span><span class="v num" id="web-events">—</span></div>
+    <div class="stat-row"><span class="k">Slow disconnects</span><span class="v num" id="web-slowdrops">—</span></div>
   </div>
 
   <div class="card" id="card-transcript">
     <h2><span class="eyebrow">Transcript</span></h2>
-    <div class="row"><span class="k">Path</span><span class="v num" id="tr-path">—</span></div>
-    <div class="row"><span class="k">Lines written</span><span class="v num" id="tr-lines">—</span></div>
-    <div class="row"><span class="k">Bytes written</span><span class="v num" id="tr-bytes">—</span></div>
+    <div class="stat-row"><span class="k">Path</span><span class="v num" id="tr-path">—</span></div>
+    <div class="stat-row"><span class="k">Lines written</span><span class="v num" id="tr-lines">—</span></div>
+    <div class="stat-row"><span class="k">Bytes written</span><span class="v num" id="tr-bytes">—</span></div>
     <div class="diag err" id="tr-error" style="display:none"></div>
   </div>
 
   <div class="card" id="card-process">
     <h2><span class="eyebrow">Process</span></h2>
-    <div class="row"><span class="k">Version</span><span class="v num" id="proc-version">—</span></div>
-    <div class="row"><span class="k">Session ID</span><span class="v num" id="proc-session">—</span></div>
-    <div class="row"><span class="k">Started</span><span class="v num" id="proc-started">—</span></div>
-    <div class="row"><span class="k">Uptime</span><span class="v num" id="proc-uptime">—</span></div>
-    <div class="row"><span class="k">Goroutines</span><span class="v num" id="proc-goroutines">—</span></div>
+    <div class="stat-row"><span class="k">Version</span><span class="v num" id="proc-version">—</span></div>
+    <div class="stat-row"><span class="k">Session ID</span><span class="v num" id="proc-session">—</span></div>
+    <div class="stat-row"><span class="k">Started</span><span class="v num" id="proc-started">—</span></div>
+    <div class="stat-row"><span class="k">Uptime</span><span class="v num" id="proc-uptime">—</span></div>
+    <div class="stat-row"><span class="k">Goroutines</span><span class="v num" id="proc-goroutines">—</span></div>
   </div>
 
 </div>
@@ -403,6 +398,7 @@
   <div class="lt-probe" id="lt-probe" aria-hidden="true">The quick brown fox jumps over the lazy dog, 0123456789</div>
 </div>
 
+<script src="/caption.js"></script>
 <script>
 (function () {
   "use strict";
@@ -532,7 +528,6 @@
     var web = s.web || {};
     var bar = document.getElementById("wf-bar");
     var wrap = document.getElementById("wf-bar-wrap");
-    var marker = document.getElementById("wf-marker");
     var empty = document.getElementById("wf-empty");
     var legend = document.getElementById("wf-legend");
 
@@ -586,21 +581,6 @@
 
     bar.innerHTML = html;
 
-    // First-pixels marker: a line, not a segment, placed at the interim's
-    // p50 position as a fraction of the measured phases region — it's a
-    // prefix of the same pipeline, so it must not draw its own width or it
-    // would double-count time already inside upload+recognize+assemble.
-    var interimN = stt.interim_latency_samples || 0;
-    if (phaseN > 0 && interimN > 0 && phaseTotal > 0) {
-      var frac = Math.min(1, Math.max(0, stt.interim_latency_p50_ms / phaseTotal));
-      var leftPct = WF_CAPTURE_PCT + phasesRegionPct * frac;
-      marker.style.left = leftPct.toFixed(2) + "%";
-      marker.style.display = "block";
-      marker.title = "First pixels (interim p50): " + fmtMs(stt.interim_latency_p50_ms);
-    } else {
-      marker.style.display = "none";
-    }
-
     legend.innerHTML =
       wfLegendItem("wf-capture", "Capture", null, null, "not measured") +
       wfLegendItem("wf-upload", "Upload", upload, uploadP95, phaseN > 0 ? null : "—") +
@@ -653,10 +633,13 @@
     }
     drawSpark();
 
-    // ---- latency hero, row 2: first pixels (interim) + viewer paint ----
+    // ---- latency hero, row 2: viewer paint ----
+    // A second group used to stand here alongside a revisable hypothesis's
+    // own timing. Now that the pipeline only ever paints committed, final
+    // text, the headline latency figure above already IS time-to-first-
+    // pixels, so a second figure next to it would just restate the same
+    // number.
     var web0 = s.web || {};
-    setText("lat-interim-p50", fmtMs(stt.interim_latency_p50_ms));
-    setText("lat-interim-p95", fmtMs(stt.interim_latency_p95_ms));
     setText("lat-viewer-p50", fmtMs(web0.viewer_latency_p50_ms));
     setText("lat-viewer-p95", fmtMs(web0.viewer_latency_p95_ms));
 
@@ -702,7 +685,7 @@
     // "paused" gets the fuller phrasing here — the admin page has room for
     // it, unlike the width-constrained viewer pill.
     setText("stt-state", stt.state === "paused" ? "paused (no audio)" : (stt.state || "—"));
-    setText("stt-counts", fmtInt(stt.interim_total) + " / " + fmtInt(stt.final_total));
+    setText("stt-counts", fmtInt(stt.segments_total) + " / " + fmtInt(stt.lines_total));
     // A frozen counter while paused is correct, not a dead metric: the
     // engine (mock and deepgram alike) sends nothing to consume while the
     // gate holds, so the suffix confirms it, matching the phrasing used for
@@ -776,286 +759,28 @@
   var statusEl = document.getElementById("lt-status");
   var statusLabel = document.getElementById("lt-status-label");
 
-  var ledger = [];
-  var uttStartIndex = 0;
-  var rows = [];
-  var LEDGER_CAP = 4000;
+  // The typesetter itself is caption.js, mounted the same way index.html
+  // mounts it — see that file's script for why sharing one copy matters.
+  // LT_MAX_ROWS (fixed at 3, unlike the viewer's configurable ?lines=) is
+  // also the "3" baked into #lt-page's height rule above; the two are meant
+  // to move together.
   var LT_MAX_ROWS = 3;
-
-  var ctx = document.createElement("canvas").getContext("2d");
-  var rowH = 0;
-  var usableWidth = 0;
-  var fontScale = 1;
-
-  function tokenize(text) {
-    var t = text.replace(/^\s+|\s+$/g, "");
-    return t ? t.split(/\s+/) : [];
-  }
-
-  function commonPrefixLen(a, b) {
-    var n = a.length < b.length ? a.length : b.length;
-    var i = 0;
-    while (i < n && a[i] === b[i]) i++;
-    return i;
-  }
-
-  function measureWidth(s) {
-    return ctx.measureText(s).width * fontScale;
-  }
-
-  function activeRow() {
-    return rows[rows.length - 1];
-  }
-
-  function rowText(row) {
-    var parts = [];
-    for (var i = 0; i < row.words.length; i++) parts.push(row.words[i].text);
-    return parts.join(" ");
-  }
-
-  function wordClass(entry) {
-    return "w " + (entry.stale ? "stale" : entry.state);
-  }
-
-  function placeInRow(row, entry) {
-    if (row.words.length) row.el.appendChild(document.createTextNode(" "));
-    var span = document.createElement("span");
-    span.className = wordClass(entry);
-    span.textContent = entry.text;
-    row.el.appendChild(span);
-    entry.span = span;
-    row.words.push(entry);
-  }
-
-  function removeFromActiveRow(entry) {
-    var row = activeRow();
-    row.words.pop();
-    if (entry.span && entry.span.parentNode) row.el.removeChild(entry.span);
-    if (row.words.length) {
-      var last = row.el.lastChild;
-      if (last && last.nodeType === 3) row.el.removeChild(last);
-    }
-    entry.span = null;
-  }
-
-  function applyRowOpacities() {
-    var n = rows.length;
-    var levels = [1, 0.85, 0.7];
-    for (var i = 0; i < n; i++) {
-      var age = n - 1 - i;
-      var op = age < levels.length ? levels[age] : 0.55;
-      rows[i].el.style.opacity = String(op);
-    }
-  }
-
-  function makeEmptyRow() {
-    var d = document.createElement("div");
-    d.className = "lt-line";
-    return { el: d, words: [], frozen: false };
-  }
-
-  function trimRows() {
-    while (rows.length > LT_MAX_ROWS + 1) {
-      var old = rows.shift();
-      if (old.el.parentNode) old.el.parentNode.removeChild(old.el);
-    }
-  }
-
-  function trimLedger() {
-    var over = ledger.length - LEDGER_CAP;
-    if (over > 0) {
-      ledger.splice(0, over);
-      uttStartIndex = Math.max(0, uttStartIndex - over);
-    }
-  }
-
-  function freezeAndGlide(animate) {
-    var row = activeRow();
-    if (!row || row.words.length === 0) return;
-    row.frozen = true;
-    for (var i = 0; i < row.words.length; i++) row.words[i].frozen = true;
-
-    var next = makeEmptyRow();
-    stack.appendChild(next.el);
-    rows.push(next);
-    applyRowOpacities();
-
-    var reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (animate && !reduced) {
-      stack.style.transition = "none";
-      stack.style.transform = "translateY(" + rowH + "px)";
-      void stack.offsetHeight;
-      stack.style.transition = "transform 200ms cubic-bezier(.22,.61,.36,1)";
-      stack.style.transform = "translateY(0)";
-    } else {
-      stack.style.transition = "none";
-      stack.style.transform = "translateY(0)";
-      trimRows();
-    }
-  }
-
-  stack.addEventListener("transitionend", function (e) {
-    if (e.target === stack && e.propertyName === "transform") trimRows();
+  var captionStack = window.CaptionStack({
+    stack: stack,
+    viewport: viewport,
+    page: page,
+    probe: probe,
+    requestedLines: LT_MAX_ROWS
   });
-
-  function pushWord(text, state, animate) {
-    var row = activeRow();
-    var cand = row.words.length ? rowText(row) + " " + text : text;
-    if (measureWidth(cand) <= usableWidth) {
-      var entry = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
-      ledger.push(entry);
-      placeInRow(row, entry);
-    } else {
-      freezeAndGlide(animate);
-      row = activeRow();
-      if (measureWidth(text) > usableWidth) {
-        hardSplit(text, state, animate);
-      } else {
-        var e2 = { text: text, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
-        ledger.push(e2);
-        placeInRow(row, e2);
-      }
-    }
-    trimLedger();
-  }
-
-  function hardSplit(word, state, animate) {
-    var i = 0;
-    while (i < word.length) {
-      var row = activeRow();
-      var end = i + 1;
-      while (end <= word.length && measureWidth(word.slice(i, end)) <= usableWidth) end++;
-      end = end - 1;
-      if (end <= i) end = i + 1;
-      var chunk = word.slice(i, end);
-      var entry = { text: chunk, state: state, stale: false, frozen: false, span: null, lastOfUtt: false };
-      ledger.push(entry);
-      placeInRow(row, entry);
-      i = end;
-      if (i < word.length) freezeAndGlide(animate);
-    }
-  }
-
-  function applyUtterance(text, isFinal, animate) {
-    var newWords = tokenize(text);
-    var oldEntries = ledger.slice(uttStartIndex);
-    var oldWords = [];
-    var i;
-    for (i = 0; i < oldEntries.length; i++) oldWords.push(oldEntries[i].text);
-    var common = commonPrefixLen(oldWords, newWords);
-    var frozenCount = 0;
-    while (frozenCount < oldEntries.length && oldEntries[frozenCount].frozen) frozenCount++;
-    var keep = common > frozenCount ? common : frozenCount;
-
-    for (i = 0; i < frozenCount; i++) {
-      var fe = oldEntries[i];
-      var shouldBeStale = i >= common;
-      if (shouldBeStale && !fe.stale) {
-        fe.stale = true;
-        if (fe.span) fe.span.className = wordClass(fe);
-      } else if (!shouldBeStale && fe.stale) {
-        fe.stale = false;
-        if (fe.span) fe.span.className = wordClass(fe);
-      }
-    }
-
-    var removeCount = oldEntries.length - keep;
-    for (i = 0; i < removeCount; i++) {
-      removeFromActiveRow(ledger.pop());
-    }
-
-    for (i = keep; i < newWords.length; i++) {
-      pushWord(newWords[i], "live", animate);
-    }
-
-    if (isFinal) {
-      for (i = uttStartIndex; i < ledger.length; i++) {
-        var e = ledger[i];
-        if (!e.stale && e.state === "live") {
-          e.state = "settled";
-          if (e.span) e.span.className = wordClass(e);
-        }
-      }
-      if (ledger.length > uttStartIndex) ledger[ledger.length - 1].lastOfUtt = true;
-      freezeAndGlide(animate);
-      uttStartIndex = ledger.length;
-    }
-    trimLedger();
-  }
-
-  function resetAll() {
-    ledger = [];
-    uttStartIndex = 0;
-    rebuild();
-  }
-
-  function computeMetrics() {
-    var cs = getComputedStyle(probe);
-    ctx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
-    var box = probe.getBoundingClientRect();
-    var measuredH = Math.ceil(box.height);
-    if (measuredH > 0) {
-      rowH = measuredH;
-      card.style.setProperty("--lt-row-h", rowH + "px");
-    }
-    var canvasW = ctx.measureText(probe.textContent).width;
-    fontScale = (box.width > 0 && canvasW > 0) ? box.width / canvasW : 1;
-    usableWidth = Math.max(1, page.clientWidth - 1);
-    viewport.style.height = (LT_MAX_ROWS * rowH) + "px";
-  }
-
-  function rebuild() {
-    stack.style.transition = "none";
-    stack.style.transform = "translateY(0)";
-    stack.replaceChildren();
-    rows = [];
-    var row = makeEmptyRow();
-    stack.appendChild(row.el);
-    rows.push(row);
-
-    for (var idx = 0; idx < ledger.length; idx++) {
-      var entry = ledger[idx];
-      entry.span = null;
-      entry.frozen = false;
-      row = activeRow();
-      var cand = row.words.length ? rowText(row) + " " + entry.text : entry.text;
-      var fits = row.words.length === 0 || measureWidth(cand) <= usableWidth;
-      if (!fits) {
-        row.frozen = true;
-        for (var k = 0; k < row.words.length; k++) row.words[k].frozen = true;
-        row = makeEmptyRow();
-        stack.appendChild(row.el);
-        rows.push(row);
-      }
-      placeInRow(row, entry);
-      if (entry.lastOfUtt) {
-        row.frozen = true;
-        for (var m = 0; m < row.words.length; m++) row.words[m].frozen = true;
-        row = makeEmptyRow();
-        stack.appendChild(row.el);
-        rows.push(row);
-      }
-    }
-    trimRows();
-    applyRowOpacities();
-  }
-
-  function retypeset() {
-    computeMetrics();
-    rebuild();
-  }
 
   var retypesetTimer = null;
   function scheduleRetypeset() {
     if (retypesetTimer) clearTimeout(retypesetTimer);
     retypesetTimer = setTimeout(function () {
       retypesetTimer = null;
-      retypeset();
+      captionStack.retypeset();
     }, 120);
   }
-
-  computeMetrics();
-  rebuild();
 
   if (window.ResizeObserver) {
     new ResizeObserver(scheduleRetypeset).observe(card);
@@ -1092,14 +817,15 @@
     try { ev = JSON.parse(e.data); } catch (err) { return; }
     switch (ev.kind) {
       case "snapshot":
-        resetAll();
-        (ev.lines || []).forEach(function (line) { applyUtterance(line.text || "", true, false); });
-        applyUtterance(ev.pending || "", false, false);
+        captionStack.resetAll();
+        if (ev.text) captionStack.appendSegment(ev.text, false);
         sseOpen = true;
         if (ev.state) hubState = ev.state;
         break;
-      case "final":   applyUtterance(ev.text || "", true, true); break;
-      case "interim": applyUtterance(ev.text || "", false, true); break;
+      case "caption":
+        if (ev.break) captionStack.breakRow(true);
+        captionStack.appendSegment(ev.text || "", true);
+        break;
       case "status":  hubState = ev.state || null; applyIndicator(); return;
       default: return;
     }
