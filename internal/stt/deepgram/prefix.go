@@ -12,7 +12,7 @@ import (
 // itself: Deepgram commonly rewrites the last word or two of an interim as
 // more audio and context arrive, so a short trailing window is kept back
 // every round rather than trusted the moment it first agrees.
-const holdbackTokens = 0
+const holdbackTokens = 2
 
 // prefixTracker turns one connection's revisable interim stream into the
 // append-only sequence stt.Transcript promises. Deepgram interims are free to
