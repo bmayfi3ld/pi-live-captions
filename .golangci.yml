@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - unconvert
+    - unparam
+    - misspell
+    - bodyclose
+    - gocyclo
+  settings:
+    gocyclo:
+      min-complexity: 15
+  exclusions:
+    paths:
+      - _test\.go
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // empty' | grep -q '\\.go$' && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"Reminder: you just edited a .go file. Run `golangci-lint run ./...` (or `just lint`) and fix any findings in the code you touched before considering this change done.\"}}' || true"
+          }
+        ]
+      }
+    ]
+  }
+}

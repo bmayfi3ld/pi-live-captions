@@ -23,3 +23,9 @@ Assume the user already has an instance running when you need one.
 ## Dev Work
 - Do not do work inside of worktrees in harness specific folders (eg: .claude/**), instead do all work in this local project directly
 - Do not create commits, wait for the user to review the changes
+
+## Lint
+
+After editing any `.go` file, run `golangci-lint run ./...` (or `just lint`) and fix
+findings in the code you touched before considering the change done. Pre-existing
+findings in files you didn't touch don't need to be fixed opportunistically.
