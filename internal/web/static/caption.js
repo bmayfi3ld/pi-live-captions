@@ -55,6 +55,32 @@
     var rows = [];            // [{el, words:[entry,...], frozen}], only the last is unfrozen
     var LEDGER_CAP = 4000;    // ~200 rows of headroom, mirrors the old 200-line cap
 
+    // ---- paced emission queue ----
+    //
+    // appendSegment/breakRow used to call pushWord/freezeAndGlide directly,
+    // synchronously, for every token in a settled segment. That caused two
+    // problems: bursty, all-at-once text instead of a rolling feel, and —
+    // worse — freezeAndGlide sets a fixed-duration CSS transition on #stack,
+    // so a second glide fired in the same tick before the first painted a
+    // frame would just overwrite it, and several rows would jump at once
+    // instead of gliding independently.
+    //
+    // pending decouples "when text arrives" from "when it's typeset": every
+    // incoming word (and every break) is queued here and drained one item
+    // per tick by drain(), below. BREAK is a sentinel rather than e.g. a
+    // string, so it can share the queue with plain word strings without
+    // risk of colliding with real caption text; it must stay IN the queue
+    // (never jump ahead of already-queued words) or a break could freeze a
+    // row before the words meant to land in it actually have.
+    var pending = [];
+    var drainTimer = null;
+    var WORD_MS = 50;   // fixed inter-word pacing delay
+    var GLIDE_MS = 130; // MUST equal the CSS transition duration in freezeAndGlide —
+                         // the serialization guarantee (never two glides in flight)
+                         // depends on the scheduler waiting exactly as long as the
+                         // glide animation takes.
+    var BREAK = {};
+
     var ctx = document.createElement("canvas").getContext("2d");
     var rowH = 0;
     var usableWidth = 0;
@@ -142,7 +168,7 @@
         stack.style.transition = "none";
         stack.style.transform = "translateY(" + rowH + "px)";
         void stack.offsetHeight; // force reflow before the transition kicks in
-        stack.style.transition = "transform 200ms cubic-bezier(.22,.61,.36,1)";
+        stack.style.transition = "transform " + GLIDE_MS + "ms cubic-bezier(.22,.61,.36,1)";
         stack.style.transform = "translateY(0)";
       } else {
         stack.style.transition = "none";
@@ -168,6 +194,29 @@
         freezeAndGlide(animate); // doesn't-fit trigger
         row = activeRow();
         if (measureWidth(text) > usableWidth) {
+          if (animate) {
+            // Paced path: don't glide repeatedly in this same tick — split
+            // into chunks and let each one take its own turn through the
+            // queue, exactly like a word would. unshift so the chunks are
+            // the very next things drained (in original order), ahead of
+            // whatever was already queued behind this word.
+            var chunks = splitToChunks(text);
+            // A single glyph wider than the whole row splits to itself
+            // (splitToChunks' end<=i progress guard). Re-queueing that would
+            // land back here next tick and loop forever, gliding each time —
+            // so place it and let overflow:hidden clip it, which is what the
+            // synchronous path effectively did too.
+            if (chunks.length === 1) {
+              var wide = { text: chunks[0], frozen: false, span: null };
+              ledger.push(wide);
+              placeInRow(activeRow(), wide);
+              trimLedger();
+              return;
+            }
+            Array.prototype.unshift.apply(pending, chunks);
+            trimLedger();
+            return;
+          }
           hardSplit(text, animate);
         } else {
           var e2 = { text: text, frozen: false, span: null };
@@ -179,21 +228,35 @@
     }
 
     // Rare case: a single "word" (URL, long compound) wider than the row.
-    // Split it into chunks that fit; each full chunk freezes its own row.
-    function hardSplit(word, animate) {
+    // Pure computation, no DOM: returns the chunk strings word splits into
+    // so each one fits usableWidth. Shared by the synchronous hardSplit
+    // (below) and the paced path in pushWord, which paces the chunks
+    // through the same queue as ordinary words instead of gliding them
+    // all in one tick.
+    function splitToChunks(word) {
+      var chunks = [];
       var i = 0;
       while (i < word.length) {
-        var row = activeRow();
         var end = i + 1;
         while (end <= word.length && measureWidth(word.slice(i, end)) <= usableWidth) end++;
         end = end - 1;
         if (end <= i) end = i + 1; // guarantee progress even for an oversize glyph
-        var chunk = word.slice(i, end);
-        var entry = { text: chunk, frozen: false, span: null };
+        chunks.push(word.slice(i, end));
+        i = end;
+      }
+      return chunks;
+    }
+
+    // Synchronous-path split: place each chunk immediately, gliding between
+    // them exactly as before. Only reached when animate === false.
+    function hardSplit(word, animate) {
+      var chunks = splitToChunks(word);
+      for (var c = 0; c < chunks.length; c++) {
+        var row = activeRow();
+        var entry = { text: chunks[c], frozen: false, span: null };
         ledger.push(entry);
         placeInRow(row, entry);
-        i = end;
-        if (i < word.length) freezeAndGlide(animate);
+        if (c < chunks.length - 1) freezeAndGlide(animate);
       }
     }
 
@@ -283,7 +346,45 @@
     // nothing to diff against what's already painted: tokenize and push.
     function appendSegment(text, animate) {
       var words = tokenize(text);
-      for (var i = 0; i < words.length; i++) pushWord(words[i], animate);
+      if (animate === false) {
+        // Snapshot/catch-up replay must never trickle: drop anything still
+        // queued from before (it's about to be superseded by this replay
+        // anyway) and paint synchronously, exactly as before this change.
+        pending = [];
+        clearTimeout(drainTimer);
+        drainTimer = null;
+        for (var i = 0; i < words.length; i++) pushWord(words[i], false);
+        return;
+      }
+      for (var j = 0; j < words.length; j++) pending.push(words[j]);
+      scheduleDrain();
+    }
+
+    // scheduleDrain()/drain() pace the queue one item per tick. Because
+    // drain() only ever schedules its own next call after the current
+    // item has fully finished — and waits GLIDE_MS, not WORD_MS, whenever
+    // that item caused a glide — at most one freezeAndGlide can ever be in
+    // flight at a time. That invariant is the entire point of this queue.
+    function scheduleDrain() {
+      if (drainTimer !== null) return;
+      if (pending.length === 0) return;
+      drainTimer = setTimeout(drain, WORD_MS);
+    }
+
+    function drain() {
+      drainTimer = null;
+      if (pending.length === 0) return;
+      var item = pending.shift();
+      var delay;
+      if (item === BREAK) {
+        freezeAndGlide(true);
+        delay = GLIDE_MS;
+      } else {
+        var before = rows.length;
+        pushWord(item, true);
+        delay = (rows.length > before) ? Math.max(WORD_MS, GLIDE_MS) : WORD_MS;
+      }
+      if (pending.length > 0) drainTimer = setTimeout(drain, delay);
     }
 
     // breakRow is freezeAndGlide exposed under a name that says why it's
@@ -293,7 +394,14 @@
     // means a break landing on a fresh row — e.g. the very first segment of
     // a session — is silently ignored, which is exactly right.
     function breakRow(animate) {
-      freezeAndGlide(animate);
+      if (animate === false) {
+        freezeAndGlide(false);
+        return;
+      }
+      // Queued, not fired immediately: BREAK must land after every word
+      // queued ahead of it, so the row it freezes actually contains them.
+      pending.push(BREAK);
+      scheduleDrain();
     }
 
     // Clears the ledger *and* the rows built from it. Both must go
@@ -301,6 +409,11 @@
     // delivers a fresh snapshot, so keeping the old rows would replay
     // history on top of itself.
     function resetAll() {
+      // Queued words from before the drop must not paint on top of the
+      // replayed history a reconnect is about to deliver.
+      pending = [];
+      clearTimeout(drainTimer);
+      drainTimer = null;
       ledger = [];
       rebuild();
     }
