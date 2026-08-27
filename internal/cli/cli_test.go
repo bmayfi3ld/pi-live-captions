@@ -207,10 +207,11 @@ func TestSilenceHoldValidation(t *testing.T) {
 	}
 }
 
-// TestSpeechTimingValidation covers the four rejections STTFlags.Validate()
-// enforces around --endpointing / --speech-break, especially the one that
-// would have caught an earlier draft of this change fragmenting the
-// transcript: SpeechBreak <= Endpointing.
+// TestSpeechTimingValidation covers the rejections STTFlags.Validate()
+// enforces around --speech-break. The old --endpointing bounds and the
+// SpeechBreak > Endpointing pairing are gone with the flag itself: Deepgram's
+// finalization window no longer governs cadence, so the 200ms floor is the
+// only thing standing between a break threshold and firing on breaths.
 func TestSpeechTimingValidation(t *testing.T) {
 	file := writeTempFile(t)
 
@@ -218,10 +219,6 @@ func TestSpeechTimingValidation(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"endpointing below floor", []string{"--endpointing", "9ms"}},
-		{"endpointing above ceiling", []string{"--endpointing", "2001ms"}},
-		{"speech-break not greater than endpointing", []string{"--endpointing", "150ms", "--speech-break", "150ms"}},
-		{"speech-break less than endpointing", []string{"--endpointing", "150ms", "--speech-break", "100ms"}},
 		{"speech-break below floor", []string{"--speech-break", "199ms"}},
 		{"speech-break above ceiling", []string{"--speech-break", "10001ms"}},
 	}
@@ -234,12 +231,12 @@ func TestSpeechTimingValidation(t *testing.T) {
 		})
 	}
 
-	// The defaults, and a sane explicit combination, must be accepted.
+	// The default, and a sane explicit value, must be accepted.
 	if _, _, err := Parse([]string{"replay", file}); err != nil {
-		t.Errorf("default --endpointing/--speech-break should be accepted: %v", err)
+		t.Errorf("default --speech-break should be accepted: %v", err)
 	}
-	if _, _, err := Parse([]string{"replay", file, "--endpointing", "150ms", "--speech-break", "2s"}); err != nil {
-		t.Errorf("--endpointing 150ms --speech-break 2s should be accepted: %v", err)
+	if _, _, err := Parse([]string{"replay", file, "--speech-break", "2s"}); err != nil {
+		t.Errorf("--speech-break 2s should be accepted: %v", err)
 	}
 }
 
@@ -250,9 +247,6 @@ func TestSpeechTimingDefaults(t *testing.T) {
 	_, c, err := Parse([]string{"replay", file})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if c.Replay.Endpointing != 100*time.Millisecond {
-		t.Errorf("Endpointing default = %v, want 100ms", c.Replay.Endpointing)
 	}
 	if c.Replay.SpeechBreak != 1500*time.Millisecond {
 		t.Errorf("SpeechBreak default = %v, want 1.5s", c.Replay.SpeechBreak)

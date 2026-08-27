@@ -137,24 +137,7 @@ func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeO
 
 	if probeOnly {
 		defer p.Close()
-		// One successful read proves the device is really producing audio.
-		// A bad device name makes ffmpeg exit here with a useful stderr line.
-		done := make(chan error, 1)
-		go func() { _, err := io.ReadFull(p.stdout, buf); done <- err }()
-		select {
-		case err := <-done:
-			if err != nil {
-				if msg := p.LastStderr(); msg != "" {
-					return fmt.Errorf("cannot open %s device %q: %s", s.cfg.Backend, s.cfg.Device, msg)
-				}
-				return fmt.Errorf("cannot open %s device %q: %w", s.cfg.Backend, s.cfg.Device, err)
-			}
-			return nil
-		case <-time.After(5 * time.Second):
-			return fmt.Errorf("timed out opening %s device %q", s.cfg.Backend, s.cfg.Device)
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return s.probe(ctx, p, buf)
 	}
 	defer p.Close()
 
@@ -188,6 +171,27 @@ func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeO
 			}
 			return err
 		}
+	}
+}
+
+// probe reads one chunk to prove the device is really producing audio. A bad
+// device name makes ffmpeg exit here with a useful stderr line.
+func (s *DeviceSource) probe(ctx context.Context, p *proc, buf []byte) error {
+	done := make(chan error, 1)
+	go func() { _, err := io.ReadFull(p.stdout, buf); done <- err }()
+	select {
+	case err := <-done:
+		if err == nil {
+			return nil
+		}
+		if msg := p.LastStderr(); msg != "" {
+			return fmt.Errorf("cannot open %s device %q: %s", s.cfg.Backend, s.cfg.Device, msg)
+		}
+		return fmt.Errorf("cannot open %s device %q: %w", s.cfg.Backend, s.cfg.Device, err)
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out opening %s device %q", s.cfg.Backend, s.cfg.Device)
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -82,7 +82,6 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 		Keyterms:    o.stt.Keyterm,
 		APIKey:      o.stt.APIKey,
 		Metrics:     met,
-		Endpointing: o.stt.Endpointing,
 		Pause: stt.PauseConfig{
 			Enabled:     o.stt.AutoPause,
 			ThresholdDB: o.stt.SilenceDB,

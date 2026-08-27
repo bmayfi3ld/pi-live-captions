@@ -107,7 +107,6 @@ func TestDecodeTranscript(t *testing.T) {
 // silently removing them.
 func TestDialURL_RequestsInterimsForPrefixTracker(t *testing.T) {
 	eng := testEngine("wss://example.invalid")
-	eng.cfg.Endpointing = 150 * time.Millisecond
 
 	u, err := url.Parse(eng.dialURL())
 	if err != nil {
@@ -124,8 +123,9 @@ func TestDialURL_RequestsInterimsForPrefixTracker(t *testing.T) {
 	if q.Has("vad_events") {
 		t.Error("vad_events should not be present: its only signal is discarded by decodeTranscript")
 	}
-	if got := q.Get("endpointing"); got != "150" {
-		t.Errorf("endpointing = %q, want %q (from Config.Endpointing)", got, "150")
+	if q.Has("endpointing") {
+		t.Error("endpointing should not be present: prefixTracker publishes off interims, " +
+			"so cadence no longer waits on the server's finalization window")
 	}
 	if got := q.Get("punctuate"); got != "true" {
 		t.Errorf("punctuate = %q, want %q: it is load-bearing for transcript line breaks now", got, "true")

@@ -49,10 +49,6 @@ type Config struct {
 	APIKey   string
 	Metrics  *metrics.Metrics
 	Pause    PauseConfig
-	// Endpointing is how long Deepgram waits for silence before finalizing a
-	// chunk of speech. Lower puts words on screen sooner in smaller pieces;
-	// see cli.STTFlags.Endpointing for the validated range.
-	Endpointing time.Duration
 }
 
 // Engine consumes PCM frames and emits transcripts.

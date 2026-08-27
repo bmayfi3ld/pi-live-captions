@@ -89,12 +89,66 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 	}
 	buf := newRing(capBytes, met, gate)
 
-	// Drains frames into buf for the whole lifetime of Run, independent of
-	// connection state, so the audio source is never blocked by a dead or
-	// reconnecting link. Every frame is pushed, including silent ones while
-	// paused: the ring naturally holds the most recent ~2s, so when speech
-	// resumes it already contains the onset as pre-roll and the first word
-	// survives the redial.
+	framesClosed := startDrain(ctx, frames, gate, buf)
+
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	backoff := minBackoff
+	firstAttempt := true
+	var ok bool
+
+	for {
+		if audioExhausted(framesClosed, buf) || ctx.Err() != nil {
+			return nil
+		}
+
+		setSTTState(met, metrics.StateConnecting)
+		conn, err := e.connect(ctx)
+		if err != nil {
+			if firstAttempt && isAuthError(err) && ctx.Err() == nil {
+				return fmt.Errorf("deepgram: %w (check DEEPGRAM_API_KEY)", err)
+			}
+			firstAttempt = false
+			backoff, ok = retryAfter(ctx, err, "deepgram: connect failed, retrying", backoff, rng, met, log)
+			if !ok {
+				return nil
+			}
+			continue
+		}
+
+		firstAttempt = false
+		backoff = minBackoff
+		setSTTState(met, metrics.StateConnected)
+		log.Info("deepgram: connected")
+
+		oc, rerr := e.runConnection(ctx, conn, buf, framesClosed, out, log, met, gate)
+		switch oc {
+		case outcomeDone:
+			return nil
+
+		case outcomePause:
+			if !waitResume(ctx, gate, framesClosed, met, log) {
+				return nil
+			}
+			// A pause/resume cycle is not an error: no STTReconnect or
+			// SetSTTError, since Snapshot.Clean() keys off reconnects.
+			backoff = minBackoff
+
+		default: // outcomeReconnect
+			backoff, ok = retryAfter(ctx, rerr, "deepgram: disconnected, reconnecting", backoff, rng, met, log)
+			if !ok {
+				return nil
+			}
+		}
+	}
+}
+
+// startDrain drains frames into buf for the whole lifetime of Run, independent
+// of connection state, so the audio source is never blocked by a dead or
+// reconnecting link. Every frame is pushed, including silent ones while
+// paused: the ring naturally holds the most recent ~2s, so when speech resumes
+// it already contains the onset as pre-roll and the first word survives the
+// redial. The returned channel closes once frames run out or ctx is cancelled.
+func startDrain(ctx context.Context, frames <-chan audio.Frame, gate *stt.Gate, buf *ring) <-chan struct{} {
 	framesClosed := make(chan struct{})
 	go func() {
 		defer close(framesClosed)
@@ -111,115 +165,67 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 			}
 		}
 	}()
+	return framesClosed
+}
 
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	backoff := minBackoff
-	firstAttempt := true
+// waitResume parks a paused connection until the gate goes active again,
+// reporting false when Run should stop instead of redialing.
+func waitResume(ctx context.Context, gate *stt.Gate, framesClosed <-chan struct{}, met *metrics.Metrics, log *slog.Logger) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	setSTTState(met, metrics.StatePaused)
+	if met != nil {
+		met.STTPauseBegin()
+		defer met.STTPauseEnd()
+	}
+	log.Info("deepgram: audio silent, connection paused")
 
+	// Wait for the gate to go active again rather than polling it. Changed()
+	// must be fetched *before* Active() is tested: it hands back the channel
+	// for the next transition, so reading it after a false Active() would miss
+	// a resume landing in between and park the connection until the pause
+	// after next — a whole segment of speech lost with nothing in the logs to
+	// show for it.
 	for {
-		if audioExhausted(framesClosed, buf) {
-			return nil
+		changed := gate.Changed()
+		if gate.Active() {
+			return true
 		}
-		if ctx.Err() != nil {
-			return nil
+		select {
+		case <-changed:
+		case <-framesClosed:
+			// Ring is full of silence; nothing worth redialing for.
+			return false
+		case <-ctx.Done():
+			return false
 		}
+	}
+}
 
-		if met != nil {
-			met.SetSTTState(metrics.StateConnecting)
-		}
-		conn, err := e.connect(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if firstAttempt && isAuthError(err) {
-				return fmt.Errorf("deepgram: %w (check DEEPGRAM_API_KEY)", err)
-			}
-			firstAttempt = false
-			if met != nil {
-				met.SetSTTError(err)
-				met.SetSTTState(metrics.StateReconnecting)
-				met.STTReconnect()
-			}
-			log.Warn("deepgram: connect failed, retrying", "err", err, "retry_in", backoff)
-			if !sleepBackoff(ctx, backoff, rng) {
-				return nil
-			}
-			backoff = nextBackoff(backoff)
-			continue
-		}
+// retryAfter records a lost or refused connection and waits out the backoff,
+// returning the next backoff and false if ctx ended first (or was already
+// cancelled, in which case the failure isn't counted at all: a shutdown is not
+// a reconnect).
+func retryAfter(ctx context.Context, err error, msg string, backoff time.Duration, rng *rand.Rand, met *metrics.Metrics, log *slog.Logger) (time.Duration, bool) {
+	if ctx.Err() != nil {
+		return backoff, false
+	}
+	if met != nil {
+		met.SetSTTError(err)
+		met.SetSTTState(metrics.StateReconnecting)
+		met.STTReconnect()
+	}
+	log.Warn(msg, "err", err, "retry_in", backoff)
+	if !sleepBackoff(ctx, backoff, rng) {
+		return backoff, false
+	}
+	return nextBackoff(backoff), true
+}
 
-		firstAttempt = false
-		backoff = minBackoff
-		if met != nil {
-			met.SetSTTState(metrics.StateConnected)
-		}
-		log.Info("deepgram: connected")
-
-		oc, rerr := e.runConnection(ctx, conn, buf, framesClosed, out, log, met, gate)
-		switch oc {
-		case outcomeDone:
-			return nil
-
-		case outcomePause:
-			if ctx.Err() != nil {
-				return nil
-			}
-			if met != nil {
-				met.SetSTTState(metrics.StatePaused)
-				met.STTPauseBegin()
-			}
-			log.Info("deepgram: audio silent, connection paused")
-
-			// Wait for the gate to go active again rather than polling it.
-			// Changed() must be fetched *before* Active() is tested: it hands
-			// back the channel for the next transition, so reading it after a
-			// false Active() would miss a resume landing in between and park
-			// the connection until the pause after next — a whole segment of
-			// speech lost with nothing in the logs to show for it.
-			for {
-				changed := gate.Changed()
-				if gate.Active() {
-					break
-				}
-				select {
-				case <-changed:
-				case <-framesClosed:
-					// Ring is full of silence; nothing worth redialing for.
-					if met != nil {
-						met.STTPauseEnd()
-					}
-					return nil
-				case <-ctx.Done():
-					if met != nil {
-						met.STTPauseEnd()
-					}
-					return nil
-				}
-			}
-			if met != nil {
-				met.STTPauseEnd()
-			}
-			// A pause/resume cycle is not an error: no STTReconnect or
-			// SetSTTError, since Snapshot.Clean() keys off reconnects.
-			backoff = minBackoff
-			continue
-
-		default: // outcomeReconnect
-			if ctx.Err() != nil {
-				return nil
-			}
-			if met != nil {
-				met.SetSTTError(rerr)
-				met.SetSTTState(metrics.StateReconnecting)
-				met.STTReconnect()
-			}
-			log.Warn("deepgram: disconnected, reconnecting", "err", rerr, "retry_in", backoff)
-			if !sleepBackoff(ctx, backoff, rng) {
-				return nil
-			}
-			backoff = nextBackoff(backoff)
-		}
+func setSTTState(met *metrics.Metrics, s metrics.ConnState) {
+	if met != nil {
+		met.SetSTTState(s)
 	}
 }
 
@@ -482,7 +488,9 @@ func (e *Engine) dialURL() string {
 	q.Set("punctuate", "true")
 	q.Set("profanity_filter", "true")
 	q.Set("smart_format", "true")
-	// q.Set("endpointing", strconv.Itoa(int(e.cfg.Endpointing.Milliseconds())))
+	// Deepgram's own `endpointing` is deliberately not set: prefixTracker
+	// publishes off interims, so cadence no longer waits on the server's
+	// finalization window.
 	for _, k := range e.cfg.Keyterms {
 		q.Add("keyterm", k)
 	}
@@ -595,6 +603,9 @@ func decodeTranscript(data []byte) (t stt.Transcript, isFinal bool, ok bool, err
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return stt.Transcript{}, false, false, err
 	}
+	// if !msg.IsFinal {
+	// 	return stt.Transcript{}, false, false, err
+	// }
 	if len(msg.Channel.Alternatives) == 0 {
 		return stt.Transcript{}, false, false, nil
 	}

@@ -99,18 +99,16 @@ rather than inferred from the Deepgram bill.
 
 ### Speech timing
 
-Two flags, tuned together at a venue since they're the two speech-timing thresholds — even though
-they control different things (see DESIGN.md §4):
+One flag to tune at a venue (see DESIGN.md §4):
 
 | flag | default | effect |
 |---|---|---|
-| `--endpointing` | `100ms` | Silence before Deepgram finalizes a chunk of speech. Lower puts words on screen sooner in smaller pieces. |
 | `--speech-break` | `1.5s` | Pause that counts as the speaker actually stopping. Freezes the caption row where it is and closes a transcript line. |
 
-`--speech-break` must stay well above `--endpointing` — the CLI rejects a value that isn't, since
-otherwise every chunk Deepgram commits to would also count as a pause and the display goes back to
-being ragged. Watch `Segments / lines` on `/admin` while tuning `--endpointing`: roughly 1–3
-segments per line is healthy, and a ratio climbing well past that means phrases are fragmenting.
+Deepgram's own endpointing is deliberately left unset: the engine publishes a stable prefix off
+interim results, so cadence no longer waits on the server's finalization window. Watch
+`Segments / lines` on `/admin` to check fragmentation: roughly 1–3 segments per line is healthy,
+and a ratio climbing well past that means phrases are splitting on every hesitation.
 
 ### `version`
 
@@ -155,9 +153,9 @@ with no separate interim reading to reconcile it against — alongside a second 
 viewer-reported publish→paint latency, plus a waterfall breaking a segment's latency into upload /
 recognize / assemble phases (with the unmeasured capture leg drawn as a labelled hatched segment)
 and the separately-sampled viewer leg set off by a gap. A `Segments / lines` stat shows
-`segments_total` against `lines_total` — the fragmentation readout for `--endpointing`: roughly
+`segments_total` against `lines_total` — the fragmentation readout: roughly
 1–3 segments per line is healthy, and a ratio climbing well past that means phrases are splitting
-on every hesitation and `--endpointing` should go up. A status badge at the top reads `ok` /
+on every hesitation. A status badge at the top reads `ok` /
 `degraded` / `paused` / `closed`: an auto-pause
 shows as "STT Paused," not "Degraded" — it's expected, money-saving behaviour, not a fault — and a
 past blip (a reconnect, a buffer drop) only holds the badge at "Degraded" briefly rather than for
@@ -195,11 +193,11 @@ written to `transcripts/<session>/transcript.txt`.
 - **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
   / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
   fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.
-- **Captions lagging** — `--endpointing` (default `100ms`) controls how long Deepgram waits for
-  silence before it commits a chunk of speech; lowering it puts words on screen sooner in smaller
-  pieces. Watch `Segments / lines` on `/admin` while you tune it — a ratio climbing well past a
-  few segments per line means it's too low and phrases are fragmenting. Tune by ear with
-  `--monitor` before the event, and see DESIGN.md §4.
+- **Captions lagging** — the engine publishes a stable prefix off Deepgram's interim results, so
+  words land at speech cadence rather than waiting on finalization. Watch `Segments / lines` on
+  `/admin`: a ratio climbing well past a few segments per line means phrases are fragmenting.
+  Check the latency waterfall on `/admin` to see which leg (upload / recognize / assemble) is
+  slow, and see DESIGN.md §4.
 - **First word after a quiet spell is missing/late, or the connection pauses during ordinary
   pauses for breath** — auto-pause; loosen it with a lower `--silence-threshold-db` (more negative)
   or a longer `--silence-hold`, or disable it with `--no-auto-pause`. See "Auto-pause" above.
