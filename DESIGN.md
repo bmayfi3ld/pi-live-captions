@@ -313,6 +313,13 @@ The current row freezes where it is, even half-full, and the stack glides. New s
 | If you can't hear me at the back |   <- new thought, new row
 ```
 
+**A change of speaker breaks the row too.** Two people's words sharing one line is worse than
+any marker design, so a turn always starts clean, and the viewer draws a small numbered dot in
+a left gutter beside that first row (§5). Note where this break is *decided*: unlike the pause,
+it is not a wire flag. Every word the client holds carries its speaker, so the client derives
+the break itself — which is what lets `retypeset()` reproduce it after a rotation, since
+`rebuild()` can only see what a ledger entry carries.
+
 Nothing else breaks a row. Not punctuation, not endpointing, not any other signal.
 
 **Words never change once painted.** That is the whole point of dropping interims, and with an
@@ -327,8 +334,8 @@ Splitting them is the core of the redesign:
 | job | signal | why |
 |---|---|---|
 | flush text to screen | every `is_final` segment | fastest never-revised text there is |
-| break a display row | row width, **or** a `breakGap` gap (1.5s) | a caption stack should read as continuous, and reset only when the speaker actually stops |
-| close a transcript line | terminal punctuation, or that same gap, or a 1000-char guard | a file read later wants sentences; a screen watched live wants continuity |
+| break a display row | row width, a `breakGap` gap (1.5s), **or** a change of speaker | a caption stack should read as continuous, and reset only when the speaker actually stops — or when it stops being the same speaker |
+| close a transcript line | terminal punctuation, that same gap, **a change of speaker**, or a 1000-char guard | a file read later wants sentences attributable to someone; a screen watched live wants continuity |
 
 The gap is free: `stt.Transcript` already carries `Start` and `Duration`, so the hub computes
 `t.Start - prevEnd` as arithmetic — no timers, no goroutines. A **negative** gap means the media
@@ -355,6 +362,35 @@ on its own and receives a fresh snapshot, so the cost of a drop is one round tri
 
 History is capped at 20 lines for late-joiner snapshots — well more than the 6 rows a viewer shows,
 and the snapshot event is now its only reader (`Hub.Snapshot()` had no other callers and is gone).
+
+### Who is speaking
+
+`stt.Transcript.Speaker` is a **1-based** int, 0 meaning unknown. Both providers report the
+speaker per *word* — Deepgram a 0-based int on `words[]`, Speechmatics `"S1"` on
+`results[].alternatives[]` — and both are normalised to that one int inside the engine, so
+neither provider's label syntax reaches the hub or the wire. 0 is reserved rather than reused as
+"speaker zero": it is what `--no-diarize`, Speechmatics' `"UU"`, and a server that ignored the
+request parameter all produce, and treating any of those as a real speaker would draw a badge
+asserting a turn change that never happened.
+
+Because the labels are per-word, one finalized window can legitimately contain two people —
+an interruption inside a single endpointing window. `decodeTranscript` therefore groups
+*consecutive* words into runs and emits one `Transcript` per run, each with its own
+`Start`/`Duration` taken from its own words. That is why `Session.Decode` returns a slice: the
+alternative was crediting the whole window to whoever spoke first, which is wrong at exactly
+the boundary diarization exists to find. `readLoop` anchors each run on its own `End()`, so the
+latency figures stay per-run rather than being smeared across the window.
+
+Deepgram's `words[]` are read via `punctuated_word`, not `word`. `punctuate`/`smart_format` are
+already load-bearing for `closeLocked`'s terminal-punctuation check (above), and the raw `word`
+field carries neither punctuation nor capitalisation — reassembling text from it would silently
+degrade every transcript line to the speech-gap fallback. Speechmatics is assembled from
+`results[]` for the same reason the split exists at all, with `type: "punctuation"` results
+appended to the preceding word without a space and inheriting its speaker, never starting a run.
+
+Both engines keep a fallback that emits the provider's own flat transcript string as a single
+`Speaker: 0` segment when no per-word data is present. That path is what `--no-diarize` runs on,
+and it is also the trust boundary for a provider that quietly stops returning `words[]`.
 
 ### Recognizer cadence vs. `breakGap`
 
@@ -430,20 +466,34 @@ closing the connection.
 Event wire format:
 
 ```json
-{"seq":42,"kind":"caption","text":"a few announcements before the","break":false,"at":"2026-08-19T09:31:05.912Z"}
-{"seq":43,"kind":"caption","text":"main session.","break":false,"at":"2026-08-19T09:31:06.301Z"}
-{"seq":44,"kind":"caption","text":"If you can't hear me at the back","break":true,"at":"2026-08-19T09:31:08.912Z"}
+{"seq":42,"kind":"caption","text":"a few announcements before the","break":false,"speaker":1,"at":"2026-08-19T09:31:05.912Z"}
+{"seq":43,"kind":"caption","text":"main session.","break":false,"speaker":1,"at":"2026-08-19T09:31:06.301Z"}
+{"seq":44,"kind":"caption","text":"Sorry, can you repeat that?","break":true,"speaker":2,"at":"2026-08-19T09:31:08.912Z"}
 {"seq":45,"kind":"status","state":"reconnecting","detail":"stt websocket closed","at":"2026-08-19T09:31:10.442Z"}
 {"seq":46,"kind":"status","state":"paused","detail":"","at":"2026-08-19T09:31:40.000Z"}
-{"seq":47,"kind":"snapshot","text":"...history joined, plus the open committed text","state":"connected","at":"2026-08-19T09:31:41.000Z"}
+{"seq":47,"kind":"snapshot","text":"...history joined, plus the open committed text","state":"connected","speaker":2,"at":"2026-08-19T09:31:41.000Z"}
 ```
 
 `kind: "final"` and `kind: "interim"` are gone; there is one text-carrying event kind now,
 `caption`. Its `text` is always the new segment only — never the accumulated utterance — so the
 client can append it blindly, and `break` asks the viewer to freeze the current row before
 appending: the speaker actually stopped (§4). `Event` dropped from ten fields to seven along with
-`id`, `offset_ms`, `lines` and `pending`: a `caption` event carries nothing about utterance
-structure any more, because there's no revision left to protect the client from.
+`id`, `offset_ms`, `lines` and `pending` (`speaker` later brought it back to eight): a `caption`
+event carries nothing about utterance structure any more, because there's no revision left to
+protect the client from.
+
+`speaker` (§4, omitted when unknown) is the one exception to that last sentence, and it is
+deliberately *not* folded into `break`. `break` is a one-shot instruction — freeze the row now —
+while `speaker` is a property of the text itself, which is why the client stores it per word and
+derives its own turn break from it. Fold the two together and a rotation would lose every turn
+boundary, because `rebuild()` re-lays the ledger from scratch and can only see what an entry
+carries. On a `snapshot` it reports the speaker in progress, so a client reconnecting mid-session
+detects the *next* change correctly rather than mistaking a continuation for a new turn.
+
+Known ceiling: `joinHistory` flattens replayed history to one string, so a snapshot's text has no
+internal speaker structure — a reconnect loses the badges on already-painted text until the next
+change. Cheap to fix by replaying history as structured lines; not worth it for text the viewer
+has usually already read.
 
 `at` (the publish instant) is stamped on every event kind by `newEventLocked`, unconditionally —
 there is no longer a "which kinds get a timestamp" question, since every event kind is
@@ -472,8 +522,9 @@ never-revised text (§4), so the typesetter has exactly one job — lay words ou
 fixed-height rows, and glide the stack up by one row when the current row either runs out of width
 or the server reports the speaker actually paused (`Event.Break`).
 
-A row closes on exactly two triggers — the next word doesn't fit (`pushWord`), or the server sent
-`break: true` (`breakRow`) — and both run the same `freezeAndGlide` path: the active row is marked
+A row closes on exactly three triggers — the next word doesn't fit (`pushWord`), the server sent
+`break: true` (`breakRow`), or the next word belongs to a different speaker than the one that
+opened the row — and all three run the same `freezeAndGlide` path: the active row is marked
 frozen, a new row is appended below it, and the whole stack glides up by exactly one row height. The
 governing invariant: a word, once painted, is never touched again — it doesn't change color, doesn't
 change font, doesn't move sideways or down. It only ever moves up, by construction rather than by
@@ -486,8 +537,40 @@ because canvas resolves a font stack independently of layout and an under-measur
 word rather than wrap it. `retypeset()`, debounced off `ResizeObserver` and `visualViewport`
 resize, is the only path that ever reflows already-painted text — everything else only appends —
 and it no longer needs to replay utterance-boundary metadata to reconstruct rows after a resize,
-because with words immutable and pause breaks not recorded per-word, row structure is purely a
-function of width. `?lines=` means visible rows, not utterances.
+because with words immutable and pause breaks not recorded per-word, row structure is a function
+of width and of the one thing a ledger entry does carry besides its text: its speaker. That is
+the whole reason the turn break is derived client-side from a per-word field rather than taken
+from a wire flag (§5, above) — a flag consumed once at append time is invisible to `rebuild()`,
+so a rotation would silently merge two people's rows back together. `?lines=` means visible rows,
+not utterances.
+
+The speaker gutter is reserved unconditionally, for every session, diarized or not. An earlier
+draft made it appear the first time a speaker change was observed — zero cost to a
+solo-presenter session, and only one reflow to a multi-speaker one. It read well on paper and
+was wrong in the room: that reflow slides every already-painted word sideways, mid-sentence, in
+front of an audience reading at speech rate. Motion the reader didn't cause is the one thing
+this display is built to never do, and "only once per session" does not redeem it. A constant
+gutter costs a fixed sliver of width and moves nothing, so it wins.
+
+What makes the constant affordable is `#page`'s negative left margin, which spends the body's
+own 5vw padding on the gutter rather than the text's width: the badge sits out in the margin and
+the text lands within about a viewport-percent of where it would with no gutter at all. The pull
+is deliberately less than the gutter's full width — matching it exactly would park the badge
+flush against the screen edge in portrait, where `--row-h` is largest relative to the viewport.
+
+One consequence worth knowing before touching `computeMetrics()`: it measures the gutter off a
+throwaway `.row` it appends and removes, not off `rows[0]`. It runs once at construction before
+`rebuild()` has made any row, and a zero read there would leave `usableWidth` one gutter too wide
+for the whole session — every row clipping its last word, with no resize to correct it. That
+hazard did not exist while the gutter started at zero.
+
+The badge itself is an absolutely-positioned `::before` inside the row's own
+left padding: it must stay out of inline layout, or it would shift text right by an amount the
+canvas measurement knows nothing about, and `usableWidth` subtracts the gutter for the same
+reason. Marking only the row that *starts* a turn, rather than every row of it, is a display
+decision argued in the plan record; the number is the speaker and the colour is a redundant
+pre-attentive hint, never the only carrier — `/admin`, a projector and a colour-blind viewer all
+have to read the same thing.
 
 The phone is the primary viewer, so it sets the defaults rather than being an afterthought: type
 is larger in portrait (`4vw` is unreadable at phone widths), the visible row count is capped by
@@ -648,8 +731,12 @@ it; `--no-transcript` is the explicit opt-out.
 
 Per session, `<dir>/<YYYY-MM-DDTHH-MM-SS>/`:
 
-- `transcript.txt` — `[00:12:34] text`, for humans
-- `transcript.jsonl` — one record per line with offsets and timestamps, for tooling
+- `transcript.txt` — `[00:12:34] text`, or `[00:12:34] [S2] text` when the speaker is known, for humans
+- `transcript.jsonl` — one record per line with offsets, timestamps and speaker, for tooling
+
+The speaker *is* spelled out here, unlike on screen. The argument against an inline `Speaker 2:`
+label is entirely about the display's row-width budget and the fact that a caption is read once,
+at speech rate; neither applies to a file someone scrolls back through later.
 
 Both `O_APPEND`, buffered, flushed every 2 s and on close, so a crash keeps what already landed.
 Write failures surface as a metric rather than an error — losing the transcript must not end a live

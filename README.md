@@ -107,6 +107,29 @@ own finalisation window: Deepgram's `endpointing`, left at the server default, o
 `Segments / lines` on `/admin` to check fragmentation: roughly 1–3 segments per line is healthy,
 and a ratio climbing well past that means phrases are splitting on every hesitation.
 
+### Speakers
+
+Diarization is on by default. Both engines label the speaker for every word they return
+(Deepgram `diarize`, Speechmatics `diarization: speaker`), so a segment that spans a turn is
+split into one caption per speaker rather than being credited to whoever started it.
+
+| flag | default | effect |
+|---|---|---|
+| `--diarize` / `--no-diarize` | on | ask the recognizer who is speaking |
+
+A change of speaker always breaks the caption row — two people's words never share a line — and
+closes a transcript line. On screen the change is marked by a small coloured numbered dot in a
+left gutter, on the first row of the new turn only; continuation rows are unmarked, so a
+single-speaker session shows nothing at all. The gutter itself is always reserved — it sits in
+the page margin rather than in front of the text, and never appears or disappears mid-session,
+which would slide painted words sideways. The number is the speaker,
+the colour is a fast hint that the turn changed; six colours cycle, and the number stays
+authoritative past that. `transcript.txt` spells the same thing out as an `[S2]` prefix.
+
+Speaker labels are cluster indices, not identities: they are stable within a connection and
+renumbered after a reconnect. Turn it off with `--no-diarize` if a venue sees the extra
+recognition delay it can cost.
+
 ## Transcripts
 
 On by default — every session writes to `./transcripts/<YYYY-MM-DDTHH-MM-SS>/`, both

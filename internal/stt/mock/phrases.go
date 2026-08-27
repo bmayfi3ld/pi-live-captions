@@ -8,24 +8,38 @@ import (
 	"livecaption/internal/stt"
 )
 
-// phrases are deliberately caption-shaped: varied length, real punctuation,
-// and a few proper nouns, so the viewer layout is exercised honestly.
-var phrases = []string{
-	"Good morning everyone, and thank you all for coming out today.",
-	"We're going to start with a few announcements before the main session.",
-	"If you can't hear me at the back, please raise your hand.",
-	"The agenda for this morning is posted at the entrance.",
-	"First, I want to thank the volunteers who set up the room.",
-	"We'll take a short break at around half past ten.",
-	"Please silence your phones for the duration of the talk.",
-	"There's coffee and tea available in the lobby throughout the morning.",
-	"Our first speaker has been working on this project for three years.",
-	"I think you'll find the results genuinely surprising.",
-	"Let's give a warm welcome to our guest this morning.",
-	"Feel free to ask questions as we go along.",
-	"That brings us to the end of the first section.",
-	"We have about fifteen minutes left for discussion.",
-	"If anyone needs to step out, the exits are on both sides.",
+// phrase is one canned line plus who says it. Speaker follows stt.Transcript's
+// own convention (1-based, 0 unknown), so phraseState can stamp it straight
+// onto the Transcript it emits with no translation step.
+type phrase struct {
+	Speaker int
+	Text    string
+}
+
+// phrases is a scripted conversation rather than a monologue, so diarization
+// is exercisable offline with no API cost: an MC (1) opens, an audience
+// member (2) interrupts with a question and gets a reply — a back-to-back
+// 1→2→1 exchange — a guest (3) joins, and a second audience member (4)
+// follows up. Deliberately caption-shaped throughout: varied length, real
+// punctuation, a few proper nouns, so the viewer layout is exercised
+// honestly.
+var phrases = []phrase{
+	{1, "Good morning everyone, and thank you all for coming out today."},
+	{1, "We're going to start with a few announcements before the main session."},
+	{1, "First, I want to thank the volunteers who set up the room."},
+	{1, "There's coffee and tea available in the lobby throughout the morning."},
+	{2, "Sorry, can you hear me okay from the back row?"},
+	{1, "Yes, loud and clear — go ahead."},
+	{2, "Is the schedule posted anywhere, or just announced here?"},
+	{1, "It's posted at the entrance, right next to registration."},
+	{1, "Let's give a warm welcome to our guest this morning, Dr. Elena Rossi."},
+	{3, "Thank you so much for having me, it's wonderful to be in Portland."},
+	{3, "I've been working on this project for about three years now."},
+	{3, "I think you'll find the results genuinely surprising."},
+	{4, "Does that apply to smaller teams too, or mainly larger ones?"},
+	{3, "Great question — it scales down surprisingly well, actually."},
+	{1, "We have about fifteen minutes left for questions after this."},
+	{1, "If anyone needs to step out, the exits are on both sides."},
 }
 
 const (
@@ -39,14 +53,17 @@ const (
 	gapAudio = 2 * time.Second
 )
 
-// phraseState drives the canned-utterance state machine shared by both mock
-// engines: mock paces it off real frame offsets, mock-2 off a synthetic
-// level schedule instead, but the phrase timing, segment split and gaps are
-// identical so the two engines look the same to a viewer.
+// phraseState drives mock's canned-utterance state machine, paced off real
+// frame offsets so output is identical at any --speed and reproducible in
+// tests. It also carries the current speaker, set from phrases on each
+// restart, so step can stamp it onto every Transcript it emits.
 type phraseState struct {
 	rng *rand.Rand
 
 	phraseIdx int
+	// speaker is the current phrase's speaker, cached at restart so step
+	// doesn't need to re-index phrases on every segment.
+	speaker int
 	// segments is the current phrase split into clause-sized, settled
 	// pieces — computed once per utterance, since a real recognizer doesn't
 	// re-segment text it has already committed to.
@@ -66,13 +83,16 @@ func newPhraseState(rng *rand.Rand) *phraseState {
 }
 
 // restart begins a fresh utterance at media time now, discarding whatever was
-// in flight. mock-2 calls this on resume from a pause: the stale segment
-// timing is by then a whole silent stretch in the past, so without it the
-// first frame back would fire a finished phrase instantly rather than easing
-// back in the way returning speech actually does. phraseIdx is left alone, so
-// the interrupted sentence starts over rather than being skipped.
+// in flight. step calls this both for the very first phrase and whenever a
+// gap ends: the stale segment timing is by then a whole silent stretch in the
+// past, so without it the first frame back would fire a finished phrase
+// instantly rather than easing back in the way returning speech actually
+// does. phraseIdx is left alone, so an utterance interrupted mid-gap starts
+// over rather than being skipped.
 func (p *phraseState) restart(now time.Duration) {
-	p.segments = splitSegments(phrases[p.phraseIdx%len(phrases)])
+	ph := phrases[p.phraseIdx%len(phrases)]
+	p.segments = splitSegments(ph.Text)
+	p.speaker = ph.Speaker
 	p.segIdx = 0
 	p.segStart = now
 	p.nextSegment = now + segmentAudio
@@ -101,6 +121,7 @@ func (p *phraseState) step(now time.Duration, emit func(stt.Transcript) bool) bo
 	seg := p.segments[p.segIdx]
 	if !emit(stt.Transcript{
 		Text:       seg,
+		Speaker:    p.speaker,
 		Start:      p.segStart,
 		Duration:   now - p.segStart,
 		Confidence: 0.90 + p.rng.Float64()*0.09,

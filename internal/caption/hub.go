@@ -31,9 +31,18 @@ type Event struct {
 	// plus the open committed text.
 	Text string `json:"text,omitempty"`
 	// Break asks the viewer to freeze the current row before appending Text:
-	// the speaker actually stopped. It is the ONLY thing that breaks a row
-	// other than running out of width.
+	// the speaker actually stopped talking, for a pause of breakGap or more
+	// (or a media-clock discontinuity — see isBreakLocked). It stays
+	// pause-only, not speaker-change-only: a speaker change with no pause is
+	// carried on Speaker instead, and it is the viewer's own rebuild() that
+	// decides whether to also break the row on that — put here, Break would
+	// bake a display rule into the wire format that the client has no way to
+	// see or override.
 	Break bool `json:"break,omitempty"`
+	// Speaker is the segment's 1-based speaker (0 unknown), carried straight
+	// through from stt.Transcript. The viewer derives its own row break from
+	// this per-word field — see the Break comment above.
+	Speaker int `json:"speaker,omitempty"`
 	// omitzero, not omitempty: omitempty has no effect on a struct, so an
 	// unset time would serialize as "0001-01-01T00:00:00Z".
 	At time.Time `json:"at,omitzero"`
@@ -50,6 +59,10 @@ type Line struct {
 	Text     string    `json:"text"`
 	OffsetMS int64     `json:"offset_ms"`
 	At       time.Time `json:"at"`
+	// Speaker is the line's speaker (1-based, 0 unknown). A closed line
+	// belongs to whichever speaker was talking when Publish appended its
+	// text, which closeLocked has no way to see itself — see Hub.Publish.
+	Speaker int
 }
 
 // historyLimit is how many finalized lines are kept for late joiners, and
@@ -98,6 +111,19 @@ type Hub struct {
 	// prevEnd is the media time the last segment covered, so the gap to the
 	// next one can be measured without a clock.
 	prevEnd time.Duration
+	// uttSpeaker is the speaker of the transcript line in progress, cached
+	// whenever committed starts a fresh utterance (committed == "") so
+	// closeLocked can stamp it onto the Line without needing its own
+	// parameter — every segment merged into one committed line already
+	// shares a speaker, since a change force-closes the line first (see
+	// Publish).
+	uttSpeaker int
+	// lastSpeaker is the most recently published segment's speaker, used to
+	// detect a speaker change independent of any pause. 0 (unknown) never
+	// counts as a change either way: diarization dropping out mid-session
+	// must not force a break, and a run of unknown-speaker segments must not
+	// look like it's constantly changing speakers.
+	lastSpeaker int
 	// lastState/lastDetail are the most recent status published via
 	// PublishStatus. Subscribe replays them into the snapshot event so a
 	// client that connects (or reconnects) mid-pause learns the current
@@ -128,17 +154,23 @@ func (h *Hub) Publish(t stt.Transcript) {
 	h.mu.Lock()
 	// The break must be evaluated, and the line it closes flushed, BEFORE
 	// this segment is appended — otherwise a pause lands inside the new
-	// utterance instead of separating it from the old one.
+	// utterance instead of separating it from the old one. A speaker change
+	// closes the line the same way even with no pause: 0 (unknown) on either
+	// side never counts as a change, so diarization dropping out mid-segment
+	// can't force a spurious break.
 	broke := h.isBreakLocked(t)
-	before, closedBefore := h.closeLocked(broke) // flush what came before the pause
+	speakerChanged := h.lastSpeaker != 0 && t.Speaker != 0 && t.Speaker != h.lastSpeaker
+	before, closedBefore := h.closeLocked(broke || speakerChanged) // flush what came before
 	if h.committed == "" {
 		h.uttStart = t.Start
+		h.uttSpeaker = t.Speaker
 	}
 	h.committed = joinText(h.committed, text)
 	h.prevEnd = t.End()
 
 	ev := h.newEventLocked(KindCaption)
 	ev.Text, ev.Break = text, broke // the delta, never the accumulation
+	ev.Speaker = t.Speaker
 
 	// Deliberately unconditional, not gated on the flush above having been a
 	// no-op: a segment arriving right after a pause can itself be a whole
@@ -147,6 +179,11 @@ func (h *Hub) Publish(t stt.Transcript) {
 	// that sentence open until the next segment happened to arrive, delaying
 	// its transcript write and terminal print by a whole utterance.
 	after, closedAfter := h.closeLocked(false) // punctuation / length
+	// After, not before isBreakLocked/speakerChanged above are evaluated:
+	// both compare t.Speaker against the speaker as of the PREVIOUS segment.
+	if t.Speaker != 0 {
+		h.lastSpeaker = t.Speaker
+	}
 	onFinal := h.OnFinal
 	h.mu.Unlock()
 
@@ -209,6 +246,7 @@ func (h *Hub) closeLocked(broke bool) (Line, bool) {
 		Text:     h.committed,
 		OffsetMS: h.uttStart.Milliseconds(),
 		At:       time.Now(),
+		Speaker:  h.uttSpeaker,
 	}
 	h.history = append(h.history, line)
 	if len(h.history) > historyLimit {
@@ -284,6 +322,10 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	// reconnects) mid-pause sees the correct indicator immediately, rather
 	// than defaulting to "ok" until the state happens to change again.
 	snap.State, snap.Detail = h.lastState, h.lastDetail
+	// So a client reconnecting mid-session already knows who was talking,
+	// and can tell the NEXT caption event's Speaker apart as an actual
+	// change rather than treating it as the first speaker it has ever seen.
+	snap.Speaker = h.lastSpeaker
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 
@@ -334,6 +376,12 @@ func (h *Hub) broadcast(ev Event) {
 	}
 }
 
+// ponytail: joinHistory flattens history to one string, so a snapshot replays
+// as plain text with no per-line Speaker structure — a client reconnecting
+// mid-session sees no speaker badges on the replayed text until the next
+// live change. Accepted for now: fixing it means the snapshot event carrying
+// history as []Line (or similar) instead of one joined string, which is a
+// wire-format change the viewer side would need to match.
 func joinHistory(history []Line, committed string) string {
 	var b strings.Builder
 	for _, l := range history {

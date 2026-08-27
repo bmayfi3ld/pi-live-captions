@@ -99,17 +99,42 @@ func testEngine(wsURL string) *Engine {
 	}
 }
 
-// addTranscript builds an AddTranscript the way the API documents it.
+// addTranscript builds an AddTranscript the way the API documents it: one
+// "word" result spanning the whole range, so tests that don't care about
+// diarization can still assert on Start/Duration/Confidence the way they
+// always have. The flat transcript/metadata fields are populated too, purely
+// as the hedge Speechmatics itself requires (see transcripts()) — with
+// results present they are not what decodeTranscript actually reads.
 func addTranscript(text string, start, end float64) map[string]any {
 	return map[string]any{
 		"message":    "AddTranscript",
 		"format":     "2.1",
 		"metadata":   map[string]any{"start_time": start, "end_time": end},
 		"transcript": text,
-		"results": []map[string]any{{
-			"type":         "word",
-			"alternatives": []map[string]any{{"content": text, "confidence": 0.9}},
-		}},
+		"results": []map[string]any{
+			wordResult(text, start, end, 0.9, ""),
+		},
+	}
+}
+
+// wordResult and punctuationResult build one Results[] entry the way the API
+// documents it. speaker is Speechmatics' own label ("S1", "S2", "UU") or ""
+// when diarization wasn't requested.
+func wordResult(content string, start, end, confidence float64, speaker string) map[string]any {
+	return map[string]any{
+		"type":         "word",
+		"start_time":   start,
+		"end_time":     end,
+		"alternatives": []map[string]any{{"content": content, "confidence": confidence, "speaker": speaker}},
+	}
+}
+
+func punctuationResult(content string, at float64, speaker string) map[string]any {
+	return map[string]any{
+		"type":         "punctuation",
+		"start_time":   at,
+		"end_time":     at,
+		"alternatives": []map[string]any{{"content": content, "speaker": speaker}},
 	}
 }
 
@@ -155,10 +180,11 @@ func TestDecode(t *testing.T) {
 
 	t.Run("final transcript is published", func(t *testing.T) {
 		data, _ := json.Marshal(addTranscript("hello there", 1.5, 2.5))
-		tr, ok, err := s.Decode(data)
-		if err != nil || !ok {
-			t.Fatalf("Decode = (%v, %v, %v), want a transcript", tr, ok, err)
+		ts, err := s.Decode(data)
+		if err != nil || len(ts) != 1 {
+			t.Fatalf("Decode = (%v, %v), want one transcript", ts, err)
 		}
+		tr := ts[0]
 		if tr.Text != "hello there" {
 			t.Errorf("Text = %q", tr.Text)
 		}
@@ -178,8 +204,8 @@ func TestDecode(t *testing.T) {
 	t.Run("partial is dropped", func(t *testing.T) {
 		data := []byte(`{"message":"AddPartialTranscript","transcript":"hel",
 			"metadata":{"start_time":0,"end_time":0.3}}`)
-		if _, ok, err := s.Decode(data); ok || err != nil {
-			t.Errorf("Decode = (%v, %v), want a partial dropped silently", ok, err)
+		if ts, err := s.Decode(data); len(ts) != 0 || err != nil {
+			t.Errorf("Decode = (%v, %v), want a partial dropped silently", ts, err)
 		}
 	})
 
@@ -192,15 +218,15 @@ func TestDecode(t *testing.T) {
 			`{"message":"AddTranscript","metadata":{"start_time":0,"end_time":1}}`,
 			`not json at all`,
 		} {
-			if _, ok, err := s.Decode([]byte(data)); ok || err != nil {
-				t.Errorf("Decode(%s) = (%v, %v), want it skipped", data, ok, err)
+			if ts, err := s.Decode([]byte(data)); len(ts) != 0 || err != nil {
+				t.Errorf("Decode(%s) = (%v, %v), want it skipped", data, ts, err)
 			}
 		}
 	})
 
 	t.Run("error is fatal", func(t *testing.T) {
 		data := []byte(`{"message":"Error","type":"job_error","reason":"boom"}`)
-		_, _, err := s.Decode(data)
+		_, err := s.Decode(data)
 		if err == nil {
 			t.Fatal("an Error message should drop the connection")
 		}
@@ -211,14 +237,14 @@ func TestDecode(t *testing.T) {
 
 	t.Run("bad config is permanent", func(t *testing.T) {
 		data := []byte(`{"message":"Error","type":"invalid_language","reason":"no such language"}`)
-		_, _, err := s.Decode(data)
+		_, err := s.Decode(data)
 		if !stt.IsPermanent(err) {
 			t.Errorf("invalid_language should be permanent, got %v", err)
 		}
 	})
 
 	t.Run("end of transcript ends the read loop", func(t *testing.T) {
-		_, _, err := s.Decode([]byte(`{"message":"EndOfTranscript"}`))
+		_, err := s.Decode([]byte(`{"message":"EndOfTranscript"}`))
 		if err != errEndOfTranscript { //nolint:errorlint // exact sentinel
 			t.Errorf("Decode = %v, want errEndOfTranscript", err)
 		}
@@ -227,14 +253,119 @@ func TestDecode(t *testing.T) {
 
 // TestDecode_TranscriptInMetadata covers the other place Speechmatics has
 // documented the assembled transcript over the years. Both are read, so a
-// server on either shape still produces captions.
+// server on either shape still produces captions. This also exercises the
+// Results-empty fallback: no "results" key at all here, so transcripts()
+// falls all the way back to the flat/metadata text fields, Speaker 0.
 func TestDecode_TranscriptInMetadata(t *testing.T) {
 	s := &session{log: slog.Default()}
 	data := []byte(`{"message":"AddTranscript",
 		"metadata":{"start_time":0,"end_time":1,"transcript":"nested"}}`)
-	tr, ok, err := s.Decode(data)
-	if err != nil || !ok || tr.Text != "nested" {
-		t.Fatalf("Decode = (%q, %v, %v), want the metadata transcript", tr.Text, ok, err)
+	ts, err := s.Decode(data)
+	if err != nil || len(ts) != 1 || ts[0].Text != "nested" {
+		t.Fatalf("Decode = (%v, %v), want the metadata transcript", ts, err)
+	}
+	if ts[0].Speaker != 0 {
+		t.Errorf("Speaker = %d, want 0 (the flat-text fallback never attributes a speaker)", ts[0].Speaker)
+	}
+}
+
+// TestTranscripts_Diarization covers the two rules that matter once
+// diarization is on: a punctuation result attaches to the preceding word with
+// no space and never starts a run of its own, and a run boundary is a change
+// in speaker, so a message spanning "MC ... guest ..." splits into one
+// Transcript per speaker in order.
+func TestTranscripts_Diarization(t *testing.T) {
+	data, err := json.Marshal(map[string]any{
+		"message": "AddTranscript",
+		"results": []map[string]any{
+			wordResult("Hello", 0, 0.4, 0.95, "S1"),
+			punctuationResult(",", 0.4, "S1"),
+			wordResult("there", 0.4, 0.8, 0.93, "S1"),
+			wordResult("Hi", 0.8, 1.1, 0.90, "S2"),
+			wordResult("there", 1.1, 1.5, 0.92, "S2"),
+			punctuationResult(".", 1.5, "S2"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg serverMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := msg.transcripts()
+	if err != nil {
+		t.Fatalf("transcripts: %v", err)
+	}
+	if len(ts) != 2 {
+		t.Fatalf("got %d transcripts, want 2: %+v", len(ts), ts)
+	}
+
+	if ts[0].Text != "Hello, there" {
+		t.Errorf("run 0 Text = %q, want %q (punctuation attaches with no space)", ts[0].Text, "Hello, there")
+	}
+	if ts[0].Speaker != 1 {
+		t.Errorf("run 0 Speaker = %d, want 1 (S1)", ts[0].Speaker)
+	}
+	if ts[0].Start != 0 || ts[0].Duration != 800*time.Millisecond {
+		t.Errorf("run 0 Start/Duration = %v/%v, want 0/800ms", ts[0].Start, ts[0].Duration)
+	}
+	if got, want := ts[0].Confidence, (0.95+0.93)/2; got != want {
+		t.Errorf("run 0 Confidence = %v, want %v (punctuation excluded)", got, want)
+	}
+
+	if ts[1].Text != "Hi there." {
+		t.Errorf("run 1 Text = %q, want %q", ts[1].Text, "Hi there.")
+	}
+	if ts[1].Speaker != 2 {
+		t.Errorf("run 1 Speaker = %d, want 2 (S2)", ts[1].Speaker)
+	}
+	if ts[1].Start != 800*time.Millisecond || ts[1].Duration != 700*time.Millisecond {
+		t.Errorf("run 1 Start/Duration = %v/%v, want 800ms/700ms", ts[1].Start, ts[1].Duration)
+	}
+	if got, want := ts[1].Confidence, (0.90+0.92)/2; got != want {
+		t.Errorf("run 1 Confidence = %v, want %v (punctuation excluded)", got, want)
+	}
+}
+
+// TestTranscripts_UnknownSpeaker pins "UU" (Speechmatics' unattributed-audio
+// label) mapping to this package's own 0/"unknown" sentinel, same as no label
+// at all.
+func TestTranscripts_UnknownSpeaker(t *testing.T) {
+	data, _ := json.Marshal(map[string]any{
+		"message": "AddTranscript",
+		"results": []map[string]any{wordResult("hello", 0, 0.4, 0.9, "UU")},
+	})
+	var msg serverMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := msg.transcripts()
+	if err != nil || len(ts) != 1 {
+		t.Fatalf("transcripts = (%v, %v), want one transcript", ts, err)
+	}
+	if ts[0].Speaker != 0 {
+		t.Errorf("Speaker = %d, want 0 for UU", ts[0].Speaker)
+	}
+}
+
+// TestTranscripts_LeadingPunctuationIsDropped guards the edge case implied by
+// "punctuation never starts a run": a message that somehow opens on a
+// punctuation result has nothing to attach it to, so it is dropped rather
+// than starting a run for a bare symbol.
+func TestTranscripts_LeadingPunctuationIsDropped(t *testing.T) {
+	data, _ := json.Marshal(map[string]any{
+		"message": "AddTranscript",
+		"results": []map[string]any{punctuationResult(",", 0, "S1")},
+	})
+	var msg serverMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := msg.transcripts()
+	if err != nil || len(ts) != 0 {
+		t.Errorf("transcripts = (%v, %v), want none (leading punctuation has nothing to attach to)", ts, err)
 	}
 }
 

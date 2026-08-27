@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/coder/websocket"
 
@@ -98,6 +99,7 @@ func (e *Engine) dialURL() string {
 	q.Set("punctuate", "true")
 	q.Set("profanity_filter", "true")
 	q.Set("smart_format", "true")
+	q.Set("diarize", strconv.FormatBool(e.cfg.Diarize))
 	// Deepgram's own `endpointing` is left at the server default, which is
 	// now what governs caption cadence end to end: text lands when Deepgram
 	// finalizes a window, not before. It is therefore the first knob to reach
@@ -132,17 +134,18 @@ func (s *session) Finish(ctx context.Context) error {
 	return s.writeJSON(ctx, controlMessage{Type: "CloseStream"})
 }
 
-// Decode turns one server message into a Transcript, dropping everything that
-// carries nothing to publish. Errors are swallowed here rather than returned:
-// an undecodable frame is noise, not a reason to tear down a working link.
-func (s *session) Decode(data []byte) (stt.Transcript, bool, error) {
-	t, isFinal, ok, err := decodeTranscript(data)
+// Decode turns one server message into zero or more Transcripts, dropping
+// everything that carries nothing to publish. Errors are swallowed here
+// rather than returned: an undecodable frame is noise, not a reason to tear
+// down a working link.
+func (s *session) Decode(data []byte) ([]stt.Transcript, error) {
+	ts, isFinal, err := decodeTranscript(data)
 	if err != nil {
 		s.log.Debug("deepgram: undecodable message", "err", err)
-		return stt.Transcript{}, false, nil
+		return nil, nil
 	}
-	if !ok {
-		return stt.Transcript{}, false, nil
+	if len(ts) == 0 {
+		return nil, nil
 	}
 	// dialURL asks for interim_results=false, so this should never fire.
 	// It stays as a trust boundary against the server sending interims
@@ -150,9 +153,9 @@ func (s *session) Decode(data []byte) (stt.Transcript, bool, error) {
 	// one as settled text would break the append-only guarantee the whole
 	// display rests on, and it is one comparison to prevent.
 	if !isFinal {
-		return stt.Transcript{}, false, nil
+		return nil, nil
 	}
-	return t, true, nil
+	return ts, nil
 }
 
 func (s *session) writeJSON(ctx context.Context, v any) error {
@@ -186,41 +189,128 @@ type resultsMessage struct {
 		Alternatives []struct {
 			Transcript string  `json:"transcript"`
 			Confidence float64 `json:"confidence"`
+			// Words is populated when diarize=true and carries per-word
+			// speaker attribution; empty with diarization off (or a server
+			// that ignored the param), in which case decodeTranscript falls
+			// back to the flat Transcript field above.
+			Words []struct {
+				Word           string  `json:"word"`
+				PunctuatedWord string  `json:"punctuated_word"`
+				Start          float64 `json:"start"`
+				End            float64 `json:"end"`
+				Confidence     float64 `json:"confidence"`
+				Speaker        int     `json:"speaker"`
+			} `json:"words"`
 		} `json:"alternatives"`
 	} `json:"channel"`
 }
 
-// decodeTranscript turns one server message into a Transcript plus whether it
-// was Deepgram's is_final for that window. ok is false for messages that
-// carry nothing worth publishing: empty Results (no speech yet), Metadata,
-// SpeechStarted, and any other unrecognized type. An interim still decodes
-// with ok=true and isFinal=false — this function's job is to report the
-// message faithfully; Decode is what decides interims are not published.
-func decodeTranscript(data []byte) (t stt.Transcript, isFinal bool, ok bool, err error) {
+// decodeTranscript turns one server message into the Transcripts it carries
+// plus whether it was Deepgram's is_final for that window. The slice is empty
+// for messages that carry nothing worth publishing: empty Results (no speech
+// yet), Metadata, SpeechStarted, and any other unrecognized type. An interim
+// still decodes with a non-empty slice and isFinal=false — this function's
+// job is to report the message faithfully; Decode is what decides interims
+// are not published.
+//
+// With diarization on, one Results message can span more than one speaker
+// (e.g. an MC's question immediately followed by a guest's answer inside the
+// same finalized window), so Words is grouped into consecutive runs by
+// speaker: one Transcript per run rather than one per message. Without
+// diarization (or against a server that ignored the param) Words is empty and
+// this falls back to exactly the old single-Transcript behavior, Speaker: 0.
+func decodeTranscript(data []byte) (ts []stt.Transcript, isFinal bool, err error) {
 	var head messageType
 	if err := json.Unmarshal(data, &head); err != nil {
-		return stt.Transcript{}, false, false, err
+		return nil, false, err
 	}
 
 	if head.Type != "Results" {
-		return stt.Transcript{}, false, false, nil
+		return nil, false, nil
 	}
 
 	var msg resultsMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
-		return stt.Transcript{}, false, false, err
+		return nil, false, err
 	}
 	if len(msg.Channel.Alternatives) == 0 {
-		return stt.Transcript{}, false, false, nil
+		return nil, false, nil
 	}
 	alt := msg.Channel.Alternatives[0]
-	if alt.Transcript == "" {
-		return stt.Transcript{}, false, false, nil
+
+	if len(alt.Words) == 0 {
+		// No per-word attribution: today's behavior, unconditionally
+		// Speaker 0 (unknown). This is the only path when Diarize is false,
+		// and stays the fallback if a diarizing request ever comes back
+		// without Words.
+		if alt.Transcript == "" {
+			return nil, false, nil
+		}
+		return []stt.Transcript{{
+			Text:       alt.Transcript,
+			Start:      stt.SecondsToDuration(msg.Start),
+			Duration:   stt.SecondsToDuration(msg.Duration),
+			Confidence: alt.Confidence,
+		}}, msg.IsFinal, nil
 	}
-	return stt.Transcript{
-		Text:       alt.Transcript,
-		Start:      stt.SecondsToDuration(msg.Start),
-		Duration:   stt.SecondsToDuration(msg.Duration),
-		Confidence: alt.Confidence,
-	}, msg.IsFinal, true, nil
+
+	// Group consecutive words by speaker: a run boundary is a change in
+	// Speaker, not just any occurrence of a given speaker, so an "MC, guest,
+	// MC" exchange yields three runs in order rather than merging the two MC
+	// runs together.
+	var run []int // indices into alt.Words for the run in progress
+	flush := func() {
+		if len(run) == 0 {
+			return
+		}
+		first, last := alt.Words[run[0]], alt.Words[run[len(run)-1]]
+		var text strings.Builder
+		var confSum float64
+		for i, wi := range run {
+			w := alt.Words[wi]
+			if i > 0 {
+				text.WriteByte(' ')
+			}
+			// punctuated_word carries the casing and punctuation that
+			// caption.Hub.closeLocked's endsSentence check depends on to
+			// close transcript lines; the raw word field is lowercase and
+			// bare (Deepgram's punctuate/smart_format shape
+			// punctuated_word, not word). Falling back to word only
+			// guards against a message that somehow omits the field.
+			pw := w.PunctuatedWord
+			if pw == "" {
+				pw = w.Word
+			}
+			text.WriteString(pw)
+			confSum += w.Confidence
+		}
+		ts = append(ts, stt.Transcript{
+			Text:  text.String(),
+			Start: stt.SecondsToDuration(first.Start),
+			// Duration spans first word's start to last word's end, not the
+			// message's overall Start/Duration, which cover every speaker.
+			Duration:   stt.SecondsToDuration(last.End - first.Start),
+			Confidence: confSum / float64(len(run)),
+			// Deepgram speaker indices are 0-based; this package's Speaker
+			// is 1-based with 0 reserved for "unknown", so every index
+			// shifts up by one. first.Speaker, not the word that triggered
+			// this flush: every word in run already shares one speaker by
+			// construction (a differing speaker closes the run before
+			// joining it), but at flush time the loop variable may already
+			// have moved on to the next word's (different) speaker.
+			Speaker: first.Speaker + 1,
+		})
+		run = run[:0]
+	}
+	var curSpeaker int
+	for i, w := range alt.Words {
+		if i > 0 && w.Speaker != curSpeaker {
+			flush()
+		}
+		curSpeaker = w.Speaker
+		run = append(run, i)
+	}
+	flush()
+
+	return ts, msg.IsFinal, nil
 }

@@ -21,6 +21,22 @@
     --warn-soft: #f5a62328;
     --crit: #c22b2b;
     --crit-soft: #ef444428;
+    /* Always reserved, never toggled on — same reasoning as index.html. No
+       negative margin to match the viewer's, though: this mirror sits in a
+       card with its own padding, and a three-row debug panel can afford the
+       small inset the viewer could not. */
+    --gutter: calc(var(--row-h, 1.6em) * 0.5);
+    /* Speaker badge palette, light (this file's default). 1/2/3 are the
+       colour-vision-safe trio — blue vs. orange survives deuteranopia/
+       protanopia, magenta separates from both — and two-or-three speakers
+       is by far the common case. Every swatch here clears 4.9:1 against the
+       near-white numeral. Mirrors index.html's palette exactly. */
+    --spk-1: #0369a1;
+    --spk-2: #b45309;
+    --spk-3: #a21caf;
+    --spk-4: #047857;
+    --spk-5: #6d28d9;
+    --spk-6: #4d7c0f;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -39,6 +55,13 @@
       --warn-soft: #f5a62324;
       --crit: #f16565;
       --crit-soft: #f165651f;
+      /* Every swatch here clears 10:1 against the near-black numeral. */
+      --spk-1: #7dd3fc;
+      --spk-2: #fdba74;
+      --spk-3: #f0abfc;
+      --spk-4: #6ee7b7;
+      --spk-5: #c4b5fd;
+      --spk-6: #bef264;
     }
   }
   :root[data-theme="dark"] {
@@ -46,12 +69,14 @@
     --fg: #eef0f3; --muted: #8a919e; --muted-soft: #8a919e1a; --accent: #4fd3dd; --accent-soft: #4fd3dd1a;
     --ok: #3ecf7e; --ok-soft: #3ecf7e1c; --warn: #f5a623; --warn-soft: #f5a62324;
     --crit: #f16565; --crit-soft: #f165651f;
+    --spk-1: #7dd3fc; --spk-2: #fdba74; --spk-3: #f0abfc; --spk-4: #6ee7b7; --spk-5: #c4b5fd; --spk-6: #bef264;
   }
   :root[data-theme="light"] {
     --bg: #f3f4f6; --surface: #ffffff; --surface-2: #f8f9fb; --border: #e2e4e9;
     --fg: #12151b; --muted: #6b7280; --muted-soft: #6b728018; --accent: #0e7c86; --accent-soft: #0e7c8618;
     --ok: #1a9850; --ok-soft: #1a985018; --warn: #b8790a; --warn-soft: #f5a62328;
     --crit: #c22b2b; --crit-soft: #ef444428;
+    --spk-1: #0369a1; --spk-2: #b45309; --spk-3: #a21caf; --spk-4: #047857; --spk-5: #6d28d9; --spk-6: #4d7c0f;
   }
 
   * { box-sizing: border-box; }
@@ -256,12 +281,45 @@
      (card, page, viewport, probe) is admin's; row/word styling has to speak
      the vocabulary caption.js actually renders. */
   #lt-stack .row {
+    position: relative;
+    padding-left: var(--gutter, 0px);
     height: var(--row-h, 1.6em);
     line-height: var(--row-h, 1.6em);
     white-space: pre;
     overflow: hidden;
     font-weight: 600;
     font-size: 1.05rem;
+  }
+
+  /* data-spk (cycled 1-6, set by caption.js) selects the colour; data-speaker
+     (the true, uncycled number) gates the badge's existence and supplies its
+     glyph via attr() — mirrors index.html's rules exactly. */
+  #lt-stack .row[data-spk="1"] { --spk: var(--spk-1); }
+  #lt-stack .row[data-spk="2"] { --spk: var(--spk-2); }
+  #lt-stack .row[data-spk="3"] { --spk: var(--spk-3); }
+  #lt-stack .row[data-spk="4"] { --spk: var(--spk-4); }
+  #lt-stack .row[data-spk="5"] { --spk: var(--spk-5); }
+  #lt-stack .row[data-spk="6"] { --spk: var(--spk-6); }
+
+  /* Absolutely positioned, not inline: with padding-left on a positioned
+     .row, left:0 resolves to the padding box's left edge — inside the
+     gutter, not clipped by overflow:hidden — without shifting text by an
+     amount caption.js's canvas measurement knows nothing about. */
+  #lt-stack .row[data-speaker]::before {
+    content: attr(data-speaker);
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: calc(var(--gutter) * 0.74);
+    height: calc(var(--gutter) * 0.74);
+    border-radius: 50%;
+    background: var(--spk);
+    color: var(--bg);
+    font-size: 0.28em;
+    line-height: calc(var(--gutter) * 0.74);
+    font-weight: 700;
+    text-align: center;
   }
 
   #lt-stack .w { transition: color 180ms linear; color: var(--fg); }
@@ -814,13 +872,13 @@
     switch (ev.kind) {
       case "snapshot":
         captionStack.resetAll();
-        if (ev.text) captionStack.appendSegment(ev.text, false);
+        if (ev.text) captionStack.appendSegment(ev.text, false, ev.speaker);
         sseOpen = true;
         if (ev.state) hubState = ev.state;
         break;
       case "caption":
         if (ev.break) captionStack.breakRow(true);
-        captionStack.appendSegment(ev.text || "", true);
+        captionStack.appendSegment(ev.text || "", true, ev.speaker);
         break;
       case "status":  hubState = ev.state || null; applyIndicator(); return;
       default: return;

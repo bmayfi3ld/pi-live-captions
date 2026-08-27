@@ -47,7 +47,7 @@
     // shape needed to support diffing incoming revisions against what was
     // already on screen and replaying utterance boundaries after a resize)
     // — entries only ever leave from the front, via trimLedger.
-    var ledger = [];          // [{text, frozen, span}]
+    var ledger = [];          // [{text, frozen, span, speaker}]
     var rows = [];            // [{el, words:[entry,...], frozen}], only the last is unfrozen
     var LEDGER_CAP = 4000;    // ~200 rows of headroom, mirrors the old 200-line cap
 
@@ -70,12 +70,21 @@
     // row before the words meant to land in it actually have.
     var pending = [];
     var drainTimer = null;
-    var WORD_MS = 100;   // fixed inter-word pacing delay
+    var WORD_MS = 75;   // fixed inter-word pacing delay
     var GLIDE_MS = 130; // MUST equal the CSS transition duration in freezeAndGlide —
                          // the serialization guarantee (never two glides in flight)
                          // depends on the scheduler waiting exactly as long as the
                          // glide animation takes.
     var BREAK = {};
+
+    // currentSpeaker is the 1-based speaker id (0 = unknown) pushWord stamps
+    // onto every ledger entry it creates. It's set from the paced queue by a
+    // speaker-marker item (see drain()) rather than passed as an argument,
+    // because appendSegment's words for a given segment are spread across
+    // many future drain() ticks — the marker has to ride the same queue, in
+    // the same order, so a word is never stamped with a speaker that hasn't
+    // "arrived" yet from the queue's point of view.
+    var currentSpeaker = 0;
 
     var ctx = document.createElement("canvas").getContext("2d");
     var rowH = 0;
@@ -103,6 +112,7 @@
     }
 
     function placeInRow(row, entry) {
+      var isFirst = row.words.length === 0;
       if (row.words.length) row.el.appendChild(document.createTextNode(" "));
       var span = document.createElement("span");
       span.className = "w";
@@ -110,6 +120,27 @@
       row.el.appendChild(span);
       entry.span = span;
       row.words.push(entry);
+      // Badge decision happens exactly once per row, right here, so the live
+      // path and rebuild() (which also funnels every placement through this
+      // one function) can never disagree about where a badge lands.
+      if (isFirst) applyBadge(row, entry.speaker);
+    }
+
+    // A row's first word decides whether its badge shows. Both callers
+    // (pushWord and rebuild()'s placement loop) always call placeInRow with
+    // the currently-active row, i.e. the last element of `rows` — so the
+    // element just before it is unambiguously "the previous row".
+    function applyBadge(row, speaker) {
+      var prev = rows.length > 1 ? rows[rows.length - 2] : null;
+      var prevSpeaker = (prev && prev.words.length) ? prev.words[0].speaker : 0;
+      // Non-zero speaker, non-zero previous speaker, and they differ: this
+      // is deliberately false for a session's first row (no previous row)
+      // and for an all-one-speaker session (prevSpeaker never differs) —
+      // both cases should carry no badge at all.
+      if (speaker && prevSpeaker && speaker !== prevSpeaker) {
+        row.el.dataset.speaker = String(speaker);       // true number: the glyph
+        row.el.dataset.spk = String(((speaker - 1) % 6) + 1); // cycled 1-6: the color
+      }
     }
 
     // Row opacity by age is the only recency cue left once word color stops
@@ -181,9 +212,20 @@
     // appendSegment below calls it once per token.
     function pushWord(text, animate) {
       var row = activeRow();
+      // Turn break: a new speaker never shares a row with the previous one,
+      // even when there's width left for the word. Checked against the
+      // row's first word (every word in a row is stamped with the same
+      // speaker, by this same rule) rather than its last, and rebuild()'s
+      // placement loop applies the identical condition — that's what lets a
+      // resize reproduce every turn break without the server ever sending
+      // an explicit break flag for a speaker change.
+      if (row.words.length && row.words[0].speaker !== currentSpeaker) {
+        freezeAndGlide(animate);
+        row = activeRow();
+      }
       var cand = row.words.length ? rowText(row) + " " + text : text;
       if (measureWidth(cand) <= usableWidth) {
-        var entry = { text: text, frozen: false, span: null };
+        var entry = { text: text, frozen: false, span: null, speaker: currentSpeaker };
         ledger.push(entry);
         placeInRow(row, entry);
       } else {
@@ -203,7 +245,7 @@
             // so place it and let overflow:hidden clip it, which is what the
             // synchronous path effectively did too.
             if (chunks.length === 1) {
-              var wide = { text: chunks[0], frozen: false, span: null };
+              var wide = { text: chunks[0], frozen: false, span: null, speaker: currentSpeaker };
               ledger.push(wide);
               placeInRow(activeRow(), wide);
               trimLedger();
@@ -215,7 +257,7 @@
           }
           hardSplit(text, animate);
         } else {
-          var e2 = { text: text, frozen: false, span: null };
+          var e2 = { text: text, frozen: false, span: null, speaker: currentSpeaker };
           ledger.push(e2);
           placeInRow(row, e2);
         }
@@ -249,7 +291,7 @@
       var chunks = splitToChunks(word);
       for (var c = 0; c < chunks.length; c++) {
         var row = activeRow();
-        var entry = { text: chunks[c], frozen: false, span: null };
+        var entry = { text: chunks[c], frozen: false, span: null, speaker: currentSpeaker };
         ledger.push(entry);
         placeInRow(row, entry);
         if (c < chunks.length - 1) freezeAndGlide(animate);
@@ -286,7 +328,24 @@
       // lose a word.
       var canvasW = ctx.measureText(probe.textContent).width;
       fontScale = (box.width > 0 && canvasW > 0) ? box.width / canvasW : 1;
-      usableWidth = Math.max(1, page.clientWidth - 1);
+      // The speaker gutter is .row's own padding-left (see CSS), not page
+      // padding, so it has to be subtracted here or a row would be measured
+      // against the full page width and get clipped by .row's
+      // overflow:hidden instead of wrapping one word sooner — the exact
+      // failure mode fontScale calibration above exists to prevent.
+      //
+      // Measured on a throwaway row rather than parsed out of --gutter,
+      // whose specified value is a calc() the browser won't resolve for a
+      // custom property. It has to be a row of its own, not rows[0]: this
+      // function runs once at construction BEFORE rebuild() has made any
+      // row, and reading 0 there would leave usableWidth one gutter too
+      // wide for the entire session — every row clipping its last word,
+      // with no resize to correct it.
+      var gutterRow = makeEmptyRow();
+      stack.appendChild(gutterRow.el);
+      var gutter = parseFloat(getComputedStyle(gutterRow.el).paddingLeft) || 0;
+      stack.removeChild(gutterRow.el);
+      usableWidth = Math.max(1, page.clientWidth - 1 - gutter);
       adjustMaxRows();
     }
 
@@ -315,8 +374,12 @@
         entry.span = null;
         entry.frozen = false;
         row = activeRow();
+        // Same turn-break condition as pushWord, replayed from the entry's
+        // own stored speaker rather than a per-event break flag — that's
+        // what makes a resize able to reproduce every turn break at all.
+        var turnBreak = row.words.length > 0 && row.words[0].speaker !== entry.speaker;
         var cand = row.words.length ? rowText(row) + " " + entry.text : entry.text;
-        var fits = row.words.length === 0 || measureWidth(cand) <= usableWidth;
+        var fits = row.words.length === 0 || (!turnBreak && measureWidth(cand) <= usableWidth);
         if (!fits) {
           row.frozen = true;
           for (var k = 0; k < row.words.length; k++) row.words[k].frozen = true;
@@ -340,7 +403,8 @@
     // segment straight off the wire (caption.Event.Text on a "caption"
     // event) — a delta, never the accumulated utterance — so there is
     // nothing to diff against what's already painted: tokenize and push.
-    function appendSegment(text, animate) {
+    function appendSegment(text, animate, speaker) {
+      var spk = speaker || 0; // absent/0 both mean "unknown"
       var words = tokenize(text);
       if (animate === false) {
         // Snapshot/catch-up replay must never trickle: drop anything still
@@ -349,9 +413,15 @@
         pending = [];
         clearTimeout(drainTimer);
         drainTimer = null;
+        currentSpeaker = spk;
         for (var i = 0; i < words.length; i++) pushWord(words[i], false);
         return;
       }
+      // A speaker marker rides the same queue as the words it precedes, in
+      // order — exactly like BREAK, it must never jump ahead of whatever's
+      // already queued, or it would re-attribute words still waiting to be
+      // painted from an earlier segment.
+      pending.push({ speaker: spk });
       for (var j = 0; j < words.length; j++) pending.push(words[j]);
       scheduleDrain();
     }
@@ -371,6 +441,14 @@
       drainTimer = null;
       if (pending.length === 0) return;
       var item = pending.shift();
+      if (item !== BREAK && typeof item === "object") {
+        // Speaker marker: unlike BREAK or a word, it paints nothing, so it
+        // must not burn a WORD_MS tick — consume it and drain whatever's
+        // next immediately.
+        currentSpeaker = item.speaker;
+        drain();
+        return;
+      }
       var delay;
       if (item === BREAK) {
         freezeAndGlide(true);

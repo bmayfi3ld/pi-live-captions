@@ -14,12 +14,37 @@
     --ok: #22c55e;
     --size: 4vw;
     --row-h: 1.6em;
+    /* Reserved unconditionally, never toggled: a gutter that appeared the
+       first time a second speaker spoke reflowed every painted word
+       sideways mid-sentence, which is exactly the class of motion this
+       display exists to avoid. The cost of always reserving it is paid back
+       by #page's negative margin below, which spends the body's own left
+       padding on it instead of the text's width. */
+    --gutter: calc(var(--row-h) * 0.5);
+    /* Speaker badge palette, dark (default). 1/2/3 are the colour-vision-safe
+       trio — blue vs. orange survives deuteranopia/protanopia, magenta
+       separates from both — and two-or-three speakers is by far the common
+       case, so they're spent on the colours that need to be distinguishable
+       first. Every swatch here clears 10:1 against the near-black numeral. */
+    --spk-1: #7dd3fc;
+    --spk-2: #fdba74;
+    --spk-3: #f0abfc;
+    --spk-4: #6ee7b7;
+    --spk-5: #c4b5fd;
+    --spk-6: #bef264;
   }
   :root[data-theme="light"] {
     --bg: #f4f5f7;
     --fg: #0c0f14;
     --dim: #6b7280;
     --ok: #16a34a;
+    /* Every swatch here clears 4.9:1 against the near-white numeral. */
+    --spk-1: #0369a1;
+    --spk-2: #b45309;
+    --spk-3: #a21caf;
+    --spk-4: #047857;
+    --spk-5: #6d28d9;
+    --spk-6: #4d7c0f;
   }
 
   * { box-sizing: border-box; }
@@ -54,6 +79,15 @@
     display: flex;
     flex-direction: column;
     justify-content: flex-end;
+    /* The speaker badge lives in .row's left padding, so without this the
+       whole caption block would sit a gutter's width right of where it used
+       to — dead space in front of every line, paid for by every session
+       whether or not anyone is diarized. Reaching back into body's own 5vw
+       padding puts the badge in the margin instead, and leaves the text
+       within ~1vw of its original position. Less than the full gutter on
+       purpose: a full-width pull would park the badge flush against the
+       screen edge in portrait. */
+    margin-left: -3vw;
   }
   #viewport {
     overflow: hidden;
@@ -70,12 +104,50 @@
      the JS-measured --row-h always equals the glide's translate distance.
      No gap between rows: spacing lives entirely in line-height. */
   .row {
+    position: relative;
+    padding-left: var(--gutter, 0px);
     height: var(--row-h);
     line-height: var(--row-h);
     white-space: pre;
     overflow: hidden;
     font-weight: 600;
     font-size: clamp(1.35rem, var(--size), 7.5rem);
+  }
+
+  /* data-spk (cycled 1-6, ((speaker-1)%6)+1, set by caption.js) selects the
+     colour; data-speaker (the true, uncycled number) both gates the badge's
+     existence and supplies its glyph via attr() — so a 7th speaker reuses
+     speaker 1's colour but still shows "7". */
+  .row[data-spk="1"] { --spk: var(--spk-1); }
+  .row[data-spk="2"] { --spk: var(--spk-2); }
+  .row[data-spk="3"] { --spk: var(--spk-3); }
+  .row[data-spk="4"] { --spk: var(--spk-4); }
+  .row[data-spk="5"] { --spk: var(--spk-5); }
+  .row[data-spk="6"] { --spk: var(--spk-6); }
+
+  /* Absolutely positioned, not inline: with padding-left on a positioned
+     .row, left:0 resolves to the padding box's left edge — inside the
+     gutter, not clipped by .row's overflow:hidden — without shifting text
+     by an amount the canvas measurement in computeMetrics() knows nothing
+     about. */
+  .row[data-speaker]::before {
+    content: attr(data-speaker);
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: calc(var(--gutter) * 0.74);
+    height: calc(var(--gutter) * 0.74);
+    border-radius: 50%;
+    background: var(--spk);
+    color: var(--bg);
+    /* The numeral is the part that has to stay readable, so it takes most
+       of the dot rather than floating in it. Shrinking the dot further is
+       cheap; shrinking the digit is what makes the badge stop working. */
+    font-size: 0.28em;
+    line-height: calc(var(--gutter) * 0.74);
+    font-weight: 700;
+    text-align: center;
   }
 
   /* Words never change once painted (append-only client, commit-only wire),
@@ -471,7 +543,7 @@
     switch (ev.kind) {
       case "snapshot":
         captionStack.resetAll();
-        if (ev.text) captionStack.appendSegment(ev.text, false);
+        if (ev.text) captionStack.appendSegment(ev.text, false, ev.speaker);
         sseOpen = true;
         // Replay the server's last-known state: a client that (re)connects
         // mid-pause would otherwise sit on hubState's initial null and
@@ -483,7 +555,7 @@
         break;
       case "caption":
         if (ev.break) captionStack.breakRow(true);
-        captionStack.appendSegment(ev.text || "", true);
+        captionStack.appendSegment(ev.text || "", true, ev.speaker);
         schedulePaintReport(ev);
         break;
       case "status":

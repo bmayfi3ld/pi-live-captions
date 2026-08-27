@@ -309,6 +309,43 @@ func TestEventsDeliversPublishedEvents(t *testing.T) {
 	}
 }
 
+// TestEventsCarrySpeakerOnTheWire pins the JSON, not the struct: the viewer
+// reads ev.speaker off the raw payload, and `omitempty` on an int means an
+// unknown speaker must vanish from the wire rather than arrive as a literal
+// 0 the client would have to know to ignore. Both halves are checked here
+// because a wrong tag breaks exactly one of them.
+func TestEventsCarrySpeakerOnTheWire(t *testing.T) {
+	cfg := newTestConfig()
+	base, hub, _ := startTestServer(t, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	r := bufio.NewReader(resp.Body)
+	nextSSEData(t, r) // discard the initial snapshot
+
+	hub.Publish(stt.Transcript{Text: "the guest speaks", Speaker: 2})
+	data := nextSSEData(t, r)
+	if !strings.Contains(data, `"speaker":2`) {
+		t.Errorf("caption event = %q, want it to carry \"speaker\":2", data)
+	}
+
+	// A segment the recognizer could not attribute. Speaker 0 is this
+	// pipeline's "unknown" sentinel, never a real speaker, so it must not
+	// appear at all — a `"speaker":0` on the wire would draw a badge for a
+	// turn change that never happened.
+	hub.Publish(stt.Transcript{Text: "unattributed audio", Start: 200 * time.Millisecond})
+	data = nextSSEData(t, r)
+	if strings.Contains(data, "speaker") {
+		t.Errorf("caption event = %q, want no speaker field for an unknown speaker", data)
+	}
+}
+
 // TestClientDisconnectCleansUpSubscription is the fan-out half of "nothing
 // downstream may block the pipeline": a browser that goes away must not
 // leak its subscriber slot or leave the SSE client gauge stuck non-zero.

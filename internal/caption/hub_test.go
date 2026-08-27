@@ -407,3 +407,102 @@ func TestBreakClosesLineBeforeSegmentIsAppended(t *testing.T) {
 		t.Errorf("closed line = %q, want %q", finals[0].Text, "before the pause")
 	}
 }
+
+// TestSpeakerChangeClosesLine covers the diarization half of the same "close
+// before append" rule: a switch between two known speakers with no pause at
+// all must still close the line in progress, the same as a pause would, and
+// must not merge the new speaker's words into it.
+func TestSpeakerChangeClosesLine(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+
+	h.Publish(stt.Transcript{Text: "the MC is talking", Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
+	// No gap at all: Start picks up exactly where the previous segment ended.
+	h.Publish(stt.Transcript{Text: "now the guest is", Start: 100 * time.Millisecond, Speaker: 2})
+
+	if len(finals) != 1 {
+		t.Fatalf("expected the speaker change to close exactly one line, got %d", len(finals))
+	}
+	if finals[0].Text != "the MC is talking" {
+		t.Errorf("closed line = %q, want %q", finals[0].Text, "the MC is talking")
+	}
+	if finals[0].Speaker != 1 {
+		t.Errorf("closed line Speaker = %d, want 1", finals[0].Speaker)
+	}
+}
+
+// TestUnknownSpeakerNeverCountsAsAChange guards the other side of that rule:
+// Speaker 0 (unknown), on either the previous or the current segment, must
+// never itself be treated as a speaker change — diarization dropping out
+// mid-session, or never having been enabled, must not fragment transcript
+// lines that would otherwise stay whole.
+func TestUnknownSpeakerNeverCountsAsAChange(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+
+	h.Publish(stt.Transcript{Text: "known speaker", Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
+	h.Publish(stt.Transcript{Text: "then unknown", Start: 100 * time.Millisecond, Speaker: 0})
+
+	if len(finals) != 0 {
+		t.Fatalf("expected Speaker 0 to not force a close, got %d finals: %+v", len(finals), finals)
+	}
+}
+
+// TestEventCarriesSpeaker checks that Publish stamps the transcript's speaker
+// onto the caption event's wire field.
+func TestEventCarriesSpeaker(t *testing.T) {
+	h := newTestHub()
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub) // discard the initial snapshot
+
+	h.Publish(stt.Transcript{Text: "hello", Start: 0, Speaker: 2})
+
+	events := drain(sub)
+	var found bool
+	for _, ev := range events {
+		if ev.Kind != KindCaption {
+			continue
+		}
+		found = true
+		if ev.Speaker != 2 {
+			t.Errorf("Speaker = %d, want 2", ev.Speaker)
+		}
+	}
+	if !found {
+		t.Fatal("expected a caption event")
+	}
+}
+
+// TestSpeakerChangeDoesNotSetBreak pins Break as pause-only: a speaker change
+// with no pause must not set it, even though it does close the transcript
+// line — those are two separate signals now, and Break conflating them would
+// bake a display rule into the wire format the client can't see.
+func TestSpeakerChangeDoesNotSetBreak(t *testing.T) {
+	h := newTestHub()
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub)
+
+	h.Publish(stt.Transcript{Text: "first speaker", Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
+	drain(sub)
+
+	// No gap: Start picks up exactly where the previous segment ended.
+	h.Publish(stt.Transcript{Text: "second speaker", Start: 100 * time.Millisecond, Speaker: 2})
+
+	events := drain(sub)
+	var found bool
+	for _, ev := range events {
+		if ev.Kind == KindCaption && ev.Text == "second speaker" {
+			found = true
+			if ev.Break {
+				t.Error("Break = true for a speaker change with no pause, want false")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected a caption event for the second segment")
+	}
+}

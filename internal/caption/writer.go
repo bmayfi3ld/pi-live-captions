@@ -98,6 +98,7 @@ type record struct {
 	OffsetMS int64     `json:"offset_ms"`
 	Clock    string    `json:"clock"`
 	At       time.Time `json:"at"`
+	Speaker  int       `json:"speaker,omitempty"`
 }
 
 // Write records one finalized line. Write errors are surfaced as a metric
@@ -110,14 +111,22 @@ func (w *Writer) Write(l Line) {
 	}
 
 	clock := audio.FormatClock(time.Duration(l.OffsetMS) * time.Millisecond)
-	n, err := fmt.Fprintf(w.txtBuf, "[%s] %s\n", clock, l.Text)
+	// Spelled out as "[S2] " here, unlike the live viewer's terse per-word
+	// badge: row width is scarce on screen, but a file read later has all the
+	// space it needs, and "who said this" is exactly what a reader returning
+	// to the transcript wants without cross-referencing anything else.
+	speakerPrefix := ""
+	if l.Speaker != 0 {
+		speakerPrefix = fmt.Sprintf("[S%d] ", l.Speaker)
+	}
+	n, err := fmt.Fprintf(w.txtBuf, "[%s] %s%s\n", clock, speakerPrefix, l.Text)
 	if err != nil {
 		w.fail(err)
 		return
 	}
 
 	buf, err := json.Marshal(record{
-		ID: l.ID, Text: l.Text, OffsetMS: l.OffsetMS, Clock: clock, At: l.At,
+		ID: l.ID, Text: l.Text, OffsetMS: l.OffsetMS, Clock: clock, At: l.At, Speaker: l.Speaker,
 	})
 	if err != nil {
 		w.fail(err)

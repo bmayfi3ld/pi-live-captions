@@ -22,6 +22,12 @@ import (
 // punctuation, not reported here.
 type Transcript struct {
 	Text string
+	// Speaker is 1-based; 0 means unknown (diarization off, or the provider
+	// didn't attribute this segment). Every provider labels speakers its own
+	// way — Deepgram hands back a 0-based int, Speechmatics a string like
+	// "S1" or "UU" — and normalising to an int here, in the engine, keeps
+	// that provider-specific syntax out of the hub and off the wire.
+	Speaker int
 	// Start and Duration are media time, so latency can be measured the same
 	// way for a replayed file and a live capture.
 	Start      time.Duration
@@ -51,6 +57,8 @@ type Config struct {
 	APIKey   string
 	Metrics  *metrics.Metrics
 	Pause    PauseConfig
+	// Diarize asks the provider to attribute segments to speakers.
+	Diarize bool
 }
 
 // Engine consumes PCM frames and emits transcripts.

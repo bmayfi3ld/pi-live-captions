@@ -23,9 +23,8 @@ func TestDecodeTranscript(t *testing.T) {
 	cases := []struct {
 		name      string
 		json      string
-		want      stt.Transcript
+		want      []stt.Transcript // nil means "expect none decoded"
 		wantFinal bool
-		ok        bool
 	}{
 		{
 			// Deciding what to do with a revisable interim is readLoop's
@@ -34,64 +33,115 @@ func TestDecodeTranscript(t *testing.T) {
 			name: "is_final false decodes as an interim",
 			json: `{"type":"Results","is_final":false,"start":1.5,"duration":0.4,
 				"channel":{"alternatives":[{"transcript":"hello there","confidence":0.82}]}}`,
-			want: stt.Transcript{
+			want: []stt.Transcript{{
 				Text:  "hello there",
 				Start: 1500 * time.Millisecond, Duration: 400 * time.Millisecond, Confidence: 0.82,
-			},
+			}},
 			wantFinal: false,
-			ok:        true,
 		},
 		{
-			name: "final result",
+			// No words[] (diarize off, or a server that ignored it): falls
+			// back to the flat transcript/start/duration/confidence fields,
+			// unconditionally Speaker 0.
+			name: "final result with no words falls back to Speaker 0",
 			json: `{"type":"Results","is_final":true,"start":0,"duration":2.1,
 				"channel":{"alternatives":[{"transcript":"good morning everyone","confidence":0.95}]}}`,
-			want: stt.Transcript{
+			want: []stt.Transcript{{
 				Text:  "good morning everyone",
-				Start: 0, Duration: 2100 * time.Millisecond, Confidence: 0.95,
-			},
+				Start: 0, Duration: 2100 * time.Millisecond, Confidence: 0.95, Speaker: 0,
+			}},
 			wantFinal: true,
-			ok:        true,
 		},
 		{
 			name: "empty transcript is skipped",
 			json: `{"type":"Results","is_final":true,"channel":{"alternatives":[{"transcript":"","confidence":0}]}}`,
-			ok:   false,
 		},
 		{
 			name: "no alternatives is skipped",
 			json: `{"type":"Results","is_final":true,"channel":{"alternatives":[]}}`,
-			ok:   false,
 		},
 		{
 			name: "metadata is ignored",
 			json: `{"type":"Metadata","request_id":"abc","duration":5.0}`,
-			ok:   false,
 		},
 		{
 			name: "speech started is ignored",
 			json: `{"type":"SpeechStarted","channel":[0],"timestamp":0.1}`,
-			ok:   false,
+		},
+		{
+			// punctuated_word carries the casing/terminal punctuation that
+			// caption.Hub.closeLocked depends on; the raw word field has
+			// neither. A word missing punctuated_word (the API omits it on
+			// some tokens) falls back to word rather than dropping the word.
+			name: "punctuated_word is preferred over word",
+			json: `{"type":"Results","is_final":true,"start":0,"duration":0.4,
+				"channel":{"alternatives":[{"transcript":"ignored","confidence":0.9,
+					"words":[
+						{"word":"hello","punctuated_word":"Hello,","start":0,"end":0.2,"confidence":0.9,"speaker":0},
+						{"word":"world","start":0.2,"end":0.4,"confidence":0.9,"speaker":0}
+					]}]}}`,
+			want: []stt.Transcript{{
+				Text: "Hello, world", Start: 0, Duration: 400 * time.Millisecond,
+				Confidence: 0.9, Speaker: 1,
+			}},
+			wantFinal: true,
+		},
+		{
+			// A speaker change mid-segment splits one Results message into
+			// two Transcripts, one per consecutive run, each with its own
+			// non-overlapping media range.
+			name: "diarized words split by consecutive speaker",
+			json: `{"type":"Results","is_final":true,"start":0,"duration":2.0,
+				"channel":{"alternatives":[{"transcript":"ignored","confidence":0.9,
+					"words":[
+						{"word":"hello","punctuated_word":"Hello","start":0.0,"end":0.4,"confidence":0.95,"speaker":0},
+						{"word":"there","punctuated_word":"there,","start":0.4,"end":0.8,"confidence":0.93,"speaker":0},
+						{"word":"hi","punctuated_word":"Hi","start":0.8,"end":1.1,"confidence":0.90,"speaker":1},
+						{"word":"there","punctuated_word":"there.","start":1.1,"end":1.5,"confidence":0.92,"speaker":1}
+					]}]}}`,
+			want: []stt.Transcript{
+				{
+					Text: "Hello there,", Start: 0, Duration: 800 * time.Millisecond,
+					Confidence: (0.95 + 0.93) / 2, Speaker: 1, // Deepgram 0 -> our 1
+				},
+				{
+					Text: "Hi there.", Start: 800 * time.Millisecond, Duration: 700 * time.Millisecond,
+					Confidence: (0.90 + 0.92) / 2, Speaker: 2, // Deepgram 1 -> our 2
+				},
+			},
+			wantFinal: true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, isFinal, ok, err := decodeTranscript([]byte(tc.json))
+			got, isFinal, err := decodeTranscript([]byte(tc.json))
 			if err != nil {
 				t.Fatalf("decodeTranscript: %v", err)
 			}
-			if ok != tc.ok {
-				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			if len(got) != len(tc.want) {
+				t.Fatalf("decoded %d transcripts, want %d: %+v", len(got), len(tc.want), got)
 			}
-			if !ok {
+			if len(got) == 0 {
 				return
 			}
 			if isFinal != tc.wantFinal {
 				t.Errorf("isFinal = %v, want %v", isFinal, tc.wantFinal)
 			}
-			if got.Text != tc.want.Text || got.Start != tc.want.Start ||
-				got.Duration != tc.want.Duration || got.Confidence != tc.want.Confidence {
-				t.Errorf("got %+v, want %+v", got, tc.want)
+			for i, w := range tc.want {
+				g := got[i]
+				if g.Text != w.Text || g.Start != w.Start || g.Duration != w.Duration ||
+					g.Confidence != w.Confidence || g.Speaker != w.Speaker {
+					t.Errorf("transcript[%d] = %+v, want %+v", i, g, w)
+				}
+			}
+			// Runs must never overlap in media time: each one's End() is the
+			// next one's Start.
+			for i := 1; i < len(got); i++ {
+				if got[i].Start < got[i-1].End() {
+					t.Errorf("transcript[%d].Start = %v overlaps transcript[%d].End() = %v",
+						i, got[i].Start, i-1, got[i-1].End())
+				}
 			}
 		})
 	}

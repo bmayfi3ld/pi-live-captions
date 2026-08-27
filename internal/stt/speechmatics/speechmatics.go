@@ -17,6 +17,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -132,6 +134,14 @@ func (e *Engine) startMessage() startRecognition {
 	for _, k := range e.cfg.Keyterms {
 		vocab = append(vocab, vocabEntry{Content: k})
 	}
+	// "speaker" is Speechmatics' only diarization mode worth asking for here
+	// (the other, "channel", attributes by audio channel, and the pipeline is
+	// mono); the empty string when Diarize is false omits the field from the
+	// wire entirely rather than spelling out "none".
+	diarization := ""
+	if e.cfg.Diarize {
+		diarization = "speaker"
+	}
 	return startRecognition{
 		Message: "StartRecognition",
 		AudioFormat: audioFormat{
@@ -153,6 +163,7 @@ func (e *Engine) startMessage() startRecognition {
 			// change its timing. Decode drops partials regardless.
 			EnablePartials:  false,
 			AdditionalVocab: vocab,
+			Diarization:     diarization,
 		},
 	}
 }
@@ -215,19 +226,20 @@ func (s *session) Finish(ctx context.Context) error {
 	return s.writeJSON(ctx, endOfStream{Message: "EndOfStream", LastSeqNo: s.seqNo})
 }
 
-// Decode turns one server message into a Transcript. Acks, metadata and
-// revisable partials are dropped; only an Error tears the connection down.
-func (s *session) Decode(data []byte) (stt.Transcript, bool, error) {
+// Decode turns one server message into zero or more Transcripts. Acks,
+// metadata and revisable partials are dropped; only an Error tears the
+// connection down.
+func (s *session) Decode(data []byte) ([]stt.Transcript, error) {
 	var msg serverMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		// Noise, not a reason to drop a working link.
 		s.log.Debug("speechmatics: undecodable message", "err", err)
-		return stt.Transcript{}, false, nil
+		return nil, nil
 	}
 
 	switch msg.Message {
 	case "AddTranscript":
-		return msg.transcript()
+		return msg.transcripts()
 
 	case "AddPartialTranscript":
 		// enable_partials is false, so this should never fire. It stays as a
@@ -235,22 +247,22 @@ func (s *session) Decode(data []byte) (stt.Transcript, bool, error) {
 		// setting silently ignored, or a changed default. Publishing one as
 		// settled text would break the append-only guarantee the whole display
 		// rests on, and it is one comparison to prevent.
-		return stt.Transcript{}, false, nil
+		return nil, nil
 
 	case "Error":
-		return stt.Transcript{}, false, msg.asError()
+		return nil, msg.asError()
 
 	case "EndOfTranscript":
-		return stt.Transcript{}, false, errEndOfTranscript
+		return nil, errEndOfTranscript
 
 	case "Warning":
 		s.log.Warn("speechmatics: "+msg.Type, "reason", msg.Reason)
-		return stt.Transcript{}, false, nil
+		return nil, nil
 
 	default:
 		// AudioAdded, Info, RecognitionStarted, audio events, anything new:
 		// nothing to publish.
-		return stt.Transcript{}, false, nil
+		return nil, nil
 	}
 }
 
@@ -282,6 +294,7 @@ type transcriptionConfig struct {
 	MaxDelay        float64      `json:"max_delay"`
 	EnablePartials  bool         `json:"enable_partials"`
 	AdditionalVocab []vocabEntry `json:"additional_vocab,omitempty"`
+	Diarization     string       `json:"diarization,omitempty"`
 }
 
 type vocabEntry struct {
@@ -315,10 +328,16 @@ type serverMessage struct {
 	Transcript string `json:"transcript"`
 
 	Results []struct {
-		Type         string `json:"type"`
+		Type         string  `json:"type"`
+		StartTime    float64 `json:"start_time"`
+		EndTime      float64 `json:"end_time"`
 		Alternatives []struct {
 			Content    string  `json:"content"`
 			Confidence float64 `json:"confidence"`
+			// Speaker is Speechmatics' own label: "S1", "S2", ... per
+			// identified speaker, or "UU" for unattributed audio. Empty when
+			// diarization was never requested.
+			Speaker string `json:"speaker"`
 		} `json:"alternatives"`
 	} `json:"results"`
 }
@@ -337,45 +356,139 @@ func (m serverMessage) asError() error {
 	return err
 }
 
-// transcript builds a Transcript from an AddTranscript. ok is false when the
-// segment carried no text, which happens for windows that contained no speech.
-func (m serverMessage) transcript() (stt.Transcript, bool, error) {
-	text := m.Transcript
-	if text == "" {
-		text = m.Metadata.Transcript
+// transcripts builds the Transcripts carried by an AddTranscript. Without
+// diarization (or against a server that ignored the config), or when Results
+// is empty for some other reason, this falls back to exactly today's single
+// Transcript built from the flat text field, Speaker 0 — the case that keeps
+// --no-diarize working and preserves the existing hedge about Speechmatics
+// having moved the assembled-transcript field between the top level and
+// metadata across doc revisions (both are decoded, whichever is populated
+// wins).
+//
+// With Results present, text is assembled from Results[] instead of the flat
+// field, grouped into consecutive runs by speaker: one Transcript per run, so
+// a window that itself spans a speaker change (an MC interrupted by a
+// question, say) still splits correctly. Per-word confidence averaging
+// (previously a standalone confidence() method) is folded into the same walk,
+// per run, exactly as it worked before: only "word" results count, "entity"
+// and "punctuation" are skipped.
+func (m serverMessage) transcripts() ([]stt.Transcript, error) {
+	if len(m.Results) == 0 {
+		text := m.Transcript
+		if text == "" {
+			text = m.Metadata.Transcript
+		}
+		if text == "" {
+			return nil, nil
+		}
+		start := stt.SecondsToDuration(m.Metadata.StartTime)
+		end := stt.SecondsToDuration(m.Metadata.EndTime)
+		return []stt.Transcript{{
+			Text: text,
+			// Media time on the current connection, exactly like Deepgram's
+			// byte clock, which is what lets the shared anchor index resolve
+			// CapturedAt/SentAt for both engines the same way.
+			Start:    start,
+			Duration: end - start,
+		}}, nil
 	}
-	if text == "" {
-		return stt.Transcript{}, false, nil
-	}
-	start := stt.SecondsToDuration(m.Metadata.StartTime)
-	end := stt.SecondsToDuration(m.Metadata.EndTime)
-	return stt.Transcript{
-		Text: text,
-		// Media time on the current connection, exactly like Deepgram's byte
-		// clock, which is what lets the shared anchor index resolve
-		// CapturedAt/SentAt for both engines the same way.
-		Start:      start,
-		Duration:   end - start,
-		Confidence: m.confidence(),
-	}, true, nil
-}
 
-// confidence averages the per-word confidences, since Speechmatics reports one
-// per result rather than a single figure for the segment the way Deepgram
-// does. Punctuation and entity results are skipped: they have no bearing on
-// how well the speech was heard.
-func (m serverMessage) confidence() float64 {
-	var sum float64
-	var n int
+	var ts []stt.Transcript
+	var text strings.Builder
+	var speaker int
+	var start, end float64
+	var confSum float64
+	var confN int
+	open := false
+
+	flush := func() {
+		if !open {
+			return
+		}
+		var confidence float64
+		if confN > 0 {
+			confidence = confSum / float64(confN)
+		}
+		ts = append(ts, stt.Transcript{
+			Text:       text.String(),
+			Start:      stt.SecondsToDuration(start),
+			Duration:   stt.SecondsToDuration(end - start),
+			Confidence: confidence,
+			Speaker:    speaker,
+		})
+		text.Reset()
+		confSum, confN = 0, 0
+		open = false
+	}
+
 	for _, r := range m.Results {
-		if r.Type != "word" || len(r.Alternatives) == 0 {
+		if len(r.Alternatives) == 0 {
 			continue
 		}
-		sum += r.Alternatives[0].Confidence
-		n++
+		alt := r.Alternatives[0]
+
+		// A punctuation result attaches to the preceding word with no space
+		// and inherits the run it's joining — it must never start a run of
+		// its own (there is nothing to attribute punctuation to on its own,
+		// and treating a comma as a speaker change would fragment text that
+		// belongs together). If somehow the very first result is
+		// punctuation, there is no run to attach to yet, so it is dropped
+		// rather than starting one for a symbol alone.
+		if r.Type == "punctuation" {
+			if open {
+				text.WriteString(alt.Content)
+				end = r.EndTime
+			}
+			continue
+		}
+		// Only "word" builds text. Speechmatics also has an "entity" result
+		// type that repeats the words it spans in a written form ("twenty
+		// twenty six" -> "2026"); it is gated behind enable_entities, which
+		// startMessage never sets, but assembling text from every non-
+		// punctuation type would silently double those words if that ever
+		// changed. The old code was immune by construction, taking text from
+		// the flat transcript field and walking Results only for confidence —
+		// reassembling from Results is what makes this guard load-bearing.
+		if r.Type != "word" {
+			continue
+		}
+
+		spk := parseSpeaker(alt.Speaker)
+		if !open || spk != speaker {
+			flush()
+			speaker = spk
+			start = r.StartTime
+			open = true
+		}
+		if text.Len() > 0 {
+			text.WriteByte(' ')
+		}
+		text.WriteString(alt.Content)
+		end = r.EndTime
+		confSum += alt.Confidence
+		confN++
 	}
-	if n == 0 {
+	flush()
+
+	return ts, nil
+}
+
+// parseSpeaker turns Speechmatics' speaker label into this package's 1-based
+// convention: "S1" -> 1, "S2" -> 2, and so on by parsing the trailing digits,
+// "UU" (unattributed audio) and an empty label both -> 0, our own "unknown"
+// sentinel.
+func parseSpeaker(label string) int {
+	i := len(label)
+	for i > 0 && label[i-1] >= '0' && label[i-1] <= '9' {
+		i--
+	}
+	digits := label[i:]
+	if digits == "" {
 		return 0
 	}
-	return sum / float64(n)
+	n, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0
+	}
+	return n
 }

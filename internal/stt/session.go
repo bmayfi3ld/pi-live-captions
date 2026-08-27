@@ -65,16 +65,19 @@ type Dialer func(ctx context.Context) (*websocket.Conn, Session, error)
 // per-connection counters (sequence numbers, byte clocks) reset with the
 // socket and there is no reset path to race.
 //
-// Decode's ok reports whether the message carried a transcript worth
-// publishing; its error is fatal and drops the connection. Anything the
-// provider considers harmless noise — acks, metadata, revisable partials, an
-// undecodable frame — is its own to log and swallow with ok=false, nil. In
-// particular the "settled text only" guarantee is enforced here, per protocol:
-// everything downstream paints a Transcript once and never revises it.
+// Decode returns the transcripts worth publishing from one server message —
+// zero, one, or (with diarization on) several, since a single message can
+// legitimately carry a run of words from more than one speaker. An empty
+// slice says "nothing to publish"; there is no separate ok flag for it. Its
+// error is fatal and drops the connection. Anything the provider considers
+// harmless noise — acks, metadata, revisable partials, an undecodable frame —
+// is its own to log and swallow, returning nil, nil. In particular the
+// "settled text only" guarantee is enforced here, per protocol: everything
+// downstream paints a Transcript once and never revises it.
 type Session interface {
 	SendAudio(ctx context.Context, pcm []byte) error
 	Idle(ctx context.Context) error
-	Decode(data []byte) (t Transcript, ok bool, err error)
+	Decode(data []byte) ([]Transcript, error)
 	Finish(ctx context.Context) error
 }
 
@@ -426,25 +429,27 @@ func (d *driver) readLoop(ctx context.Context, conn *websocket.Conn, sess Sessio
 		if err != nil {
 			return err
 		}
-		t, ok, err := sess.Decode(data)
+		ts, err := sess.Decode(data)
 		if err != nil {
 			return err
 		}
-		if !ok {
-			continue
-		}
-		t.ReceivedAt = time.Now()
-		// Anchor the segment's media end-time to the wall-clock capture and
-		// send instants for THIS connection, so latency is measured against
-		// when the audio actually entered the pipeline.
-		if capturedAt, sentAt, ok := idx.At(t.End()); ok {
-			t.CapturedAt = capturedAt
-			t.SentAt = sentAt
-		}
-		select {
-		case out <- t:
-		case <-ctx.Done():
-			return ctx.Err()
+		now := time.Now()
+		for _, t := range ts {
+			t.ReceivedAt = now
+			// Anchor each run's media end-time to the wall-clock capture and
+			// send instants for THIS connection, so latency is measured
+			// against when the audio actually entered the pipeline. Anchored
+			// on its own End(), not the message's overall end, so a message
+			// diarization split into several runs keeps each run's latency
+			// honest instead of all of them borrowing the last run's anchor.
+			if capturedAt, sentAt, ok := idx.At(t.End()); ok {
+				t.CapturedAt, t.SentAt = capturedAt, sentAt
+			}
+			select {
+			case out <- t:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 }
