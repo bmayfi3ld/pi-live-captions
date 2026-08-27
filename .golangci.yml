@@ -11,6 +11,20 @@ linters:
   settings:
     gocyclo:
       min-complexity: 15
+    errcheck:
+      # Writes to the terminal and teardown Close calls have nothing useful
+      # to do with an error. Excluding them here beats `_, _ =` at every site.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (net/http.ResponseWriter).Write
+        - (*github.com/coder/websocket.Conn).Close
+        - (*github.com/coder/websocket.Conn).CloseNow
+        - (*livecaption/internal/audio.proc).Close
+        - (*os.File).Close
+        - (net.Conn).Close
+        - io.Copy
   exclusions:
     paths:
       - _test\.go

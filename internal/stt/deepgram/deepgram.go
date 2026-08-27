@@ -279,7 +279,7 @@ func (e *Engine) runConnection(
 	pt := newPrefixTracker()
 
 	readErr := make(chan error, 1)
-	go func() { readErr <- e.readLoop(connCtx, conn, out, met, log, idx, pt) }()
+	go func() { readErr <- e.readLoop(connCtx, conn, out, log, idx, pt) }()
 
 	writeErr := make(chan error, 1)
 	go func() { writeErr <- e.writeLoop(ctx, connCtx, conn, buf, framesClosed, met, gate, idx) }()
@@ -408,7 +408,7 @@ func (e *Engine) writeLoop(
 // fails or ctx is cancelled. Every decoded message passes through pt first:
 // pt is what turns Deepgram's revisable interim/final stream into the
 // append-only segments out and everything downstream expect.
-func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, met *metrics.Metrics, log *slog.Logger, idx *anchorIndex, pt *prefixTracker) error {
+func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, log *slog.Logger, idx *anchorIndex, pt *prefixTracker) error {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -453,6 +453,8 @@ func (e *Engine) connect(ctx context.Context) (*websocket.Conn, error) {
 	h := http.Header{}
 	h.Set("Authorization", "Token "+e.cfg.APIKey)
 
+	// nolint:bodyclose // coder/websocket owns resp.Body: nil on success,
+	// an in-memory NopCloser on failure. Its docs say never close it.
 	conn, resp, err := websocket.Dial(ctx, e.dialURL(), &websocket.DialOptions{HTTPHeader: h})
 	if err != nil {
 		if resp != nil {

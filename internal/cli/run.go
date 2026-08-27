@@ -56,7 +56,7 @@ type buildOpts struct {
 	globals Globals
 }
 
-func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, error) {
+func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, error) {
 	started := time.Now()
 	met := metrics.New(Version, started.Format("2006-01-02T15-04-05"))
 	met.SourceKind = o.kind
@@ -76,12 +76,12 @@ func newSession(ctx context.Context, o buildOpts, term *ui.Terminal, log *slog.L
 	met.SetSTTStateHook(func(s metrics.ConnState) { hub.PublishStatus(s.String(), "") })
 
 	engine, err := stt.New(o.stt.Engine, stt.Config{
-		Format:      audio.PipelineFormat,
-		Model:       o.stt.Model,
-		Language:    o.stt.Language,
-		Keyterms:    o.stt.Keyterm,
-		APIKey:      o.stt.APIKey,
-		Metrics:     met,
+		Format:   audio.PipelineFormat,
+		Model:    o.stt.Model,
+		Language: o.stt.Language,
+		Keyterms: o.stt.Keyterm,
+		APIKey:   o.stt.APIKey,
+		Metrics:  met,
 		Pause: stt.PauseConfig{
 			Enabled:     o.stt.AutoPause,
 			ThresholdDB: o.stt.SilenceDB,

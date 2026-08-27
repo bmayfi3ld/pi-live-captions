@@ -67,7 +67,7 @@ func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger
 		globals:     g,
 	}
 
-	s, err := newSession(ctx, o, term, log)
+	s, err := newSession(o, term, log)
 	if err != nil {
 		return err
 	}
@@ -123,7 +123,7 @@ func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger, 
 		globals:     g,
 	}
 
-	s, err := newSession(ctx, o, term, log)
+	s, err := newSession(o, term, log)
 	if err != nil {
 		return err
 	}

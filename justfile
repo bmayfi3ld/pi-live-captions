@@ -12,3 +12,6 @@ build:
 
 lint:
     golangci-lint run ./...
+
+test *args:
+    go test ./... {{args}}
