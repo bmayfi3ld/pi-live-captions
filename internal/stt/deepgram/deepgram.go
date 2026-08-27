@@ -29,6 +29,14 @@ const (
 	// readLimit accommodates Results messages with full word arrays, which
 	// exceed the library's 32KB default read limit on longer utterances.
 	readLimit = 1 << 20
+
+	// maxKeyterms keeps the request under Deepgram's budget of 500 tokens
+	// across all keyterms, which it enforces by rejecting the whole request.
+	// Tokens, not terms: a hyphenated or multi-word term costs more than one,
+	// so the cut sits well below 500 rather than at it. Note this is a much
+	// smaller list than Speechmatics accepts (1000 entries) — the same keyterm
+	// file feeds both, and each engine takes as much of it as it can.
+	maxKeyterms = 400
 )
 
 // Engine streams PCM to Deepgram's real-time API and turns its JSON messages
@@ -106,7 +114,7 @@ func (e *Engine) dialURL() string {
 	// for if captions feel late (lower: sooner, in smaller pieces) or if
 	// phrases fragment across rows (raise it). Watch Segments / lines on
 	// /admin to tell which is happening.
-	for _, k := range e.cfg.Keyterms {
+	for _, k := range stt.CapKeyterms(e.cfg.Keyterms, maxKeyterms, slog.Default()) {
 		q.Add("keyterm", k)
 	}
 	return base + "?" + q.Encode()

@@ -47,6 +47,10 @@ type STTFlags struct {
 	Model    string   `group:"Speech-to-text" help:"Recognition model. Defaults to the selected engine's."`
 	Language string   `group:"Speech-to-text" help:"Recognition language. Defaults to the selected engine's."`
 	Keyterm  []string `group:"Speech-to-text" help:"Proper noun to bias recognition toward. Repeatable."`
+	// A file rather than more --keyterm flags because the useful lists are
+	// hundreds of terms long (Speechmatics takes 1000), which no command line
+	// wants to carry.
+	KeytermFile string `name:"keyterm-file" type:"existingfile" group:"Speech-to-text" help:"File of keyterms, one per line, blank lines and # comments ignored. Most-likely-spoken first: a list longer than the engine accepts is cut from the end."`
 
 	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`
 	SilenceHold time.Duration `name:"silence-hold" default:"60s" group:"Speech-to-text" help:"How long the audio must stay silent before the connection is paused."`

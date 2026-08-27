@@ -6,3 +6,5 @@ transcripts/*
 # and the web tests failed on any fresh clone.
 /logo.png
 bin/*
+# Keyterm lists are per-event material, not code: they get edited on the day.
+keyterms-*.txt

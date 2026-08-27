@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,41 @@ func TestAPIKeyIsPerEngine(t *testing.T) {
 	resolveSTTDefaults(&f)
 	if f.APIKey != "explicit" {
 		t.Errorf("APIKey = %q, want the explicit flag to win", f.APIKey)
+	}
+}
+
+// TestKeytermFileIsFoldedIn covers the whole point of the flag: a list too long
+// to pass as flags arrives intact, keeps its order (the engines cut from the
+// end), and picks up whatever --keyterm also supplied.
+func TestKeytermFileIsFoldedIn(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "keyterms.txt")
+	body := "# a comment\n\nHabakkuk\n  Melchizedek  \n# another\nBeth-shemesh\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, cli, err := Parse([]string{"replay", writeTempFile(t), "--engine", "mock",
+		"--keyterm", "Anthropic", "--keyterm-file", p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := cli.Replay.STTFlags
+	if err := resolveSTTDefaults(&f); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Anthropic", "Habakkuk", "Melchizedek", "Beth-shemesh"}
+	if !slices.Equal(f.Keyterm, want) {
+		t.Errorf("Keyterm = %q, want %q", f.Keyterm, want)
+	}
+
+	// A file that exists but says nothing is a mistake worth reporting: it
+	// otherwise looks exactly like a run with keyterms working.
+	empty := filepath.Join(t.TempDir(), "empty.txt")
+	if err := os.WriteFile(empty, []byte("# nothing but comments\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := resolveSTTDefaults(&STTFlags{Engine: "mock", KeytermFile: empty}); err == nil {
+		t.Error("an empty keyterm file should be an error, not a silent no-op")
 	}
 }
 

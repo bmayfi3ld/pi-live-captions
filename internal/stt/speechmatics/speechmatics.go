@@ -55,7 +55,19 @@ const (
 	// handshakeTimeout bounds the wait for RecognitionStarted. Without it a
 	// server that accepts the socket and then goes quiet would park Run
 	// forever, with the reconnect machinery never getting a chance to fire.
-	handshakeTimeout = 10 * time.Second
+	//
+	// Generous because additional_vocab makes session start slow: Speechmatics
+	// documents a delay of up to 15s while it builds the dictionary, on every
+	// connection whose vocabulary the server has not cached (their cache is
+	// per-identical-list and expires after 24h unused). With --auto-pause
+	// redialing after every quiet spell, a timeout under that would turn a big
+	// keyterm list into an endless reconnect loop.
+	handshakeTimeout = 30 * time.Second
+
+	// maxVocab is the documented ceiling on additional_vocab: "up to 1000 words
+	// or phrases (per job)". What the server does with entry 1001 is not
+	// documented, so the list is cut before it goes out.
+	maxVocab = 1000
 )
 
 // errEndOfTranscript is what Decode reports for the server's EndOfTranscript,
@@ -130,8 +142,9 @@ func (e *Engine) dial(ctx context.Context) (*websocket.Conn, stt.Session, error)
 }
 
 func (e *Engine) startMessage() startRecognition {
-	vocab := make([]vocabEntry, 0, len(e.cfg.Keyterms))
-	for _, k := range e.cfg.Keyterms {
+	terms := stt.CapKeyterms(e.cfg.Keyterms, maxVocab, slog.Default())
+	vocab := make([]vocabEntry, 0, len(terms))
+	for _, k := range terms {
 		vocab = append(vocab, vocabEntry{Content: k})
 	}
 	// "speaker" is Speechmatics' only diarization mode worth asking for here

@@ -15,7 +15,9 @@ import (
 // pipeline at wall-clock rate, so everything downstream behaves exactly as it
 // will with the live feed.
 func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger, g Globals) error {
-	resolveSTTDefaults(&c.STTFlags)
+	if err := resolveSTTDefaults(&c.STTFlags); err != nil {
+		return err
+	}
 	if err := requireAPIKey(c.Engine, c.APIKey); err != nil {
 		return err
 	}
@@ -61,7 +63,9 @@ func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger
 
 // Run executes a live capture session.
 func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger, g Globals) error {
-	resolveSTTDefaults(&c.STTFlags)
+	if err := resolveSTTDefaults(&c.STTFlags); err != nil {
+		return err
+	}
 	if err := requireAPIKey(c.Engine, c.APIKey); err != nil {
 		return err
 	}

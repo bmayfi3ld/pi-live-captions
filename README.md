@@ -194,7 +194,10 @@ written to `transcripts/<session>/transcript.txt`.
 - **Feed a mono aux/matrix send of the mics, not the main mix.** `-ac 1` will happily downmix
   music and effects along with speech; this is the single biggest accuracy lever in the project.
 - **Set `--keyterm` for every proper noun** in the event (names, places, in-house terms) — costs
-  nothing, helps a lot.
+  nothing, helps a lot. For a long list, put one term per line in a file and pass
+  `--keyterm-file`; `keyterms-esv.txt` is the 1000-term list for reading the ESV. Order it
+  most-likely-spoken first: Speechmatics takes 1000 terms, Deepgram only the first 400, and the cut
+  comes off the end.
 - **Do a `--monitor` dry run beforehand** (on `replay`, with representative audio) to hear and tune
   perceived delay before you're live.
 - **Check `/admin` shows a clean run** — no restarts, no reconnects, no buffer drops — before
@@ -206,6 +209,10 @@ written to `transcripts/<session>/transcript.txt`.
   `SPEECHMATICS_API_KEY` (or `--api-key`). The run stops immediately rather than retrying, and so
   does a rejected `--model` / `--language`, which each engine names its own way.
 - **`unknown stt engine`** — only `deepgram`, `speechmatics` and `mock` exist; check `--engine`.
+- **First connect is slow with a big `--keyterm-file`** — Speechmatics builds the dictionary before
+  it acknowledges the session, up to 15 s the first time. It caches identical lists for 24 h, so
+  later connections (including every `--auto-pause` redial) are quick. Don't edit the list between
+  runs on the day for no reason: any change is a new dictionary and a new cold start.
 - **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
   / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
   fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.

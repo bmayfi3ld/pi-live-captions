@@ -341,11 +341,20 @@ var engineDefaults = map[string]struct{ model, language string }{
 
 // resolveSTTDefaults fills in whichever of --model, --language and --api-key
 // the user left blank, from the selected engine's own defaults and env var. An
-// explicit flag always wins; mock needs none of them.
+// explicit flag always wins; mock needs none of them. It also folds
+// --keyterm-file into --keyterm, so everything downstream sees one list.
 //
 // Must run before requireAPIKey and before the banner, both of which read
 // these as final.
-func resolveSTTDefaults(f *STTFlags) {
+func resolveSTTDefaults(f *STTFlags) error {
+	if f.KeytermFile != "" {
+		terms, err := readKeytermFile(f.KeytermFile)
+		if err != nil {
+			return err
+		}
+		f.Keyterm = append(f.Keyterm, terms...)
+	}
+
 	if f.APIKey == "" {
 		// Deliberately the engine's own variable and no other: falling back to
 		// whichever key happens to be set sends it to a provider that will
@@ -357,7 +366,7 @@ func resolveSTTDefaults(f *STTFlags) {
 
 	d, ok := engineDefaults[f.Engine]
 	if !ok {
-		return
+		return nil
 	}
 	if f.Model == "" {
 		f.Model = d.model
@@ -365,6 +374,29 @@ func resolveSTTDefaults(f *STTFlags) {
 	if f.Language == "" {
 		f.Language = d.language
 	}
+	return nil
+}
+
+// readKeytermFile reads one term per line. Blank lines and # comments are
+// skipped so a list can be sectioned and annotated, which is the difference
+// between a list anyone will maintain and a wall of words nobody will.
+func readKeytermFile(path string) ([]string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("--keyterm-file: %w", err)
+	}
+	var terms []string
+	for line := range strings.Lines(string(b)) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		terms = append(terms, line)
+	}
+	if len(terms) == 0 {
+		return nil, fmt.Errorf("--keyterm-file: %s holds no terms", path)
+	}
+	return terms, nil
 }
 
 // apiKeyEnv names the environment variable that feeds --api-key for an engine,

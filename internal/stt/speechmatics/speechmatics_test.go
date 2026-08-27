@@ -3,6 +3,7 @@ package speechmatics
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -170,6 +171,27 @@ func TestStartMessage_ShipsSettledTextOnly(t *testing.T) {
 	}
 	if msg.Config.Language != "en" || msg.Config.Model != "enhanced" {
 		t.Errorf("language/model = %q/%q, want they come from Config", msg.Config.Language, msg.Config.Model)
+	}
+}
+
+// TestStartMessage_CapsAdditionalVocab guards the documented ceiling of 1000
+// entries. What the server does past it is undocumented, and invalid_config is
+// a permanent error that stops the run, so an over-long list loses its tail
+// here instead.
+func TestStartMessage_CapsAdditionalVocab(t *testing.T) {
+	e := testEngine("")
+	e.cfg.Keyterms = make([]string, maxVocab+50)
+	for i := range e.cfg.Keyterms {
+		e.cfg.Keyterms[i] = fmt.Sprintf("term%d", i)
+	}
+
+	msg := e.startMessage()
+	if len(msg.Config.AdditionalVocab) != maxVocab {
+		t.Errorf("additional_vocab = %d entries, want it capped at %d", len(msg.Config.AdditionalVocab), maxVocab)
+	}
+	// Cut from the tail: keyterm files are written most-likely-spoken first.
+	if msg.Config.AdditionalVocab[0].Content != "term0" {
+		t.Errorf("kept %q first, want the head of the list", msg.Config.AdditionalVocab[0].Content)
 	}
 }
 

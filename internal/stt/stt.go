@@ -9,6 +9,7 @@ package stt
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"livecaption/internal/audio"
@@ -59,6 +60,23 @@ type Config struct {
 	Pause    PauseConfig
 	// Diarize asks the provider to attribute segments to speakers.
 	Diarize bool
+}
+
+// CapKeyterms trims a keyterm list to what the provider will accept. Deepgram
+// rejects the whole request past its budget; Speechmatics documents a ceiling
+// but not what it does with a list that exceeds it, and finding out mid-event
+// is not the plan. Both get cut client-side.
+//
+// The cut is from the tail on purpose: keyterm lists are written
+// most-likely-spoken first, so the terms that survive are the ones that earn
+// their slot.
+func CapKeyterms(terms []string, max int, log *slog.Logger) []string {
+	if len(terms) <= max {
+		return terms
+	}
+	log.Warn("keyterm list truncated to the provider's limit",
+		"given", len(terms), "sent", max, "dropped", len(terms)-max)
+	return terms[:max]
 }
 
 // Engine consumes PCM frames and emits transcripts.

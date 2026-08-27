@@ -816,7 +816,13 @@ No per-frame logging at any level — at 100 ms chunks that's 10 lines/sec of no
   accuracy badly and `-ac 1` will happily downmix all of it. This is the single biggest accuracy
   lever in the project — larger than any model or parameter choice.
 - **`--keyterm`** with the event's proper nouns (names, places, in-house terms) is the second
-  biggest lever, and costs nothing.
+  biggest lever, and costs nothing. Past a handful, use `--keyterm-file` (one term per line).
+  The two providers cap it very differently — Speechmatics takes 1000 entries, Deepgram budgets
+  500 *tokens* across all keyterms and rejects the request past that — so each engine truncates
+  the list to its own ceiling and the file is written most-likely-spoken first, the tail being
+  what gets dropped. A large Speechmatics dictionary also costs up to 15 s of session
+  initialisation on a cold list (cached per-identical-list for 24 h), which is why
+  `handshakeTimeout` is 30 s rather than something tighter.
 - **Deepgram bills by streamed audio duration**, and replay at 1.0× costs exactly what live costs.
   Use `--engine mock` for all UI work.
 - If captions feel late, Deepgram's `endpointing` is the knob (set it in `dialURL`): lower puts text
