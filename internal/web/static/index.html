@@ -278,9 +278,13 @@
     document.documentElement.style.setProperty("--size", sizeParam + "vw");
   }
 
-  var hasLinesParam = params.has("lines");
+  // DEFAULT_LINES is the viewer's row count. A constant, not a served value:
+  // ?lines=N is the per-viewer override (a phone and a projector want
+  // different counts from the same server), so nothing here varies per
+  // deployment and the page can lay itself out without waiting on a fetch.
+  var DEFAULT_LINES = 6;
   var linesParamNum = parseInt(params.get("lines"), 10);
-  var requestedLines = (!isNaN(linesParamNum) && linesParamNum > 0) ? linesParamNum : 3;
+  var requestedLines = (!isNaN(linesParamNum) && linesParamNum > 0) ? linesParamNum : DEFAULT_LINES;
   var debugOn = params.get("debug") === "1";
   var wakeDisabled = params.get("wake") === "0";
 
@@ -383,15 +387,13 @@
   // The rolling-display / pause-break typesetter itself lives in the shared
   // caption.js (loaded below), so /admin can mount the exact same code and
   // is guaranteed to render identically rather than drifting from a second
-  // copy. requestedLines is handed in as a getter, not a frozen number,
-  // because the /api/config fetch further down can still raise it after
-  // this page has already mounted the stack.
+  // copy.
   var captionStack = window.CaptionStack({
     stack: stack,
     viewport: viewport,
     page: page,
     probe: probe,
-    requestedLines: function () { return requestedLines; }
+    requestedLines: requestedLines
   });
 
   var retypesetTimer = null;
@@ -411,13 +413,9 @@
   }
   window.addEventListener("orientationchange", scheduleRetypeset);
 
-  // ---- config: lines default (only when ?lines= is absent) and logo ----
+  // ---- config: the logo, which only the server knows was supplied ----
   fetch("/api/config").then(function (r) { return r.json(); }).then(function (cfg) {
     if (!cfg) return;
-    if (!hasLinesParam && cfg.lines > 0) {
-      requestedLines = cfg.lines;
-      captionStack.retypeset();
-    }
     if (cfg.logo && params.get("logo") !== "0") {
       logoEl.onerror = function () { logoEl.hidden = true; };
       logoEl.src = cfg.logo;

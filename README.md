@@ -95,8 +95,9 @@ A pause of at least 1.5s counts as the speaker actually stopping: it freezes the
 it is and closes a transcript line. That threshold is the `breakGap` constant in
 `internal/caption/hub.go` — venue-tuned, but not a flag (see DESIGN.md §4).
 
-Deepgram's own endpointing is deliberately left unset: the engine publishes a stable prefix off
-interim results, so cadence no longer waits on the server's finalization window. Watch
+The engine publishes only Deepgram's settled (`is_final`) results, so a word never changes once
+it's on screen. Cadence is therefore governed by Deepgram's own endpointing window, left at the
+server default. Watch
 `Segments / lines` on `/admin` to check fragmentation: roughly 1–3 segments per line is healthy,
 and a ratio climbing well past that means phrases are splitting on every hesitation.
 
@@ -116,7 +117,7 @@ beside the connection dot. Query parameters:
 
 | param | effect |
 |---|---|
-| `?lines=N` | number of caption rows shown (overrides `--lines`) |
+| `?lines=N` | number of caption rows shown (default 6) |
 | `?size=N` | base font size in `vw` |
 | `?theme=light` | light theme (default is dark) |
 | `?debug=1` | overlays measured latency, plus this viewer's own measured publish→paint time and its estimated clock offset from the server |
@@ -177,9 +178,9 @@ written to `transcripts/<session>/transcript.txt`.
 - **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
   / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
   fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.
-- **Captions lagging** — the engine publishes a stable prefix off Deepgram's interim results, so
-  words land at speech cadence rather than waiting on finalization. Watch `Segments / lines` on
-  `/admin`: a ratio climbing well past a few segments per line means phrases are fragmenting.
+- **Captions lagging** — text lands when Deepgram finalizes a window, so the `endpointing` value in
+  `dialURL` is the knob. Watch `Segments / lines` on `/admin`: a ratio climbing well past a few
+  segments per line means phrases are fragmenting, i.e. endpointing is too aggressive.
   Check the latency waterfall on `/admin` to see which leg (upload / recognize / assemble) is
   slow, and see DESIGN.md §4.
 - **First word after a quiet spell is missing/late, or the connection pauses during ordinary

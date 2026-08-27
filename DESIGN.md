@@ -137,7 +137,7 @@ out, never on a dropped connection.
 
 ```
 encoding=linear16&sample_rate=16000&channels=1&model=nova-3&language=en-US
-&interim_results=false&punctuate=true&smart_format=true&endpointing=100
+&interim_results=false&punctuate=true&smart_format=true
 ```
 
 **WebSocket library: `github.com/coder/websocket`.** Worth recording why, since gorilla/websocket
@@ -219,8 +219,7 @@ these settled segments into a display and a transcript.
 
 This is the part that drives every other decision, so it comes first.
 
-**Text rolls.** Segments arrive as soon as the prefix tracker calls them stable and append to the
-current row. When the next word doesn't fit, the row freezes, the stack glides up one, and the word
+**Text rolls.** Segments arrive as Deepgram finalizes each window and append to the current row. When the next word doesn't fit, the row freezes, the stack glides up one, and the word
 starts the new row. Rows are always full edge to edge.
 
 ```
@@ -251,7 +250,7 @@ Splitting them is the core of the redesign:
 
 | job | signal | why |
 |---|---|---|
-| flush text to screen | every stable-prefix segment from `prefixTracker` | fastest never-revised text there is |
+| flush text to screen | every `is_final` segment | fastest never-revised text there is |
 | break a display row | row width, **or** a `breakGap` gap (1.5s) | a caption stack should read as continuous, and reset only when the speaker actually stops |
 | close a transcript line | terminal punctuation, or that same gap, or a 1000-char guard | a file read later wants sentences; a screen watched live wants continuity |
 
@@ -278,20 +277,23 @@ lost when the speaker was still talking.
 dropped and counted (`slow_disconnects_total`) rather than backpressured. `EventSource` reconnects
 on its own and receives a fresh snapshot, so the cost of a drop is one round trip.
 
-History is capped at 20 lines for late-joiner snapshots — far more than the 3 rows a viewer shows,
+History is capped at 20 lines for late-joiner snapshots — well more than the 6 rows a viewer shows,
 and the snapshot event is now its only reader (`Hub.Snapshot()` had no other callers and is gone).
 
 ### Recognizer cadence vs. `breakGap`
 
-The two speech-timing thresholds plumb to different places — `Endpointing` into `stt.Config`
-(Deepgram's own chunking), `SpeechBreak` into `caption.NewHub` (the hub's gap arithmetic) — but
-they get tuned together at a venue, so they live in one `Speech-to-text` flag group and are
-validated against each other: `SpeechBreak` must stay comfortably above `Endpointing`
-(`STTFlags.Validate` in `internal/cli/cli.go`), or every chunk Deepgram commits to would also count
-as a pause, and the display goes back to being ragged — the exact bug an early draft of this design
-shipped before the check existed. Concretely: the prefix tracker sets how fast text lands on
-screen; `breakGap` sets when a pause is meaningful enough to freeze a row and close a line.
-Conflating them is what fragmented the transcript before this split.
+Two thresholds govern speech timing, and they belong to different systems. Deepgram's own
+`endpointing` decides how fast it commits to a window — and therefore how fast text reaches the
+screen at all, since finals are the only thing published. `breakGap` (`internal/caption/hub.go`,
+1.5s) decides when a gap between two committed windows is long enough to mean the speaker actually
+stopped, freezing a display row and closing a transcript line.
+
+The invariant between them: **`breakGap` must stay comfortably above the endpointing window.** If
+it doesn't, every chunk Deepgram commits to also reads as a pause, and the display goes back to
+being ragged — the exact bug an early draft of this design shipped. Neither is a flag any more, so
+the check that used to enforce it at parse time is gone; the constraint now lives here and in the
+two constants. Raising server-side `endpointing` toward `breakGap` is the change to be careful
+about.
 
 ### Signals we deliberately don't use
 
@@ -315,9 +317,19 @@ reversal:
    caught. It only becomes meaningful again if server-side endpointing is raised toward something closer to
    a full utterance pause, at which point revisiting it might be worthwhile.
 4. **Interim results themselves (`is_final: false`)** — the whole point of this design: no revised
-   text ever reaches the hub, so there is nothing to diff. `decodeTranscript` keeps one guard,
-   `if !msg.IsFinal { return }`, purely as defense-in-depth — if `interim_results` is ever flipped
-   back on for debugging, revisable text still can't reach the pipeline.
+   text ever reaches the hub, so there is nothing to diff. Belt and braces: the engine sets
+   `interim_results=false` explicitly on the wire *and* `readLoop` drops any non-final it receives
+   anyway. The second guard is a trust boundary, not redundancy — a param silently ignored or a
+   changed server default would otherwise put revisable text on screen, which the append-only
+   typesetter has no way to take back.
+
+   A prefix tracker briefly lived here (2026-08, removed): it consumed the interim stream and
+   published the token prefix two consecutive interims agreed on, minus a holdback, to get text
+   landing at speech cadence rather than in finalization-gated bursts. It worked, but it meant the
+   engine's core promise — "everything published is settled" — rested on a heuristic about how
+   Deepgram revises rather than on Deepgram's own `is_final`. Removed in favour of the simpler
+   contract. Reconsider only if finalization-gated cadence proves too slow in a real venue, and
+   prefer raising or lowering server-side `endpointing` first.
 
 ---
 
@@ -644,8 +656,9 @@ No per-frame logging at any level — at 100 ms chunks that's 10 lines/sec of no
   biggest lever, and costs nothing.
 - **Deepgram bills by streamed audio duration**, and replay at 1.0× costs exactly what live costs.
   Use `--engine mock` for all UI work.
-- If captions feel late, `holdbackTokens` in `prefix.go` is the knob: lower puts text on screen sooner in smaller
-  pieces, at the cost of `segments_total / lines_total` climbing on `/admin` as phrases fragment.
+- If captions feel late, Deepgram's `endpointing` is the knob (set it in `dialURL`): lower puts text
+  on screen sooner in smaller pieces, at the cost of `segments_total / lines_total` climbing on
+  `/admin` as phrases fragment.
   `breakGap` is the companion knob for when a pause reads as a paragraph break rather than a
   breath — see §4. Tune both by ear with `--monitor` *before* the event.
 - 401 on first connect is the most likely first-run failure — check `DEEPGRAM_API_KEY`.

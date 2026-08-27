@@ -117,7 +117,6 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 
 	srv, err := web.NewServer(web.Config{
 		Addr:    o.server.Addr,
-		Lines:   o.server.Lines,
 		Logo:    o.server.Logo,
 		Hub:     hub,
 		Metrics: met,

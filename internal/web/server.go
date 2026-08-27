@@ -35,7 +35,6 @@ const maxLogoBytes = 2 << 20
 // Config configures the caption server.
 type Config struct {
 	Addr    string
-	Lines   int    // caption rows the viewer shows by default
 	Logo    string // path to an image shown in the viewer's top-right corner
 	Hub     *caption.Hub
 	Metrics *metrics.Metrics
@@ -57,9 +56,6 @@ type Server struct {
 func NewServer(cfg Config) (*Server, error) {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
-	}
-	if cfg.Lines <= 0 {
-		cfg.Lines = 3
 	}
 
 	static, err := fs.Sub(embedded, "static")
@@ -274,8 +270,10 @@ func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
 	_ = enc.Encode(snap)
 }
 
-// handleConfig exposes the few server-side defaults the viewer needs, so the
-// --lines flag reaches the page without templating the HTML.
+// handleConfig exposes the per-deployment facts the viewer can't know at build
+// time: whether a logo was supplied, and which version is serving it. Row count
+// is deliberately not here — it's a fixed constant the page owns, so shipping it
+// over the wire would only make the page wait on a fetch to lay itself out.
 func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	logo := ""
 	if s.logoSet {
@@ -283,7 +281,6 @@ func (s *Server) handleConfig(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"lines":   s.cfg.Lines,
 		"version": s.cfg.Metrics.Version,
 		"logo":    logo,
 	})

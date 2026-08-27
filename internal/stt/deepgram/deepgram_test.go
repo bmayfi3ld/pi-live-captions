@@ -28,7 +28,7 @@ func TestDecodeTranscript(t *testing.T) {
 		ok        bool
 	}{
 		{
-			// Deciding what to do with a revisable interim is prefixTracker's
+			// Deciding what to do with a revisable interim is readLoop's
 			// job now; decodeTranscript's only job is to decode it faithfully
 			// and report isFinal alongside it.
 			name: "is_final false decodes as an interim",
@@ -97,15 +97,13 @@ func TestDecodeTranscript(t *testing.T) {
 	}
 }
 
-// TestDialURL_RequestsInterimsForPrefixTracker pins the query string this
-// engine asks Deepgram for: interim_results=true, since prefixTracker (see
-// prefix.go) needs the revisable stream to publish a stable prefix ahead of
-// is_final; still no UtteranceEnd/vad_events backstop, since prefixTracker
-// gets everything it needs from Results messages alone; and punctuate/
-// smart_format still on, load-bearing now that the hub closes transcript
-// lines on punctuation — this assertion is what stops a future cleanup from
-// silently removing them.
-func TestDialURL_RequestsInterimsForPrefixTracker(t *testing.T) {
+// TestDialURL_RequestsFinalsOnly pins the query string this engine asks
+// Deepgram for: interim_results=false, since only settled text is ever
+// published; no UtteranceEnd/vad_events backstop, since neither signal
+// survives decodeTranscript; and punctuate/smart_format on, load-bearing
+// because the hub closes transcript lines on punctuation — this assertion is
+// what stops a future cleanup from silently removing them.
+func TestDialURL_RequestsFinalsOnly(t *testing.T) {
 	eng := testEngine("wss://example.invalid")
 
 	u, err := url.Parse(eng.dialURL())
@@ -114,18 +112,20 @@ func TestDialURL_RequestsInterimsForPrefixTracker(t *testing.T) {
 	}
 	q := u.Query()
 
-	if got := q.Get("interim_results"); got != "true" {
-		t.Errorf("interim_results = %q, want %q", got, "true")
+	// Explicit, not merely absent: a server-side default flipping to true
+	// would put revisable text on screen, so the engine states its intent.
+	if got := q.Get("interim_results"); got != "false" {
+		t.Errorf("interim_results = %q, want %q: this engine ships only settled text", got, "false")
 	}
 	if q.Has("utterance_end_ms") {
-		t.Error("utterance_end_ms should not be present: prefixTracker doesn't need it")
+		t.Error("utterance_end_ms should not be present: nothing consumes it")
 	}
 	if q.Has("vad_events") {
 		t.Error("vad_events should not be present: its only signal is discarded by decodeTranscript")
 	}
 	if q.Has("endpointing") {
-		t.Error("endpointing should not be present: prefixTracker publishes off interims, " +
-			"so cadence no longer waits on the server's finalization window")
+		t.Error("endpointing should not be present: left at the server default, " +
+			"which is what now governs caption cadence")
 	}
 	if got := q.Get("punctuate"); got != "true" {
 		t.Errorf("punctuate = %q, want %q: it is load-bearing for transcript line breaks now", got, "true")
@@ -254,12 +254,10 @@ func TestEngine_FullSession(t *testing.T) {
 			}
 		}()
 
-		// The interim never reaches out on its own: "hello" is only one
-		// token, and prefixTracker needs two agreeing interims (minus
-		// holdback) before it publishes anything. The final then flushes
-		// everything unconditionally, so exactly one transcript is expected
-		// below, with the interim's contribution folded into it rather than
-		// dropped by a separate guard.
+		// The interim is dropped outright by readLoop's isFinal guard, even
+		// though the engine asked for interim_results=false — this is the
+		// trust-boundary case, a server sending one anyway. Only the final
+		// reaches out, so exactly one transcript is expected below.
 		sc.send(resultMsg("hello", false, 0, 0.4))
 		sc.send(resultMsg("hello world", true, 0, 1.0))
 

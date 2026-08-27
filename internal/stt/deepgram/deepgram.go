@@ -270,13 +270,9 @@ func (e *Engine) runConnection(
 	// makes readLoop of connection N structurally unable to consult the index
 	// of connection N+1, and there is no reset path to race.
 	idx := newAnchorIndex(e.cfg.Format)
-	// pt has the same lifetime for the same reason: a stable prefix is a
-	// statement about what THIS connection's revisions have settled on, and a
-	// reconnect must not carry that state into what is really a fresh window.
-	pt := newPrefixTracker()
 
 	readErr := make(chan error, 1)
-	go func() { readErr <- e.readLoop(connCtx, conn, out, log, idx, pt) }()
+	go func() { readErr <- e.readLoop(connCtx, conn, out, log, idx) }()
 
 	writeErr := make(chan error, 1)
 	go func() { writeErr <- e.writeLoop(ctx, connCtx, conn, buf, framesClosed, met, gate, idx) }()
@@ -402,10 +398,10 @@ func (e *Engine) writeLoop(
 }
 
 // readLoop decodes server messages into Transcripts until the connection
-// fails or ctx is cancelled. Every decoded message passes through pt first:
-// pt is what turns Deepgram's revisable interim/final stream into the
-// append-only segments out and everything downstream expect.
-func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, log *slog.Logger, idx *anchorIndex, pt *prefixTracker) error {
+// fails or ctx is cancelled. Only is_final results are published: everything
+// downstream treats a Transcript as settled and paints it once, so a revisable
+// interim reaching out would put text on screen that could later change.
+func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- stt.Transcript, log *slog.Logger, idx *anchorIndex) error {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -419,24 +415,24 @@ func (e *Engine) readLoop(ctx context.Context, conn *websocket.Conn, out chan<- 
 		if !ok {
 			continue
 		}
-		seg, ok := pt.update(t, isFinal)
-		if !ok {
-			// Nothing past the already-published prefix and holdback is
-			// stable yet; wait for the next interim or the final.
+		// dialURL asks for interim_results=false, so this should never fire.
+		// It stays as a trust boundary against the server sending interims
+		// anyway — a param silently ignored, or a changed default. Publishing
+		// one as settled text would break the append-only guarantee the whole
+		// display rests on, and it is one comparison to prevent.
+		if !isFinal {
 			continue
 		}
-		seg.ReceivedAt = time.Now()
-		// Anchor the segment's media end-time to wall-clock capture and send
-		// time on THIS connection. seg.End() lines up exactly with t.End() of
-		// whichever message triggered the publish, so this is as precise as
-		// the message-level anchor index can be even though seg itself only
-		// covers the newly published tokens.
-		if capturedAt, sentAt, ok := idx.At(seg.End()); ok {
-			seg.CapturedAt = capturedAt
-			seg.SentAt = sentAt
+		t.ReceivedAt = time.Now()
+		// Anchor the segment's media end-time to the wall-clock capture and
+		// send instants for THIS connection, so latency is measured against
+		// when the audio actually entered the pipeline.
+		if capturedAt, sentAt, ok := idx.At(t.End()); ok {
+			t.CapturedAt = capturedAt
+			t.SentAt = sentAt
 		}
 		select {
-		case out <- seg:
+		case out <- t:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -477,21 +473,25 @@ func (e *Engine) dialURL() string {
 	q.Set("channels", strconv.Itoa(e.cfg.Format.Channels))
 	q.Set("model", e.cfg.Model)
 	q.Set("language", e.cfg.Language)
-	// interim_results=true: prefixTracker (see prefix.go) needs the revisable
-	// stream to publish a stable prefix well before is_final, which is what
-	// keeps text landing at a natural speech cadence instead of arriving in
-	// multi-second bursts gated on Deepgram's own finalization window.
-	q.Set("interim_results", "true")
+	// interim_results=false: this engine ships only settled text. Set
+	// explicitly rather than left to the server's default — everything
+	// downstream paints a Transcript once and never revises it, so a changed
+	// default silently arriving would corrupt the display rather than merely
+	// change its timing.
+	q.Set("interim_results", "false")
 	// punctuate and smart_format are load-bearing, not cosmetic: the hub
-	// closes transcript lines on terminal punctuation (§3 of the interim
-	// removal plan), so turning these off would silently degrade
-	// transcript.txt to the speech-gap fallback for every sentence.
+	// closes transcript lines on terminal punctuation, so turning these off
+	// would silently degrade transcript.txt to the speech-gap fallback for
+	// every sentence.
 	q.Set("punctuate", "true")
 	q.Set("profanity_filter", "true")
 	q.Set("smart_format", "true")
-	// Deepgram's own `endpointing` is deliberately not set: prefixTracker
-	// publishes off interims, so cadence no longer waits on the server's
-	// finalization window.
+	// Deepgram's own `endpointing` is left at the server default, which is
+	// now what governs caption cadence end to end: text lands when Deepgram
+	// finalizes a window, not before. It is therefore the first knob to reach
+	// for if captions feel late (lower: sooner, in smaller pieces) or if
+	// phrases fragment across rows (raise it). Watch Segments / lines on
+	// /admin to tell which is happening.
 	for _, k := range e.cfg.Keyterms {
 		q.Add("keyterm", k)
 	}
@@ -577,9 +577,9 @@ type resultsMessage struct {
 // decodeTranscript turns one server message into a Transcript plus whether it
 // was Deepgram's is_final for that window. ok is false for messages that
 // carry nothing worth publishing: empty Results (no speech yet), Metadata,
-// SpeechStarted, and any other unrecognized type. Both interim and final
-// Results decode with ok=true — deciding which of their words are actually
-// safe to publish is prefixTracker's job (see prefix.go), not this one's.
+// SpeechStarted, and any other unrecognized type. An interim still decodes
+// with ok=true and isFinal=false — this function's job is to report the
+// message faithfully; readLoop is what decides interims are not published.
 func decodeTranscript(data []byte) (t stt.Transcript, isFinal bool, ok bool, err error) {
 	var head messageType
 	if err := json.Unmarshal(data, &head); err != nil {

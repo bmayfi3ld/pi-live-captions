@@ -27,12 +27,10 @@
   //   page            the element whose clientHeight/clientWidth bound layout
   //   probe           an offscreen element carrying the row's real font, used
   //                   to calibrate canvas text measurement against actual layout
-  //   requestedLines  how many rows to show: a plain number, or a zero-arg
-  //                   function returning one. A function lets a page raise
-  //                   this after mounting — index.html's /api/config fetch
-  //                   can arrive after the stack already exists — without
-  //                   caption.js having to expose a setter as a fifth public
-  //                   method.
+  //   requestedLines  how many rows to show: a positive number, known at mount
+  //                   time by both callers. It is a ceiling, not a promise —
+  //                   adjustMaxRows lowers it to whatever actually fits the
+  //                   page height.
   //
   // Returns { appendSegment, breakRow, resetAll, retypeset } — see below.
   window.CaptionStack = function (opts) {
@@ -41,10 +39,8 @@
     var page = opts.page;
     var probe = opts.probe;
 
-    function requestedLines() {
-      var v = typeof opts.requestedLines === "function" ? opts.requestedLines() : opts.requestedLines;
-      return (typeof v === "number" && v > 0) ? v : 3;
-    }
+    var requestedLines = (typeof opts.requestedLines === "number" && opts.requestedLines > 0)
+      ? opts.requestedLines : 3;
 
     // ledger is the append-only record of every word ever painted. Nothing
     // in it is ever mutated once pushed (contrast the old, larger entry
@@ -74,7 +70,7 @@
     // row before the words meant to land in it actually have.
     var pending = [];
     var drainTimer = null;
-    var WORD_MS = 50;   // fixed inter-word pacing delay
+    var WORD_MS = 100;   // fixed inter-word pacing delay
     var GLIDE_MS = 130; // MUST equal the CSS transition duration in freezeAndGlide —
                          // the serialization guarantee (never two glides in flight)
                          // depends on the scheduler waiting exactly as long as the
@@ -85,7 +81,7 @@
     var rowH = 0;
     var usableWidth = 0;
     var fontScale = 1;
-    var maxRows = requestedLines();
+    var maxRows = requestedLines;
 
     function tokenize(text) {
       var t = text.replace(/^\s+|\s+$/g, "");
@@ -265,7 +261,7 @@
     function adjustMaxRows() {
       var rh = rowH || 1;
       var fitRows = Math.floor(page.clientHeight / rh) || 1;
-      maxRows = Math.max(1, Math.min(requestedLines(), fitRows));
+      maxRows = Math.max(1, Math.min(requestedLines, fitRows));
       viewport.style.height = (maxRows * rowH) + "px";
     }
 

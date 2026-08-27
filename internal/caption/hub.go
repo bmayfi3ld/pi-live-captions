@@ -55,7 +55,7 @@ type Line struct {
 // historyLimit is how many finalized lines are kept for late joiners, and
 // with Hub.Snapshot() gone this is also the whole replay window: a snapshot
 // event is its only reader, so a second "how much to replay" constant would
-// be dead weight. 20 is far more than the 3 rows a viewer shows.
+// be dead weight. 20 is well more than the 6 rows a viewer shows.
 const historyLimit = 20
 
 // subscriberBuffer is how far a subscriber may fall behind before being

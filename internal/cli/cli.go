@@ -55,7 +55,6 @@ func (f *STTFlags) Validate() error {
 // ServerFlags configure the caption web server.
 type ServerFlags struct {
 	Addr     string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages."`
-	Lines    int    `default:"3" group:"Server" help:"Caption rows visible on the viewer page."`
 	Logo     string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
 	MDNSName string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
 }
