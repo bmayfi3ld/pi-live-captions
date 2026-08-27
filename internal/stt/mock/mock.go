@@ -15,12 +15,6 @@ import (
 	"livecaption/internal/stt"
 )
 
-func init() {
-	stt.Register("mock", func(cfg stt.Config) (stt.Engine, error) {
-		return &Engine{cfg: cfg, ps: newPhraseState(rand.New(rand.NewSource(1)))}, nil
-	})
-}
-
 // Engine emits canned phrases paced by the audio it consumes.
 //
 // Everything is driven by media time from the frames, never by wall clock, so
@@ -28,6 +22,12 @@ func init() {
 type Engine struct {
 	cfg stt.Config
 	ps  *phraseState
+}
+
+// New builds the offline mock engine. The fixed seed is what makes its output
+// reproducible run to run.
+func New(cfg stt.Config) *Engine {
+	return &Engine{cfg: cfg, ps: newPhraseState(rand.New(rand.NewSource(1)))}
 }
 
 func (e *Engine) Name() string { return "mock" }

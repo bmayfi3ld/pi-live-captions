@@ -34,13 +34,12 @@ const maxLogoBytes = 2 << 20
 
 // Config configures the caption server.
 type Config struct {
-	Addr      string
-	Lines     int    // caption rows the viewer shows by default
-	Logo      string // path to an image shown in the viewer's top-right corner
-	Hub       *caption.Hub
-	Metrics   *metrics.Metrics
-	Log       *slog.Logger
-	DevStatic string // serve assets from disk instead of the embedded copy
+	Addr    string
+	Lines   int    // caption rows the viewer shows by default
+	Logo    string // path to an image shown in the viewer's top-right corner
+	Hub     *caption.Hub
+	Metrics *metrics.Metrics
+	Log     *slog.Logger
 }
 
 // Server owns the HTTP surface.
@@ -63,15 +62,9 @@ func NewServer(cfg Config) (*Server, error) {
 		cfg.Lines = 3
 	}
 
-	var static fs.FS
-	if cfg.DevStatic != "" {
-		static = os.DirFS(cfg.DevStatic)
-	} else {
-		sub, err := fs.Sub(embedded, "static")
-		if err != nil {
-			return nil, fmt.Errorf("embedded assets: %w", err)
-		}
-		static = sub
+	static, err := fs.Sub(embedded, "static")
+	if err != nil {
+		return nil, fmt.Errorf("embedded assets: %w", err)
 	}
 
 	s := &Server{cfg: cfg, log: cfg.Log}
@@ -87,30 +80,26 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.Handle("GET /admin", pageHandler(static, "admin.html"))
 	mux.Handle("GET /", pageHandler(static, "index.html"))
 
-	captionJS, err := staticAssetHandler(static, "caption.js", "text/javascript; charset=utf-8")
-	if err != nil {
-		return nil, err
+	for _, a := range []struct{ name, ctype string }{
+		{"caption.js", "text/javascript; charset=utf-8"},
+		{"wake.mp4", "video/mp4"},
+		{"wake.webm", "video/webm"},
+	} {
+		body, err := fs.ReadFile(static, a.name)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", a.name, err)
+		}
+		mux.Handle("GET /"+a.name, blobHandler(body, a.ctype, "no-cache"))
 	}
-	mux.Handle("GET /caption.js", captionJS)
-
-	wakeMP4, err := staticAssetHandler(static, "wake.mp4", "video/mp4")
-	if err != nil {
-		return nil, err
-	}
-	mux.Handle("GET /wake.mp4", wakeMP4)
-
-	wakeWebm, err := staticAssetHandler(static, "wake.webm", "video/webm")
-	if err != nil {
-		return nil, err
-	}
-	mux.Handle("GET /wake.webm", wakeWebm)
 
 	if cfg.Logo != "" {
-		handler, err := logoHandler(cfg.Logo)
+		body, ctype, err := readLogo(cfg.Logo)
 		if err != nil {
 			return nil, err
 		}
-		mux.Handle("GET /logo", handler)
+		// Unlike the embedded assets, the logo is a stable per-event file the
+		// viewer re-fetches on every reload, so it earns a real max-age.
+		mux.Handle("GET /logo", blobHandler(body, ctype, "public, max-age=300"))
 		s.logoSet = true
 	}
 
@@ -142,62 +131,43 @@ func pageHandler(static fs.FS, name string) http.Handler {
 	})
 }
 
-// logoHandler reads the logo once at startup — not per request — so a file
-// swapped mid-session has no effect; that trade-off buys a static ETag and
-// zero disk I/O on the hot path.
-func logoHandler(path string) (http.Handler, error) {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read logo %s: %w", path, err)
-	}
-	if len(body) > maxLogoBytes {
-		return nil, fmt.Errorf("logo %s is %d bytes, exceeds %d byte limit", path, len(body), maxLogoBytes)
-	}
-
-	ctype := logoContentType(path, body)
-	sum := sha256.Sum256(body)
-	etag := `"` + hex.EncodeToString(sum[:])[:16] + `"`
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", ctype)
-		w.Header().Set("Cache-Control", "public, max-age=300")
-		w.Header().Set("ETag", etag)
-		// A fresh Reader per request: bytes.Reader carries a read position,
-		// so sharing one across concurrent requests would race.
-		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
-	}), nil
-}
-
-// staticAssetHandler serves one file out of the embedded static FS — the
-// wake-lock video assets (Backend B, the silent-looping-video wake lock used
-// over plain HTTP) and caption.js alike. Read once at startup, same shape as
-// logoHandler.
+// blobHandler serves a fixed byte slice read once at startup, so nothing
+// touches the disk on the hot path and the ETag can be computed up front. A
+// logo swapped mid-session therefore has no effect until restart.
 //
-// Deliberately revalidated rather than cached immutably: the bytes are fixed
-// for a given binary, but the URL is not versioned, so a build that changes
-// the asset (adding the silent audio track Gecko and WebKit require to grant
-// the wake lock, say, or shipping a caption.js fix) would otherwise never
-// reach a phone that had already cached the old file — the exact failure
-// that made an earlier wake-lock fix look like a no-op. no-cache still lets
-// the ETag turn the repeat request into a 304, and every asset served here
-// is a few KB on a LAN.
-func staticAssetHandler(static fs.FS, name, contentType string) (http.Handler, error) {
-	body, err := fs.ReadFile(static, name)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", name, err)
-	}
-
+// The embedded assets pass "no-cache" deliberately rather than caching
+// immutably: the bytes are fixed for a given binary, but the URL is not
+// versioned, so a build that changes an asset (adding the silent audio track
+// Gecko and WebKit require to grant the wake lock, say, or shipping a
+// caption.js fix) would otherwise never reach a phone that had already cached
+// the old file — the exact failure that made an earlier wake-lock fix look
+// like a no-op. no-cache still lets the ETag turn the repeat request into a
+// 304, and every asset here is a few KB on a LAN.
+func blobHandler(body []byte, contentType, cacheControl string) http.Handler {
 	sum := sha256.Sum256(body)
 	etag := `"` + hex.EncodeToString(sum[:])[:16] + `"`
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", cacheControl)
 		w.Header().Set("ETag", etag)
 		// A fresh Reader per request: bytes.Reader carries a read position,
 		// so sharing one across concurrent requests would race.
 		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(body))
-	}), nil
+	})
+}
+
+// readLogo loads the operator-supplied logo and resolves its content type,
+// rejecting anything large enough to be a mistake.
+func readLogo(path string) ([]byte, string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("read logo %s: %w", path, err)
+	}
+	if len(body) > maxLogoBytes {
+		return nil, "", fmt.Errorf("logo %s is %d bytes, exceeds %d byte limit", path, len(body), maxLogoBytes)
+	}
+	return body, logoContentType(path, body), nil
 }
 
 // logoContentType prefers the file extension over sniffing, since a

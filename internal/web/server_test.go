@@ -44,7 +44,7 @@ func startTestServer(t *testing.T, cfg Config) (baseURL string, hub *caption.Hub
 func newTestConfig() Config {
 	m := metrics.New("test-version", "test-session")
 	return Config{
-		Hub:     caption.NewHub(m, time.Second),
+		Hub:     caption.NewHub(m),
 		Metrics: m,
 	}
 }

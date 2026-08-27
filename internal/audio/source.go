@@ -21,6 +21,11 @@ type Format struct {
 // PipelineFormat is the one format every Source converts to.
 var PipelineFormat = Format{SampleRate: 16000, Channels: 1, BitDepth: 16}
 
+// chunkSize is the PCM chunk every Source emits. 100ms is small enough to keep
+// upload latency off the critical path and large enough that per-frame
+// overhead stays negligible.
+const chunkSize = 100 * time.Millisecond
+
 // BytesPerSecond is how many bytes of PCM one second of audio occupies.
 func (f Format) BytesPerSecond() int {
 	return f.SampleRate * f.Channels * f.BitDepth / 8
@@ -76,7 +81,6 @@ type Source interface {
 	// Describe returns a short human-readable summary for the startup banner,
 	// e.g. "260809_0931.mp3 (31:51, 44100 Hz stereo -> 16000 Hz mono)".
 	Describe() string
-	Format() Format
 	Start(ctx context.Context) (<-chan Frame, error)
 	Err() error
 	Close() error

@@ -35,7 +35,7 @@ func TestFileSourcePacing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	src, err := NewFileSource(ctx, FileConfig{Path: path, Speed: 1.0, Chunk: 100 * time.Millisecond})
+	src, err := NewFileSource(ctx, FileConfig{Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,38 +73,13 @@ func TestFileSourcePacing(t *testing.T) {
 	_ = prev
 }
 
-// TestFileSourceSpeed verifies --speed actually scales the release rate, so
-// quick dry runs are possible without waiting out a 32-minute recording.
-func TestFileSourceSpeed(t *testing.T) {
-	path := testTone(t, 3)
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	src, err := NewFileSource(ctx, FileConfig{Path: path, Speed: 4.0, Chunk: 100 * time.Millisecond})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer src.Close()
-
-	start := time.Now()
-	frames, _ := src.Start(ctx)
-	for range frames {
-	}
-	elapsed := time.Since(start)
-
-	// 3 s of audio at 4x should take well under 2 s.
-	if elapsed > 2500*time.Millisecond {
-		t.Errorf("4x replay took %v, expected under 2.5s", elapsed)
-	}
-}
-
 // TestFileSourceCancellation ensures Ctrl-C unwinds promptly rather than
 // waiting out the rest of the file.
 func TestFileSourceCancellation(t *testing.T) {
 	path := testTone(t, 30)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	src, err := NewFileSource(ctx, FileConfig{Path: path, Speed: 1.0, Chunk: 100 * time.Millisecond})
+	src, err := NewFileSource(ctx, FileConfig{Path: path})
 	if err != nil {
 		t.Fatal(err)
 	}

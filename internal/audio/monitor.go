@@ -6,15 +6,20 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
-	"time"
 )
+
+// monitorBufferMS is the playback buffer depth. Perceived caption delay
+// overstates the real figure by this much, which is why MonitorDescription
+// states it on the banner rather than hiding it.
+const monitorBufferMS = 80
+
+// MonitorDescription is the banner value for the monitor row. Playback is
+// fixed at the default pulse sink, so there is nothing per-run to render.
+const MonitorDescription = "pulse:default (~80ms buffer)"
 
 // MonitorConfig configures speaker playback of the streamed audio.
 type MonitorConfig struct {
-	Device   string // pulse sink or ALSA device; "default" is usually right
-	Backend  string // "pulse" or "alsa"
-	BufferMS int    // playback buffer; adds this much to perceived delay
-	Log      *slog.Logger
+	Log *slog.Logger
 
 	OnDrop  func()
 	OnAlive func(bool)
@@ -30,24 +35,13 @@ type MonitorConfig struct {
 // 16 kHz mono downmix, which is the point — bad source audio becomes audible
 // instead of being inferred from bad transcripts.
 type Monitor struct {
-	cfg   MonitorConfig
-	ch    chan []byte
-	proc  *proc
-	once  sync.Once
-	alive bool
-	mu    sync.Mutex
+	cfg  MonitorConfig
+	ch   chan []byte
+	proc *proc
+	once sync.Once
 }
 
 func NewMonitor(cfg MonitorConfig) *Monitor {
-	if cfg.BufferMS <= 0 {
-		cfg.BufferMS = 80
-	}
-	if cfg.Backend == "" {
-		cfg.Backend = "pulse"
-	}
-	if cfg.Device == "" {
-		cfg.Device = "default"
-	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
@@ -61,24 +55,15 @@ func (m *Monitor) SetCallbacks(onDrop func(), onAlive func(bool)) {
 	m.cfg.OnDrop, m.cfg.OnAlive = onDrop, onAlive
 }
 
-func (m *Monitor) Describe() string {
-	return fmt.Sprintf("%s:%s (~%dms buffer)", m.cfg.Backend, m.cfg.Device, m.cfg.BufferMS)
-}
-
 // Start launches the playback process and begins consuming tapped frames.
 func (m *Monitor) Start(ctx context.Context) error {
 	args := []string{
 		"-hide_banner", "-loglevel", "error",
 		"-f", "s16le", "-ar", "16000", "-ac", "1", "-i", "-",
-	}
-	if m.cfg.Backend == "pulse" {
-		args = append(args,
-			"-f", "pulse",
-			"-buffer_duration", strconv.Itoa(m.cfg.BufferMS),
-			"-name", "livecaption monitor",
-			m.cfg.Device)
-	} else {
-		args = append(args, "-f", "alsa", m.cfg.Device)
+		"-f", "pulse",
+		"-buffer_duration", strconv.Itoa(monitorBufferMS),
+		"-name", "livecaption monitor",
+		"default",
 	}
 
 	p, err := startFFmpeg(ctx, procOpts{args: args, wantStdin: true, log: m.cfg.Log})
@@ -143,16 +128,7 @@ func (m *Monitor) Wrap(ctx context.Context, in <-chan Frame) <-chan Frame {
 	return out
 }
 
-// Latency is the fixed delay playback adds. Perceived caption delay overstates
-// the real figure by this much, so it is reported rather than hidden.
-func (m *Monitor) Latency() time.Duration {
-	return time.Duration(m.cfg.BufferMS) * time.Millisecond
-}
-
 func (m *Monitor) setAlive(v bool) {
-	m.mu.Lock()
-	m.alive = v
-	m.mu.Unlock()
 	if m.cfg.OnAlive != nil {
 		m.cfg.OnAlive(v)
 	}

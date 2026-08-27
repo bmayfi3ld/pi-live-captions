@@ -20,70 +20,44 @@ type CLI struct {
 	Replay  ReplayCmd  `cmd:"" help:"Replay an audio file at wall-clock rate to simulate a live feed."`
 	Live    LiveCmd    `cmd:"" help:"Caption live audio from a capture device."`
 	Devices DevicesCmd `cmd:"" help:"List available audio capture devices."`
-	Version VersionCmd `cmd:"" help:"Print version and exit."`
 
 	Globals
 }
 
 // Globals apply to every command.
 type Globals struct {
-	LogLevel  string `enum:"debug,info,warn,error" default:"info" group:"Logging" help:"Diagnostic verbosity. debug also prints the live caption stream to stdout."`
-	LogFormat string `enum:"auto,pretty,json" default:"auto" group:"Logging" help:"auto = pretty on a terminal, JSON when piped."`
-	Verbose   bool   `short:"v" group:"Logging" help:"Shorthand for --log-level=debug, which also shows live captions on stdout."`
-	Quiet     bool   `short:"q" group:"Logging" help:"Suppress captions and status line; warnings and errors only."`
-	NoColor   bool   `env:"NO_COLOR" group:"Logging" help:"Disable coloured output."`
+	Version  kong.VersionFlag `help:"Print version and exit."`
+	LogLevel string           `enum:"debug,info,warn,error" default:"info" group:"Logging" help:"Diagnostic verbosity. debug also prints the live caption stream to stdout."`
+	Verbose  bool             `short:"v" group:"Logging" help:"Shorthand for --log-level=debug, which also shows live captions on stdout."`
+	NoColor  bool             `env:"NO_COLOR" group:"Logging" help:"Disable coloured output."`
 }
 
 // STTFlags configure the speech-to-text backend.
 type STTFlags struct {
-	Engine   string   `default:"deepgram" enum:"deepgram,mock,mock-2" group:"Speech-to-text" help:"Recognizer to use. 'mock' runs offline with no API cost; 'mock-2' additionally demonstrates auto-pause offline."`
+	Engine   string   `default:"deepgram" enum:"deepgram,mock" group:"Speech-to-text" help:"Recognizer to use. 'mock' runs offline with no API cost."`
 	APIKey   string   `env:"DEEPGRAM_API_KEY" group:"Speech-to-text" help:"Deepgram API key."`
 	Model    string   `default:"nova-3" group:"Speech-to-text" help:"Deepgram model."`
 	Language string   `default:"en-US" group:"Speech-to-text" help:"Recognition language."`
 	Keyterm  []string `group:"Speech-to-text" help:"Proper noun to bias recognition toward. Repeatable."`
 
 	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`
-	SilenceDB   float64       `name:"silence-threshold-db" default:"-45" group:"Speech-to-text" help:"dBFS at or below which audio counts as silence."`
 	SilenceHold time.Duration `name:"silence-hold" default:"60s" group:"Speech-to-text" help:"How long the audio must stay silent before the connection is paused."`
-
-	// SpeechBreak is the venue-tuned speech-timing threshold, plumbed into
-	// caption.NewHub. Deepgram's own endpointing is deliberately not set:
-	// prefixTracker (see stt/deepgram/prefix.go) drives cadence off interim
-	// results, so the server-side setting no longer governs when text lands.
-	SpeechBreak time.Duration `name:"speech-break" default:"1.5s" group:"Speech-to-text" help:"Pause that counts as the speaker actually stopping. Breaks the caption row and closes a transcript line."`
 }
 
-// Validate rejects silence-detection and speech-timing settings that can't
-// work.
+// Validate rejects a silence hold that can't work.
 func (f *STTFlags) Validate() error {
-	// The gate counts a frame as silence at or below the threshold, so 0 dBFS
-	// — full scale — would classify every frame as silence and the session
-	// would sit paused forever without transcribing a word. At the other
-	// end, -100 is the floor RMSDBFS clamps digital silence to, so nothing
-	// can fall below it.
-	if f.SilenceDB >= 0 || f.SilenceDB <= -100 {
-		return fmt.Errorf("--silence-threshold-db must be between -100 and 0, exclusive (got %g): "+
-			"0 dBFS is full scale, so a threshold there would treat all audio as silence", f.SilenceDB)
-	}
 	if f.SilenceHold <= 0 {
 		return fmt.Errorf("--silence-hold must be positive (got %s)", f.SilenceHold)
-	}
-	// Below 200ms it fires on breaths; above 10s it never fires at all and
-	// the transcript falls back to the maxUtteranceChars guard.
-	if f.SpeechBreak < 200*time.Millisecond || f.SpeechBreak > 10*time.Second {
-		return fmt.Errorf("--speech-break must be between 200ms and 10s (got %s)", f.SpeechBreak)
 	}
 	return nil
 }
 
 // ServerFlags configure the caption web server.
 type ServerFlags struct {
-	Addr      string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages."`
-	Lines     int    `default:"3" group:"Server" help:"Caption rows visible on the viewer page."`
-	Logo      string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
-	Open      bool   `group:"Server" help:"Open the viewer in a browser on start."`
-	DevStatic string `hidden:"" group:"Server" help:"Serve web assets from this directory instead of the embedded copy."`
-	MDNSName  string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
+	Addr     string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages."`
+	Lines    int    `default:"3" group:"Server" help:"Caption rows visible on the viewer page."`
+	Logo     string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
+	MDNSName string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
 }
 
 // OutputFlags configure transcript recording, which is on by default.
@@ -92,38 +66,14 @@ type OutputFlags struct {
 	NoTranscript  bool   `group:"Output" help:"Disable transcript recording for this session."`
 }
 
-// AudioFlags are shared between replay and live.
-type AudioFlags struct {
-	ChunkMS int `name:"chunk-ms" default:"100" group:"Audio" help:"PCM chunk size sent downstream, in milliseconds."`
-}
-
 // ReplayCmd streams an audio file through the pipeline at wall-clock rate.
 type ReplayCmd struct {
-	File  string  `arg:"" type:"existingfile" help:"Audio file to replay."`
-	Speed float64 `default:"1.0" group:"Audio" help:"Rate multiplier. 1.0 = true live rate. Must be 1.0 with --monitor."`
-	Loop  bool    `group:"Audio" help:"Restart the file on EOF, for soak testing."`
+	File    string `arg:"" type:"existingfile" help:"Audio file to replay."`
+	Monitor bool   `group:"Monitor" help:"Play the streamed audio over speakers to judge caption delay by ear."`
 
-	Monitor        bool   `group:"Monitor" help:"Play the streamed audio over speakers to judge caption delay by ear."`
-	MonitorDevice  string `default:"default" group:"Monitor" help:"Playback device (pulse sink or ALSA device)."`
-	MonitorBackend string `default:"pulse" enum:"pulse,alsa" group:"Monitor" help:"Playback backend."`
-	MonitorBufMS   int    `name:"monitor-buffer-ms" default:"80" group:"Monitor" help:"Playback buffer; adds this much to perceived delay."`
-
-	AudioFlags  `embed:""`
 	STTFlags    `embed:""`
 	ServerFlags `embed:""`
 	OutputFlags `embed:""`
-}
-
-// Validate rejects the one flag combination that cannot work.
-func (c *ReplayCmd) Validate() error {
-	if c.Monitor && c.Speed != 1.0 {
-		return fmt.Errorf("--monitor requires --speed 1.0 (got %g): the sound card drains at "+
-			"wall-clock rate, so any other speed just overflows the playback buffer", c.Speed)
-	}
-	if c.Speed <= 0 {
-		return fmt.Errorf("--speed must be positive (got %g)", c.Speed)
-	}
-	return nil
 }
 
 // LiveCmd captures from an audio device.
@@ -131,7 +81,6 @@ type LiveCmd struct {
 	Device  string `required:"" group:"Audio" help:"Capture device. Run 'livecaption devices' to list."`
 	Backend string `default:"pulse" enum:"pulse,alsa" group:"Audio" help:"Capture backend."`
 
-	AudioFlags  `embed:""`
 	STTFlags    `embed:""`
 	ServerFlags `embed:""`
 	OutputFlags `embed:""`
@@ -139,14 +88,6 @@ type LiveCmd struct {
 
 // DevicesCmd lists capture inputs.
 type DevicesCmd struct{}
-
-// VersionCmd prints the version.
-type VersionCmd struct{}
-
-func (c *VersionCmd) Run() error {
-	fmt.Println("livecaption", Version)
-	return nil
-}
 
 // Parse builds the kong context.
 func Parse(args []string) (*kong.Context, *CLI, error) {

@@ -98,7 +98,7 @@ func TestAnchorIndex_Clamp(t *testing.T) {
 		idx.Add(3200, stamp, stamp)
 	}
 
-	written := audio.PipelineFormat.Duration(int(idx.Written()))
+	written := audio.PipelineFormat.Duration(5 * 3200)
 	got, gotSent, ok := idx.At(written + 10*time.Millisecond)
 	if !ok {
 		t.Fatal("At(written+10ms) reported not ok, want clamp to newest entry")

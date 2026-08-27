@@ -67,13 +67,11 @@ error accumulates; over a 32-minute file that drift is large enough to invalidat
 With absolute deadlines a slow iteration is corrected by the next one. `TestFileSourcePacing`
 asserts media time and wall time stay within tolerance.
 
-`--speed` scales the interval for quick dry runs. `--loop` restarts for soak tests.
-
 ### Chunk size
 
-`--chunk-ms`, default **100 ms** (3200 bytes). Inside Deepgram's recommended 20–250 ms payload
-range: small enough not to add meaningful latency, large enough to avoid one WebSocket frame every
-20 ms.
+`chunkSize` in `internal/audio/source.go`: **100 ms** (3200 bytes). Inside Deepgram's recommended
+20–250 ms payload range — small enough not to add meaningful latency, large enough to avoid one
+WebSocket frame every 20 ms. Fixed rather than configurable; no run ever wanted a different value.
 
 ### Live hardening
 
@@ -88,21 +86,18 @@ The capture path can degrade in ways that don't stop the audio, so each has a co
 ### Monitor playback (`replay --monitor`)
 
 To judge caption delay you need to hear the audio while watching the text land. The tap point is
-the design decision: playing the original file with a separate player would drift against our
-scheduler and ignore `--speed`. Instead the monitor **tees the exact frames already emitted** into
-a second ffmpeg writing to the speakers.
+the design decision: playing the original file with a separate player would drift against our own
+release scheduler. Instead the monitor **tees the exact frames already emitted** into a second
+ffmpeg writing to the speakers.
 
 So what you hear is bit-identical to what the recognizer receives, released by the same clock. It's
 the 16 kHz mono downmix, which is the point — bad source audio becomes *audible* instead of being
 inferred from bad transcripts.
 
-Two honesty constraints:
-
-- **`--monitor` requires `--speed 1.0`.** The sink drains at a fixed 16000 samples/sec; at 2× the
-  buffer would overflow continuously. Rejected at parse time with an explanatory error.
-- **Playback adds a fixed ~80 ms buffer**, so perceived delay *overstates* true caption latency by
-  that much. The figure is printed in the banner rather than hidden, and `/admin` reports measured
-  latency for comparison.
+One honesty constraint: **playback adds a fixed ~80 ms buffer**, so perceived delay *overstates*
+true caption latency by that much. The figure is printed in the banner rather than hidden, and
+`/admin` reports measured latency for comparison. Playback goes to the default pulse sink; a
+different sink means editing `Monitor.Start`.
 
 The tap is a non-blocking send: a stalled sound card drops monitor frames
 (`monitor_frames_dropped_total`) and never touches the caption path. A dead playback process is a
@@ -129,7 +124,7 @@ local whisper.cpp touches no existing file.
 ever emits text it will not revise, so there is nothing left to flag as final. It carries `Text`,
 media-time `Start`/`Duration` for ordering, display, and gap arithmetic (§4), `Confidence`, and
 `CapturedAt`/`ReceivedAt`/`SentAt` — the wall-clock instants latency is actually measured from (see
-section 6) — so replay and live measure latency identically regardless of `--speed`. Structure
+section 6) — so replay and live measure latency identically. Structure
 (when a display row breaks, when a transcript line closes) is derived downstream in the hub, not
 reported by the engine.
 
@@ -169,13 +164,14 @@ exactly the same rate as speech. Auto-pause (`internal/stt/gate.go`) closes the 
 connection entirely during a confirmed stretch of silence and reopens it when audio returns, so
 dead air costs nothing.
 
-Silence is detected per frame as RMS level in dBFS, compared against `--silence-threshold-db`
-(default **-45**). A single quiet frame doesn't pause anything — the `Gate` requires the level to
-stay at or below the threshold for `--silence-hold` (default **60 s**) of *continuous media time*
-before flipping inactive, and resume is instant on the next frame that crosses back above
-threshold. Media time, not wall clock, is what `Observe` keys off (frame offsets, same as
-everywhere else in the pipeline) so a hold period behaves identically whether audio is arriving
-live or via `replay --speed 20`, and is deterministic in tests.
+Silence is detected per frame as RMS level in dBFS, compared against `silenceThresholdDB`
+(**-45**, a constant in `gate.go` — calibrated against the soundboard feed, so a materially
+different input level needs it moved). A single quiet frame doesn't pause anything — the `Gate`
+requires the level to stay at or below the threshold for `--silence-hold` (default **60 s**) of
+*continuous media time* before flipping inactive, and resume is instant on the next frame that
+crosses back above threshold. Media time, not wall clock, is what `Observe` keys off (frame
+offsets, same as everywhere else in the pipeline) so a hold period behaves identically whether
+audio arrives live or from a replayed file, and is deterministic in tests.
 
 The pause **closes the WebSocket**, it doesn't just stop writing to it. Deepgram does document
 `KeepAlive` as a way to hold a connection open without being charged for the idle time, so simply
@@ -199,22 +195,14 @@ that's mistuned for a noisy room — are visible rather than inferred from a Dee
 
 Emits canned phrases as settled, punctuated segments — clause-sized chunks separated by realistic
 gaps, only the last segment of a phrase carrying terminal punctuation — driven entirely by media
-time from the frames, never wall clock, so output is identical at any `--speed` and reproducible in
-tests. The inter-phrase gap (2s) is deliberately above `--speech-break`'s default (1.5s), so the
-mock exercises the pause break the same way a real room does. This is what the web layer is
-developed against.
+time from the frames, never wall clock, so output is reproducible in tests. The inter-phrase gap
+(2s) is deliberately above `breakGap` (1.5s), so the mock exercises the pause break the same way a
+real room does. This is what the web layer is developed against.
 
-### Mock-2 (`--engine mock-2`)
-
-`mock` never goes quiet — it's continuous canned speech — so it can't exercise auto-pause, and a
-real recording good enough to contain a genuine 60 s silence is an awkward thing to keep around
-just for that. `mock-2` solves this by driving the *real* `Gate` with a synthetic level schedule
-instead of real frame RMS: 20 s loud, then silent for the configured `--silence-hold` plus 20 s
-(so the hold is always reached and the paused state stays visible for a while, whichever hold is
-configured), repeating, still keyed off media time via `Gate.ObserveLevel`. Point `replay` at any
-file with `--engine mock-2` and the connection will pause and resume on a predictable cadence
-regardless of what the audio actually contains — enough to see the behavior end to end, and to
-write engine-level tests against it, without paying for a single second of real Deepgram usage.
+`mock` never goes quiet, so it cannot exercise auto-pause end to end. That path is covered by the
+gate's own unit tests (`internal/stt/gate_test.go`) and by the engine-level pause tests in
+`internal/stt/deepgram/deepgram_test.go`, which drive real silent PCM through a fake WebSocket
+server — closer to the real thing than a synthetic level schedule was.
 
 ---
 
@@ -231,7 +219,7 @@ these settled segments into a display and a transcript.
 
 This is the part that drives every other decision, so it comes first.
 
-**Text rolls.** Segments arrive ~100ms behind the speaker (`--endpointing`) and append to the
+**Text rolls.** Segments arrive as soon as the prefix tracker calls them stable and append to the
 current row. When the next word doesn't fit, the row freezes, the stack glides up one, and the word
 starts the new row. Rows are always full edge to edge.
 
@@ -241,7 +229,7 @@ starts the new row. Rows are always full edge to edge.
 | a few announcements before the   |   <- filling
 ```
 
-**A real pause breaks the row.** The speaker stops for at least `--speech-break` (default 1.5s).
+**A real pause breaks the row.** The speaker stops for at least `breakGap` (1.5s).
 The current row freezes where it is, even half-full, and the stack glides. New speech starts clean:
 
 ```
@@ -263,8 +251,8 @@ Splitting them is the core of the redesign:
 
 | job | signal | why |
 |---|---|---|
-| flush text to screen | every `is_final` segment (`--endpointing`, default 100ms) | fastest never-revised text there is |
-| break a display row | row width, **or** a `--speech-break` gap (default 1.5s) | a caption stack should read as continuous, and reset only when the speaker actually stops |
+| flush text to screen | every stable-prefix segment from `prefixTracker` | fastest never-revised text there is |
+| break a display row | row width, **or** a `breakGap` gap (1.5s) | a caption stack should read as continuous, and reset only when the speaker actually stops |
 | close a transcript line | terminal punctuation, or that same gap, or a 1000-char guard | a file read later wants sentences; a screen watched live wants continuity |
 
 The gap is free: `stt.Transcript` already carries `Start` and `Duration`, so the hub computes
@@ -293,7 +281,7 @@ on its own and receives a fresh snapshot, so the cost of a drop is one round tri
 History is capped at 20 lines for late-joiner snapshots — far more than the 3 rows a viewer shows,
 and the snapshot event is now its only reader (`Hub.Snapshot()` had no other callers and is gone).
 
-### `--endpointing` / `--speech-break`
+### Recognizer cadence vs. `breakGap`
 
 The two speech-timing thresholds plumb to different places — `Endpointing` into `stt.Config`
 (Deepgram's own chunking), `SpeechBreak` into `caption.NewHub` (the hub's gap arithmetic) — but
@@ -301,9 +289,9 @@ they get tuned together at a venue, so they live in one `Speech-to-text` flag gr
 validated against each other: `SpeechBreak` must stay comfortably above `Endpointing`
 (`STTFlags.Validate` in `internal/cli/cli.go`), or every chunk Deepgram commits to would also count
 as a pause, and the display goes back to being ragged — the exact bug an early draft of this design
-shipped before the check existed. Concretely: `Endpointing` sets how fast text lands on screen;
-`SpeechBreak` sets when a pause is meaningful enough to freeze a row and close a line. Conflating
-them is what fragmented the transcript before this split.
+shipped before the check existed. Concretely: the prefix tracker sets how fast text lands on
+screen; `breakGap` sets when a pause is meaningful enough to freeze a row and close a line.
+Conflating them is what fragmented the transcript before this split.
 
 ### Signals we deliberately don't use
 
@@ -321,10 +309,10 @@ reversal:
 2. **`punctuate` / `smart_format`** — kept, but no longer cosmetic: they are what lets `closeLocked`
    detect terminal punctuation, so turning them off would silently degrade `transcript.txt` to the
    speech-gap fallback for every sentence.
-3. **`speech_final`** — deliberately unused as an utterance boundary. At `--endpointing=100ms` it
+3. **`speech_final`** — deliberately unused as an utterance boundary. At a short endpointing window it
    fires on every small hesitation; treating it as a boundary would shred `transcript.txt` into
    fragments, which is exactly what an earlier draft of this design did before the mistake was
-   caught. It only becomes meaningful again if `--endpointing` is raised toward something closer to
+   caught. It only becomes meaningful again if server-side endpointing is raised toward something closer to
    a full utterance pause, at which point revisiting it might be worthwhile.
 4. **Interim results themselves (`is_final: false`)** — the whole point of this design: no revised
    text ever reaches the hub, so there is nothing to diff. `decodeTranscript` keeps one guard,
@@ -377,7 +365,7 @@ latency-relevant to some viewer measurement.
 the wording shown for it ("no audio" on the viewer, "paused (no audio)" on `/admin`) is a
 presentation decision that belongs to each page, not something baked into the wire event.
 
-Pages are `//go:embed`-ed so the binary ships standalone; `--dev-static` serves from disk while
+Pages are `//go:embed`-ed so the binary ships standalone; `go run` picks up edits while
 iterating.
 
 **Viewer.** The page typesets itself instead of trusting the browser to wrap: one
@@ -585,7 +573,7 @@ event.
 
 `github.com/alecthomas/kong`. Struct tags declare env binding, enum validation, file-existence
 checks (`--logo`, like `replay`'s file argument) and grouped help, removing a page of hand-written
-validation. Subcommands rather than a `--source` flag, because replay and live take genuinely
+validation. Subcommands rather than one flag selecting a source, because replay and live take genuinely
 disjoint options.
 
 ```bash
@@ -610,7 +598,7 @@ splits cleanly and piping never mixes the two.
 `internal/ui` owns the terminal behind one mutex — the status line and the log handler both target
 stderr, and without a single owner they interleave into garbage.
 
-`--log-format=auto` resolves by TTY detection:
+Log rendering resolves by TTY detection:
 
 | | captions | status line | logs |
 |---|---|---|---|
@@ -620,7 +608,6 @@ stderr, and without a single owner they interleave into garbage.
 ```
 livecaption 0.1.0
   source      replay  recording.mp3 (31:51, 44100 Hz stereo -> 16000 Hz mono)
-  speed       1x (wall-clock)
   monitor     pulse:default (~80ms buffer)   perceived delay overstates actual by this much
   stt         deepgram  model=nova-3  language=en-US
   transcript  ./transcripts/2026-08-19T09-31-05
@@ -633,7 +620,7 @@ ready — Ctrl-C to stop
 ```
 
 **Only closed transcript lines are printed to the terminal, never individual segments** — at
-`--endpointing=100ms` a line can be several segments, and printing each as it lands would flood the
+a stable-prefix cadence a line can be several segments, and printing each as it lands would flood the
 scrollback; the web page is what the segment-by-segment view is for.
 
 Log levels, each earning its place:
@@ -657,9 +644,9 @@ No per-frame logging at any level — at 100 ms chunks that's 10 lines/sec of no
   biggest lever, and costs nothing.
 - **Deepgram bills by streamed audio duration**, and replay at 1.0× costs exactly what live costs.
   Use `--engine mock` for all UI work.
-- If captions feel late, `--endpointing` is the knob: lower puts text on screen sooner in smaller
+- If captions feel late, `holdbackTokens` in `prefix.go` is the knob: lower puts text on screen sooner in smaller
   pieces, at the cost of `segments_total / lines_total` climbing on `/admin` as phrases fragment.
-  `--speech-break` is the companion knob for when a pause reads as a paragraph break rather than a
+  `breakGap` is the companion knob for when a pause reads as a paragraph break rather than a
   breath — see §4. Tune both by ear with `--monitor` *before* the event.
 - 401 on first connect is the most likely first-run failure — check `DEEPGRAM_API_KEY`.
 
@@ -670,7 +657,7 @@ cmd/livecaption/main.go     entrypoint, signal handling
 internal/cli/               kong command tree, shared wiring
 internal/ui/                terminal ownership, slog handler
 internal/audio/             Source interface, ffmpeg plumbing, file/device/monitor
-internal/stt/               Engine interface + registry; deepgram/, mock/
+internal/stt/               Engine interface + silence gate; deepgram/, mock/
 internal/caption/           hub (utterance assembly, fan-out), transcript writer
 internal/metrics/           counters, windowed latency series, snapshot
 internal/web/               routes, SSE, embedded viewer + admin pages

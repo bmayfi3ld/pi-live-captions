@@ -3,6 +3,7 @@
 package caption
 
 import (
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -67,6 +68,17 @@ const subscriberBuffer = 16
 // unpunctuated ramble can't grow a single line without bound.
 const maxUtteranceChars = 1000
 
+// breakGap is how long the audio must go quiet before it counts as the
+// speaker actually stopping, rather than drawing breath. It drives both the
+// viewer's row break and the transcript's fallback line break.
+//
+// Deliberately far above Deepgram's own endpointing window: that decides how
+// big a chunk the recognizer commits to, while this decides when a pause is
+// meaningful to a reader. Conflating the two is what made an earlier draft of
+// this change fragment the transcript. Venue-tuned — a room with a slow
+// speaker wants it longer.
+const breakGap = 1500 * time.Millisecond
+
 // Hub assembles utterances and broadcasts them.
 //
 // The engine only emits settled, never-revised segments (see stt.Transcript),
@@ -86,15 +98,6 @@ type Hub struct {
 	// prevEnd is the media time the last segment covered, so the gap to the
 	// next one can be measured without a clock.
 	prevEnd time.Duration
-	// breakGap is how long the audio must go quiet before it counts as the
-	// speaker actually stopping, rather than drawing breath. It drives both
-	// the viewer's row break and the transcript's fallback line break.
-	//
-	// Deliberately far above --endpointing: endpointing decides how big a
-	// chunk Deepgram commits to (100ms, so text lands fast), while this
-	// decides when a pause is meaningful to a reader. Conflating the two is
-	// what made an earlier draft of this change fragment the transcript.
-	breakGap time.Duration
 	// lastState/lastDetail are the most recent status published via
 	// PublishStatus. Subscribe replays them into the snapshot event so a
 	// client that connects (or reconnects) mid-pause learns the current
@@ -109,8 +112,8 @@ type Hub struct {
 	OnFinal func(Line)
 }
 
-func NewHub(m *metrics.Metrics, breakGap time.Duration) *Hub {
-	return &Hub{subs: make(map[chan Event]struct{}), metrics: m, breakGap: breakGap}
+func NewHub(m *metrics.Metrics) *Hub {
+	return &Hub{subs: make(map[chan Event]struct{}), metrics: m}
 }
 
 // Publish feeds one settled segment into the hub. The straight-line shape
@@ -177,7 +180,7 @@ func (h *Hub) Publish(t stt.Transcript) {
 // Callers must hold h.mu.
 func (h *Hub) isBreakLocked(t stt.Transcript) bool {
 	gap := t.Start - h.prevEnd
-	return gap < 0 || gap >= h.breakGap
+	return gap < 0 || gap >= breakGap
 }
 
 // closeLocked ends the open transcript line. Three signals, each suited to
@@ -202,7 +205,7 @@ func (h *Hub) closeLocked(broke bool) (Line, bool) {
 
 	h.uttSeq++
 	line := Line{
-		ID:       "u" + itoa(h.uttSeq),
+		ID:       "u" + strconv.FormatInt(h.uttSeq, 10),
 		Text:     h.committed,
 		OffsetMS: h.uttStart.Milliseconds(),
 		At:       time.Now(),
@@ -357,18 +360,4 @@ func joinText(a, b string) string {
 	default:
 		return a + " " + b
 	}
-}
-
-func itoa(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }

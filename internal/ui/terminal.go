@@ -45,7 +45,6 @@ type Terminal struct {
 	err   io.Writer // stderr: everything else
 	tty   bool      // stderr is a terminal, so ANSI and a status line are safe
 	color bool
-	quiet bool
 
 	// suppressCaptions hides the live caption stream from stdout, e.g. at the
 	// default log level; the transcript file still records every line.
@@ -62,7 +61,6 @@ type Options struct {
 	Out, Err         io.Writer
 	TTY              bool
 	Color            bool
-	Quiet            bool
 	SuppressCaptions bool
 }
 
@@ -78,7 +76,6 @@ func NewTerminal(o Options) *Terminal {
 		err:              o.Err,
 		tty:              o.TTY,
 		color:            o.Color && o.TTY,
-		quiet:            o.Quiet,
 		suppressCaptions: o.SuppressCaptions,
 		done:             make(chan struct{}),
 	}
@@ -98,7 +95,7 @@ func (t *Terminal) c(code, s string) string {
 // what the web page is for. Hidden below --log-level=debug (see
 // suppressCaptions); the transcript file gets the line regardless.
 func (t *Terminal) Caption(offset time.Duration, text string) {
-	if t.quiet || t.suppressCaptions {
+	if t.suppressCaptions {
 		return
 	}
 	t.mu.Lock()
@@ -133,9 +130,6 @@ type BannerField struct {
 // Banner prints the startup block, so misconfiguration is visible before any
 // audio flows.
 func (t *Terminal) Banner(title string, fields []BannerField) {
-	if t.quiet {
-		return
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -158,9 +152,6 @@ func (t *Terminal) Banner(title string, fields []BannerField) {
 
 // Ready prints the "listening now" line that ends startup.
 func (t *Terminal) Ready(msg string) {
-	if t.quiet {
-		return
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	fmt.Fprintln(t.err, t.c(ansiDim, msg))
@@ -172,7 +163,7 @@ func (t *Terminal) Ready(msg string) {
 // no-op when stderr is not a terminal: ANSI cursor moves are garbage in a log
 // file or a systemd journal.
 func (t *Terminal) StartStatus(snapshot func() metrics.Snapshot) {
-	if !t.tty || t.quiet {
+	if !t.tty {
 		return
 	}
 	go func() {
@@ -208,7 +199,7 @@ func (t *Terminal) hideStatusLocked() {
 }
 
 func (t *Terminal) showStatusLocked() {
-	if t.tty && !t.quiet && !t.stopped && t.statusText != "" {
+	if t.tty && !t.stopped && t.statusText != "" {
 		fmt.Fprint(t.err, t.statusText)
 		t.statusShown = true
 	}
@@ -296,9 +287,6 @@ func (t *Terminal) stateGlyph(state string, reconnects int64) string {
 // page uses so the two can never disagree.
 func (t *Terminal) Summary(s metrics.Snapshot, monitorEnabled bool) {
 	t.StopStatus()
-	if t.quiet {
-		return
-	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

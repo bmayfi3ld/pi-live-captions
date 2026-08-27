@@ -34,24 +34,6 @@ func TestCaptionsAndLogsNeverMix(t *testing.T) {
 	}
 }
 
-// TestQuietSuppressesCaptions covers --quiet: captions must not reach stdout
-// at all, not merely be muted on the status line.
-func TestQuietSuppressesCaptions(t *testing.T) {
-	var out, errBuf bytes.Buffer
-	term := NewTerminal(Options{Out: &out, Err: &errBuf, Quiet: true})
-
-	term.Caption(time.Second, "should not appear")
-	term.Banner("title", []BannerField{{Label: "x", Value: "y"}})
-	term.Ready("ready")
-
-	if out.Len() != 0 {
-		t.Errorf("stdout should be empty under --quiet, got %q", out.String())
-	}
-	if errBuf.Len() != 0 {
-		t.Errorf("stderr should be empty under --quiet (banner/ready suppressed too), got %q", errBuf.String())
-	}
-}
-
 // TestSuppressCaptionsHidesLiveStream covers the default (info-level) case:
 // captions must not reach stdout when SuppressCaptions is set, e.g. from
 // Setup() at anything above debug level, but plain Options{} (its zero value)

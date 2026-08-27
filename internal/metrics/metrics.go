@@ -63,11 +63,9 @@ type Metrics struct {
 	xruns          atomic.Int64
 
 	// Monitor (replay --monitor only).
-	MonitorEnabled  bool
-	MonitorDevice   string
-	MonitorBufferMS int
-	monitorDropped  atomic.Int64
-	monitorAlive    atomic.Bool
+	MonitorEnabled bool
+	monitorDropped atomic.Int64
+	monitorAlive   atomic.Bool
 
 	// STT.
 	Engine         string
@@ -225,30 +223,21 @@ func (m *Metrics) markDegradedLocked() {
 	m.lastDegradedAt = time.Now()
 }
 
-func (m *Metrics) DropFrame() {
-	m.framesDropped.Add(1)
+// degrade increments a silent-degradation counter and stamps the health
+// badge's recency window in one step. Every counter that means "something
+// went wrong quietly" goes through here, so none can be bumped without the
+// badge noticing.
+func (m *Metrics) degrade(c *atomic.Int64) {
+	c.Add(1)
 	m.mu.Lock()
 	m.markDegradedLocked()
 	m.mu.Unlock()
 }
-func (m *Metrics) FFmpegRestart() {
-	m.ffmpegRestarts.Add(1)
-	m.mu.Lock()
-	m.markDegradedLocked()
-	m.mu.Unlock()
-}
-func (m *Metrics) Xrun() {
-	m.xruns.Add(1)
-	m.mu.Lock()
-	m.markDegradedLocked()
-	m.mu.Unlock()
-}
-func (m *Metrics) MonitorDrop() {
-	m.monitorDropped.Add(1)
-	m.mu.Lock()
-	m.markDegradedLocked()
-	m.mu.Unlock()
-}
+
+func (m *Metrics) DropFrame()             { m.degrade(&m.framesDropped) }
+func (m *Metrics) FFmpegRestart()         { m.degrade(&m.ffmpegRestarts) }
+func (m *Metrics) Xrun()                  { m.degrade(&m.xruns) }
+func (m *Metrics) MonitorDrop()           { m.degrade(&m.monitorDropped) }
 func (m *Metrics) SetMonitorAlive(v bool) { m.monitorAlive.Store(v) }
 
 func (m *Metrics) SetLastStderr(s string) {
@@ -272,12 +261,7 @@ func (m *Metrics) SetSTTState(s ConnState) {
 	}
 }
 func (m *Metrics) STTState() ConnState { return ConnState(m.sttState.Load()) }
-func (m *Metrics) STTReconnect() {
-	m.sttReconnect.Add(1)
-	m.mu.Lock()
-	m.markDegradedLocked()
-	m.mu.Unlock()
-}
+func (m *Metrics) STTReconnect()       { m.degrade(&m.sttReconnect) }
 
 // STTSegment counts a caption segment painted to the display. Kept
 // deliberately distinct from STTLine: segments_total / lines_total is the
@@ -294,12 +278,7 @@ func (m *Metrics) STTBytesSent(n int) { m.sttBytesSent.Add(int64(n)) }
 // while the gate was active — i.e. the link is not keeping up with live
 // audio, not the pre-roll buffer discarding stale silence during a pause.
 // See ring.push in internal/stt/deepgram/deepgram.go for the gating logic.
-func (m *Metrics) STTBufferDrop() {
-	m.sttBufferDrops.Add(1)
-	m.mu.Lock()
-	m.markDegradedLocked()
-	m.mu.Unlock()
-}
+func (m *Metrics) STTBufferDrop() { m.degrade(&m.sttBufferDrops) }
 
 // SetSTTStateHook registers a callback invoked when the STT state changes.
 // Set once before the session starts; called from engine goroutines, so the
@@ -392,14 +371,9 @@ func (m *Metrics) SSEConnect() {
 	m.sseClients.Add(1)
 	m.sseClientsTotal.Add(1)
 }
-func (m *Metrics) SSEDisconnect() { m.sseClients.Add(-1) }
-func (m *Metrics) SSEEvent()      { m.sseEvents.Add(1) }
-func (m *Metrics) SSESlowDrop() {
-	m.sseSlowDrops.Add(1)
-	m.mu.Lock()
-	m.markDegradedLocked()
-	m.mu.Unlock()
-}
+func (m *Metrics) SSEDisconnect()  { m.sseClients.Add(-1) }
+func (m *Metrics) SSEEvent()       { m.sseEvents.Add(1) }
+func (m *Metrics) SSESlowDrop()    { m.degrade(&m.sseSlowDrops) }
 func (m *Metrics) SSEClients() int { return int(m.sseClients.Load()) }
 
 // --- Transcript ---
@@ -451,11 +425,9 @@ type Snapshot struct {
 	} `json:"source"`
 
 	Monitor struct {
-		Enabled       bool   `json:"enabled"`
-		Device        string `json:"device"`
-		BufferMS      int    `json:"buffer_ms"`
-		Alive         bool   `json:"alive"`
-		FramesDropped int64  `json:"frames_dropped_total"`
+		Enabled       bool  `json:"enabled"`
+		Alive         bool  `json:"alive"`
+		FramesDropped int64 `json:"frames_dropped_total"`
 	} `json:"monitor"`
 
 	STT struct {
@@ -519,25 +491,6 @@ type Snapshot struct {
 	Goroutines int `json:"goroutines"`
 }
 
-// Clean reports whether the session had zero silent-degradation events, front
-// to back — the cumulative whole-session verdict, unlike Health above, which
-// is a live, recency-windowed snapshot of what's happening right now and is
-// what actually drives the /admin badge. No caller in this codebase reads
-// Clean today: the shutdown summary flags each counter individually via its
-// own amber() check so a specific problem is named instead of a single "not
-// clean" bit. It remains the one-shot verdict for a caller that just wants a
-// yes/no over the whole session.
-func (s *Snapshot) Clean() bool {
-	return s.Source.FramesDropped == 0 &&
-		s.Source.FFmpegRestarts == 0 &&
-		s.Source.Xruns == 0 &&
-		s.Monitor.FramesDropped == 0 &&
-		s.STT.Reconnects == 0 &&
-		s.STT.BufferDrops == 0 &&
-		s.Web.SlowDrops == 0 &&
-		s.Transcript.LastError == ""
-}
-
 func (m *Metrics) Snapshot() Snapshot {
 	// Full Lock, not RLock: stats() calls trim() on each series, which
 	// mutates it. Trimming on read is what makes an idle session's window
@@ -581,8 +534,6 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.Source.LastStderr = lastStderr
 
 	s.Monitor.Enabled = m.MonitorEnabled
-	s.Monitor.Device = m.MonitorDevice
-	s.Monitor.BufferMS = m.MonitorBufferMS
 	s.Monitor.Alive = m.monitorAlive.Load()
 	s.Monitor.FramesDropped = m.monitorDropped.Load()
 

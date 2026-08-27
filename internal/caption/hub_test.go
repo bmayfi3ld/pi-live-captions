@@ -9,13 +9,12 @@ import (
 	"livecaption/internal/stt"
 )
 
-// testBreakGap is a deliberately explicit gap, not the package default, so
-// these tests are immune to that default changing and so the boundary tests
-// can pick round numbers on either side of it.
-const testBreakGap = 500 * time.Millisecond
+// testBreakGap aliases the package constant so the boundary tests below read
+// as statements about the real threshold rather than a number they chose.
+const testBreakGap = breakGap
 
 func newTestHub() *Hub {
-	return NewHub(metrics.New("test", "test"), testBreakGap)
+	return NewHub(metrics.New("test", "test"))
 }
 
 func drain(ch <-chan Event) []Event {
@@ -296,7 +295,7 @@ func TestFlushClosesPendingUtterance(t *testing.T) {
 // all the way back to capture.
 func TestSlowSubscriberIsDropped(t *testing.T) {
 	m := metrics.New("test", "test")
-	h := NewHub(m, testBreakGap)
+	h := NewHub(m)
 
 	sub, unsub := h.Subscribe()
 	defer unsub()

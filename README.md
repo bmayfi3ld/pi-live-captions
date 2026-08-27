@@ -11,15 +11,13 @@ captioning. See [DESIGN.md](DESIGN.md) for the architecture and the reasoning be
 - A [Deepgram](https://deepgram.com) API key, set via `DEEPGRAM_API_KEY` or `--api-key`
 
 `--engine mock` needs neither a key nor network access — it emits canned transcripts driven by
-media time, which is what makes the tool testable without hardware or API spend. `--engine mock-2`
-does the same but additionally drives auto-pause (see below) on a fixed schedule, for exercising
-that behavior offline.
+media time, which is what makes the tool testable without hardware or API spend.
 
 ## Build
 
 ```bash
 go build -o livecaption ./cmd/livecaption
-./livecaption version
+./livecaption --version
 ```
 
 Or run directly with `go run ./cmd/livecaption <command>`.
@@ -46,16 +44,9 @@ livecaption replay recording.mp3 --engine mock --no-transcript
 ```
 
 This is the primary development loop: no API key, no network, no Deepgram spend, and output is
-reproducible at any `--speed` since the mock engine is driven by media time, not the wall clock.
-`--speed 20` blows through a half-hour file in under two minutes for a quick sanity check;
-`--loop` restarts on EOF for soak testing.
-
-Swap in `--engine mock-2` to see auto-pause without waiting for real silence: it drives the same
-gate that `deepgram` uses, but off a synthetic level schedule instead of the actual
-(continuous-speech) audio — 20 s loud, then silent for `--silence-hold` plus 20 s (so the hold is
-always reached and the paused state stays visible for a while, whatever `--silence-hold` is set
-to) — so the connection visibly pauses and resumes on a predictable cadence — useful for checking
-the viewer/admin/status-line indicators without an idle room to record.
+reproducible run to run since the mock engine is driven by media time, not the wall clock. The
+file is released at true wall-clock rate, so a half-hour recording takes half an hour — that is
+the point, since it is what makes the dev loop predict the live run.
 
 To judge caption delay by ear, add `--monitor`:
 
@@ -64,9 +55,9 @@ livecaption replay recording.mp3 --monitor
 ```
 
 This tees the exact frames sent to the recognizer into a second ffmpeg writing to your speakers —
-what you hear is bit-identical to what the recognizer receives. `--monitor` requires `--speed 1.0`
-(the sink drains at a fixed rate) and adds a printed ~80 ms of playback buffer, so perceived delay
-slightly overstates true caption latency. Use it to tune `--keyterm` and to get a feel for lag
+what you hear is bit-identical to what the recognizer receives. It plays to the default pulse sink
+and adds a printed ~80 ms of playback buffer, so perceived delay slightly overstates true caption
+latency. Use it to tune `--keyterm` and to get a feel for lag
 *before* an event, not during one.
 
 ### `live` — the real thing
@@ -89,32 +80,25 @@ what counts as silence and why closing rather than idling the connection). It's 
 | flag | default | effect |
 |---|---|---|
 | `--auto-pause` / `--no-auto-pause` | on | enable/disable the feature |
-| `--silence-threshold-db` | `-45` | dBFS at or below which a frame counts as silence |
 | `--silence-hold` | `60s` | how long silence has to hold (in media time) before pausing |
 
-Turn it off with `--no-auto-pause` for a venue where dead air should still keep the connection
-warm, or raise `--silence-hold` if quiet-room pauses are firing during ordinary pauses for breath.
+The silence threshold itself is fixed at -45 dBFS (`silenceThresholdDB` in `internal/stt/gate.go`);
+a materially hotter or colder feed needs that constant moved and a rebuild. Turn the feature off
+with `--no-auto-pause` for a venue where dead air should still keep the connection warm, or raise
+`--silence-hold` if pauses are firing during ordinary pauses for breath.
 `/admin` and the status line report `pauses_total` and `paused_sec` so a mistuned gate is visible
 rather than inferred from the Deepgram bill.
 
 ### Speech timing
 
-One flag to tune at a venue (see DESIGN.md §4):
-
-| flag | default | effect |
-|---|---|---|
-| `--speech-break` | `1.5s` | Pause that counts as the speaker actually stopping. Freezes the caption row where it is and closes a transcript line. |
+A pause of at least 1.5s counts as the speaker actually stopping: it freezes the caption row where
+it is and closes a transcript line. That threshold is the `breakGap` constant in
+`internal/caption/hub.go` — venue-tuned, but not a flag (see DESIGN.md §4).
 
 Deepgram's own endpointing is deliberately left unset: the engine publishes a stable prefix off
 interim results, so cadence no longer waits on the server's finalization window. Watch
 `Segments / lines` on `/admin` to check fragmentation: roughly 1–3 segments per line is healthy,
 and a ratio climbing well past that means phrases are splitting on every hesitation.
-
-### `version`
-
-```bash
-livecaption version
-```
 
 ## Transcripts
 
@@ -189,7 +173,7 @@ written to `transcripts/<session>/transcript.txt`.
 ## Troubleshooting
 
 - **401 on first connect** — check `DEEPGRAM_API_KEY` (or `--api-key`).
-- **`unknown stt engine`** — only `deepgram`, `mock`, and `mock-2` are registered; check `--engine`.
+- **`unknown stt engine`** — only `deepgram` and `mock` exist; check `--engine`.
 - **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
   / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
   fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.
@@ -199,5 +183,5 @@ written to `transcripts/<session>/transcript.txt`.
   Check the latency waterfall on `/admin` to see which leg (upload / recognize / assemble) is
   slow, and see DESIGN.md §4.
 - **First word after a quiet spell is missing/late, or the connection pauses during ordinary
-  pauses for breath** — auto-pause; loosen it with a lower `--silence-threshold-db` (more negative)
-  or a longer `--silence-hold`, or disable it with `--no-auto-pause`. See "Auto-pause" above.
+  pauses for breath** — auto-pause; loosen it with a longer `--silence-hold`, or disable it with
+  `--no-auto-pause`. See "Auto-pause" above.

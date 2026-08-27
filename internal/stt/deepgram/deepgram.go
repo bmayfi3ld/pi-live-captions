@@ -27,12 +27,6 @@ import (
 	"livecaption/internal/stt"
 )
 
-func init() {
-	stt.Register("deepgram", func(cfg stt.Config) (stt.Engine, error) {
-		return &Engine{cfg: cfg}, nil
-	})
-}
-
 const (
 	endpoint = "wss://api.deepgram.com/v1/listen"
 
@@ -73,6 +67,9 @@ type Engine struct {
 	// point it at an httptest server instead of the real API.
 	wsURL string
 }
+
+// New builds the Deepgram engine.
+func New(cfg stt.Config) *Engine { return &Engine{cfg: cfg} }
 
 func (e *Engine) Name() string { return "deepgram" }
 
@@ -130,7 +127,7 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 				return nil
 			}
 			// A pause/resume cycle is not an error: no STTReconnect or
-			// SetSTTError, since Snapshot.Clean() keys off reconnects.
+			// SetSTTError, so it never trips the /admin health badge.
 			backoff = minBackoff
 
 		default: // outcomeReconnect
@@ -473,7 +470,9 @@ func (e *Engine) dialURL() string {
 	}
 
 	q := url.Values{}
-	q.Set("encoding", encodingFor(e.cfg.Format))
+	// The pipeline is fixed at 16-bit signed samples end to end (see
+	// audio.PipelineFormat), so the encoding is too.
+	q.Set("encoding", "linear16")
 	q.Set("sample_rate", strconv.Itoa(e.cfg.Format.SampleRate))
 	q.Set("channels", strconv.Itoa(e.cfg.Format.Channels))
 	q.Set("model", e.cfg.Model)
@@ -497,16 +496,6 @@ func (e *Engine) dialURL() string {
 		q.Add("keyterm", k)
 	}
 	return base + "?" + q.Encode()
-}
-
-// encodingFor names the PCM layout for Deepgram's `encoding` parameter. The
-// pipeline is fixed at 16-bit signed samples, but this stays format-driven
-// rather than hardcoded in case that ever changes.
-func encodingFor(f audio.Format) string {
-	if f.BitDepth == 8 {
-		return "mulaw"
-	}
-	return "linear16"
 }
 
 // dialError carries the HTTP status from a failed handshake, so a 401/403 can
@@ -605,9 +594,6 @@ func decodeTranscript(data []byte) (t stt.Transcript, isFinal bool, ok bool, err
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return stt.Transcript{}, false, false, err
 	}
-	// if !msg.IsFinal {
-	// 	return stt.Transcript{}, false, false, err
-	// }
 	if len(msg.Channel.Alternatives) == 0 {
 		return stt.Transcript{}, false, false, nil
 	}

@@ -14,9 +14,6 @@ import (
 // FileConfig configures replay of an audio file at wall-clock rate.
 type FileConfig struct {
 	Path    string
-	Speed   float64       // 1.0 = true live rate
-	Loop    bool          // restart on EOF, for soak tests
-	Chunk   time.Duration // PCM chunk size, default 100ms
 	Log     *slog.Logger
 	OnFrame func(nbytes int, offset time.Duration)
 }
@@ -37,12 +34,6 @@ type FileSource struct {
 }
 
 func NewFileSource(ctx context.Context, cfg FileConfig) (*FileSource, error) {
-	if cfg.Chunk <= 0 {
-		cfg.Chunk = 100 * time.Millisecond
-	}
-	if cfg.Speed <= 0 {
-		cfg.Speed = 1.0
-	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
@@ -53,8 +44,6 @@ func NewFileSource(ctx context.Context, cfg FileConfig) (*FileSource, error) {
 	}
 	return &FileSource{cfg: cfg, probe: pr}, nil
 }
-
-func (s *FileSource) Format() Format { return PipelineFormat }
 
 // SetOnFrame registers frame accounting. Set before Start.
 func (s *FileSource) SetOnFrame(fn func(nbytes int, offset time.Duration)) {
@@ -82,14 +71,7 @@ func (s *FileSource) Start(ctx context.Context) (<-chan Frame, error) {
 	out := make(chan Frame)
 	go func() {
 		defer close(out)
-		for {
-			err := s.playOnce(ctx, out)
-			if err != nil || !s.cfg.Loop || ctx.Err() != nil {
-				s.setErr(err)
-				return
-			}
-			s.cfg.Log.Info("replay looping")
-		}
+		s.setErr(s.playOnce(ctx, out))
 	}()
 	return out, nil
 }
@@ -112,13 +94,7 @@ func (s *FileSource) playOnce(ctx context.Context, out chan<- Frame) error {
 	s.mu.Unlock()
 	defer p.Close()
 
-	chunkBytes := PipelineFormat.BytesFor(s.cfg.Chunk)
-	if chunkBytes <= 0 {
-		return fmt.Errorf("chunk size %v is too small for %s", s.cfg.Chunk, PipelineFormat)
-	}
-	// At speed 2.0 we release each chunk in half the time it represents.
-	interval := time.Duration(float64(s.cfg.Chunk) / s.cfg.Speed)
-
+	chunkBytes := PipelineFormat.BytesFor(chunkSize)
 	start := time.Now()
 	buf := make([]byte, chunkBytes)
 	var offset time.Duration
@@ -129,7 +105,7 @@ func (s *FileSource) playOnce(ctx context.Context, out chan<- Frame) error {
 			// Hold each chunk until its release deadline. Deadlines are
 			// computed from the fixed start time, so a slow iteration is
 			// corrected on the next one instead of pushing everything later.
-			due := start.Add(time.Duration(n+1) * interval)
+			due := start.Add(time.Duration(n+1) * chunkSize)
 			if !sleep(ctx, time.Until(due)) {
 				return ctx.Err()
 			}

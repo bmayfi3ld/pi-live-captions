@@ -1,12 +1,13 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"livecaption/internal/stt"
 )
 
 func writeTempFile(t *testing.T) string {
@@ -16,34 +17,6 @@ func writeTempFile(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return p
-}
-
-// TestMonitorRequiresRealtimeSpeed covers the one flag combination that cannot
-// work: the sound card drains at a fixed rate, so replaying faster than
-// wall-clock just overflows the playback buffer. Rejecting it at parse time
-// beats letting the user wonder why the audio is stuttering.
-func TestMonitorRequiresRealtimeSpeed(t *testing.T) {
-	file := writeTempFile(t)
-
-	_, _, err := Parse([]string{"replay", file, "--monitor", "--speed", "2"})
-	if err == nil {
-		t.Fatal("expected --monitor with --speed 2 to be rejected")
-	}
-	if !strings.Contains(err.Error(), "--speed 1.0") {
-		t.Errorf("error should explain the constraint, got: %v", err)
-	}
-
-	// The same flags at wall-clock rate are fine.
-	if _, _, err := Parse([]string{"replay", file, "--monitor"}); err != nil {
-		t.Errorf("--monitor at default speed should be accepted: %v", err)
-	}
-}
-
-func TestRejectsNonPositiveSpeed(t *testing.T) {
-	file := writeTempFile(t)
-	if _, _, err := Parse([]string{"replay", file, "--speed", "0"}); err == nil {
-		t.Error("expected --speed 0 to be rejected")
-	}
 }
 
 // TestMissingFileIsRejected relies on kong's existingfile type, so a typo is
@@ -117,9 +90,6 @@ func TestRequireAPIKey(t *testing.T) {
 	if err := requireAPIKey("mock", ""); err != nil {
 		t.Errorf("mock engine should not need a key: %v", err)
 	}
-	if err := requireAPIKey("mock-2", ""); err != nil {
-		t.Errorf("mock-2 engine should not need a key: %v", err)
-	}
 	if err := requireAPIKey("deepgram", ""); err == nil {
 		t.Error("deepgram without a key should fail fast")
 	} else if !strings.Contains(err.Error(), "DEEPGRAM_API_KEY") {
@@ -141,9 +111,6 @@ func TestAutoPauseDefaults(t *testing.T) {
 	if !c.Replay.AutoPause {
 		t.Error("auto-pause should default to enabled")
 	}
-	if c.Replay.SilenceDB != -45 {
-		t.Errorf("SilenceDB default = %v, want -45", c.Replay.SilenceDB)
-	}
 	if c.Replay.SilenceHold != 60*time.Second {
 		t.Errorf("SilenceHold default = %v, want 60s", c.Replay.SilenceHold)
 	}
@@ -162,40 +129,6 @@ func TestAutoPauseNegatable(t *testing.T) {
 	}
 }
 
-// TestMockTwoEngineIsAccepted covers the offline auto-pause demo engine
-// registered alongside "mock" and "deepgram".
-func TestMockTwoEngineIsAccepted(t *testing.T) {
-	file := writeTempFile(t)
-	_, c, err := Parse([]string{"replay", file, "--engine", "mock-2"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Replay.Engine != "mock-2" {
-		t.Errorf("Engine = %q, want mock-2", c.Replay.Engine)
-	}
-}
-
-// TestSilenceThresholdValidation covers the exclusive -100..0 constraint.
-// RMSDBFS clamps at -100, so a threshold at or below that can never be
-// reached; and since the gate counts a frame as silence at or below the
-// threshold, 0 dBFS (full scale) would make every frame silence and leave the
-// session permanently paused rather than transcribing.
-func TestSilenceThresholdValidation(t *testing.T) {
-	file := writeTempFile(t)
-	for _, db := range []float64{0.5, 0, -100, -150} {
-		arg := fmt.Sprintf("--silence-threshold-db=%v", db)
-		if _, _, err := Parse([]string{"replay", file, arg}); err == nil {
-			t.Errorf("%s should be rejected", arg)
-		}
-	}
-	for _, db := range []float64{-0.5, -45, -99} {
-		arg := fmt.Sprintf("--silence-threshold-db=%v", db)
-		if _, _, err := Parse([]string{"replay", file, arg}); err != nil {
-			t.Errorf("%s should be accepted: %v", arg, err)
-		}
-	}
-}
-
 // TestSilenceHoldValidation covers the > 0 constraint on --silence-hold.
 func TestSilenceHoldValidation(t *testing.T) {
 	file := writeTempFile(t)
@@ -207,59 +140,15 @@ func TestSilenceHoldValidation(t *testing.T) {
 	}
 }
 
-// TestSpeechTimingValidation covers the rejections STTFlags.Validate()
-// enforces around --speech-break. The old --endpointing bounds and the
-// SpeechBreak > Endpointing pairing are gone with the flag itself: Deepgram's
-// finalization window no longer governs cadence, so the 200ms floor is the
-// only thing standing between a break threshold and firing on breaths.
-func TestSpeechTimingValidation(t *testing.T) {
-	file := writeTempFile(t)
-
-	cases := []struct {
-		name string
-		args []string
-	}{
-		{"speech-break below floor", []string{"--speech-break", "199ms"}},
-		{"speech-break above ceiling", []string{"--speech-break", "10001ms"}},
+// TestNewEngineRejectsUnknown covers the branch --engine's enum makes
+// unreachable from the CLI but a programmatic caller can still hit.
+func TestNewEngineRejectsUnknown(t *testing.T) {
+	if _, err := newEngine("nope", stt.Config{}); err == nil {
+		t.Error("newEngine should reject an unregistered name")
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			args := append([]string{"replay", file}, tc.args...)
-			if _, _, err := Parse(args); err == nil {
-				t.Errorf("%v should be rejected", tc.args)
-			}
-		})
-	}
-
-	// The default, and a sane explicit value, must be accepted.
-	if _, _, err := Parse([]string{"replay", file}); err != nil {
-		t.Errorf("default --speech-break should be accepted: %v", err)
-	}
-	if _, _, err := Parse([]string{"replay", file, "--speech-break", "2s"}); err != nil {
-		t.Errorf("--speech-break 2s should be accepted: %v", err)
-	}
-}
-
-// TestSpeechTimingDefaults guards the plan's chosen defaults directly, since
-// a wrong default here silently changes every session's behavior.
-func TestSpeechTimingDefaults(t *testing.T) {
-	file := writeTempFile(t)
-	_, c, err := Parse([]string{"replay", file})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Replay.SpeechBreak != 1500*time.Millisecond {
-		t.Errorf("SpeechBreak default = %v, want 1.5s", c.Replay.SpeechBreak)
-	}
-}
-
-func TestChunkDurationBounds(t *testing.T) {
-	if _, err := chunkDuration(100); err != nil {
-		t.Errorf("100ms should be valid: %v", err)
-	}
-	for _, ms := range []int{0, 10, 501, -1} {
-		if _, err := chunkDuration(ms); err == nil {
-			t.Errorf("chunkDuration(%d) should be rejected", ms)
+	for _, name := range []string{"deepgram", "mock"} {
+		if _, err := newEngine(name, stt.Config{}); err != nil {
+			t.Errorf("newEngine(%q) = %v, want an engine", name, err)
 		}
 	}
 }

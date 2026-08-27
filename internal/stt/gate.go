@@ -7,20 +7,17 @@ import (
 	"livecaption/internal/audio"
 )
 
+// silenceThresholdDB is the dBFS at or below which a frame counts as silence.
+// Low enough not to trip on room tone and HVAC, high enough that genuine dead
+// air is recognized before it racks up recognizer charges. Calibrated against
+// the soundboard feed: a materially hotter or colder input needs this moved.
+const silenceThresholdDB = -45.0
+
 // PauseConfig controls automatic pausing of the recognizer connection while
 // the audio is silent.
 type PauseConfig struct {
-	Enabled     bool
-	ThresholdDB float64       // dBFS at or below which a frame counts as silence
-	Hold        time.Duration // continuous silence (media time) before pausing
-}
-
-// DefaultPauseConfig is conservative enough not to clip a speaker pausing for
-// breath mid-sentence, or during a longer lull like applause or a scene
-// change, while still eventually stopping genuine dead air from racking up
-// recognizer charges.
-func DefaultPauseConfig() PauseConfig {
-	return PauseConfig{Enabled: true, ThresholdDB: -45, Hold: 60 * time.Second}
+	Enabled bool
+	Hold    time.Duration // continuous silence (media time) before pausing
 }
 
 // Gate tracks whether the stream currently carries audio worth transcribing.
@@ -48,9 +45,8 @@ func (g *Gate) Observe(f audio.Frame) bool {
 	return g.ObserveLevel(audio.RMSDBFS(f.PCM), f.Offset)
 }
 
-// ObserveLevel feeds a synthetic level at a media time; used by mock-2, whose
-// replay audio is continuous speech and would never trip a level-based gate
-// honestly.
+// ObserveLevel feeds a level at a media time, reporting whether Active()
+// changed as a result.
 func (g *Gate) ObserveLevel(db float64, at time.Duration) bool {
 	if !g.cfg.Enabled {
 		return false
@@ -60,7 +56,7 @@ func (g *Gate) ObserveLevel(db float64, at time.Duration) bool {
 	defer g.mu.Unlock()
 
 	changed := false
-	if db > g.cfg.ThresholdDB {
+	if db > silenceThresholdDB {
 		// Resume must be instant: a delayed reaction here clips the first
 		// word of the returning speech.
 		g.inSilence = false

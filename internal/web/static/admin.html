@@ -339,8 +339,6 @@
 
   <div class="card" id="card-monitor">
     <h2><span class="eyebrow">Monitor</span></h2>
-    <div class="stat-row"><span class="k">Device</span><span class="v num" id="mon-device">—</span></div>
-    <div class="stat-row"><span class="k">Buffer</span><span class="v num" id="mon-buffer">—</span></div>
     <div class="stat-row"><span class="k">Playback</span><span class="v num" id="mon-alive">—</span></div>
     <div class="stat-row"><span class="k">Frames dropped</span><span class="v num" id="mon-dropped">—</span></div>
   </div>
@@ -675,8 +673,6 @@
     } else {
       monCard.classList.remove("dim");
     }
-    setText("mon-device", mon.device || "—");
-    setText("mon-buffer", mon.enabled ? mon.buffer_ms + " ms" : "—");
     setText("mon-alive", mon.enabled ? (mon.alive ? "playing" : "stopped") : "disabled");
     setChip("mon-dropped", mon.frames_dropped_total, true);
 

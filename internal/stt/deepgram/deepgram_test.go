@@ -452,7 +452,7 @@ func TestEngine_AutoPauseReconnectsOnResume(t *testing.T) {
 	})
 
 	eng := testEngineWithPause(srv.URL, stt.PauseConfig{
-		Enabled: true, ThresholdDB: -30, Hold: 150 * time.Millisecond,
+		Enabled: true, Hold: 150 * time.Millisecond,
 	})
 
 	frames := make(chan audio.Frame)
@@ -540,7 +540,7 @@ func TestEngine_AutoPauseDisabledNeverCloses(t *testing.T) {
 	})
 
 	eng := testEngineWithPause(srv.URL, stt.PauseConfig{
-		Enabled: false, ThresholdDB: -30, Hold: 50 * time.Millisecond,
+		Enabled: false, Hold: 50 * time.Millisecond,
 	})
 
 	frames := make(chan audio.Frame)
@@ -787,7 +787,7 @@ func TestEngine_S1ClockRestartAfterReconnect(t *testing.T) {
 	})
 
 	eng := testEngineWithPause(srv.URL, stt.PauseConfig{
-		Enabled: true, ThresholdDB: -30, Hold: 15 * time.Millisecond,
+		Enabled: true, Hold: 15 * time.Millisecond,
 	})
 
 	frames := make(chan audio.Frame)

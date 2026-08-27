@@ -67,8 +67,8 @@ func (a *anchorIndex) Add(n int, capturedAt, sentAt time.Time) {
 
 	// Evict from the front once the index covers more than anchorWindow of
 	// audio, or has accumulated more entries than maxAnchors — whichever
-	// comes first. Always keep at least one entry so Written()/At() have
-	// something to clamp against.
+	// comes first. Always keep at least one entry so At() has something to
+	// clamp against.
 	windowBytes := int64(a.format.BytesFor(anchorWindow))
 	for len(a.entries) > 1 && (a.written-a.entries[0].endByte > windowBytes || len(a.entries) > maxAnchors) {
 		a.entries = a.entries[1:]
@@ -132,11 +132,4 @@ func (a *anchorIndex) At(media time.Duration) (capturedAt, sentAt time.Time, ok 
 	// by the byte gap the way capturedAt is above would invent a send time
 	// that never happened.
 	return t, e.sentAt, true
-}
-
-// Written reports the total audio bytes recorded on this stream so far.
-func (a *anchorIndex) Written() int64 {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.written
 }

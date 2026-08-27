@@ -6,7 +6,7 @@ import (
 )
 
 func testCfg() PauseConfig {
-	return PauseConfig{Enabled: true, ThresholdDB: -45, Hold: 1 * time.Second}
+	return PauseConfig{Enabled: true, Hold: 1 * time.Second}
 }
 
 func TestGate_StartsActive(t *testing.T) {

@@ -27,7 +27,6 @@ type proc struct {
 
 	mu         sync.Mutex
 	lastStderr string
-	xruns      int
 
 	log      *slog.Logger
 	onXrun   func()
@@ -97,9 +96,6 @@ func (p *proc) drainStderr(r io.ReadCloser) {
 		lower := strings.ToLower(line)
 		for _, tok := range xrunTokens {
 			if strings.Contains(lower, tok) {
-				p.mu.Lock()
-				p.xruns++
-				p.mu.Unlock()
 				if p.onXrun != nil {
 					p.onXrun()
 				}
@@ -158,7 +154,6 @@ type probeResult struct {
 	Duration   time.Duration
 	SampleRate int
 	Channels   int
-	Codec      string
 }
 
 func (p probeResult) describeConversion(to Format) string {
@@ -182,7 +177,7 @@ func probeFile(ctx context.Context, path string) (probeResult, error) {
 	out, err := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
 		"-select_streams", "a:0",
-		"-show_entries", "format=duration:stream=sample_rate,channels,codec_name",
+		"-show_entries", "format=duration:stream=sample_rate,channels",
 		"-of", "default=noprint_wrappers=1",
 		path,
 	).Output()
@@ -203,8 +198,6 @@ func probeFile(ctx context.Context, path string) (probeResult, error) {
 			res.SampleRate, _ = strconv.Atoi(v)
 		case "channels":
 			res.Channels, _ = strconv.Atoi(v)
-		case "codec_name":
-			res.Codec = v
 		}
 	}
 	return res, nil

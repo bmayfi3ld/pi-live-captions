@@ -224,14 +224,14 @@ func TestObserveLatencyRejectsNegativeAcceptsZero(t *testing.T) {
 	}
 }
 
-// TestSnapshotCleanIsFalseForEachDegradation walks every counter Clean()
-// checks, one at a time, so a field silently dropped from that list is a
-// build-time-invisible bug that only this test catches. This drives the
-// amber highlighting operators rely on during a live event.
-func TestSnapshotCleanIsFalseForEachDegradation(t *testing.T) {
-	fresh := New("v", "s").Snapshot()
-	if !fresh.Clean() {
-		t.Fatal("a pristine session must report Clean")
+// TestHealthDegradesForEachDegradation walks every silent-degradation
+// counter one at a time, so a counter that skips the shared degrade() helper
+// — and therefore never stamps the health badge — is a build-time-invisible
+// bug that only this test catches. This drives the amber highlighting
+// operators rely on during a live event.
+func TestHealthDegradesForEachDegradation(t *testing.T) {
+	if fresh := New("v", "s").Snapshot(); fresh.Health != "ok" {
+		t.Fatalf("a pristine session must report ok, got %q", fresh.Health)
 	}
 
 	cases := map[string]func(*Metrics){
@@ -248,8 +248,8 @@ func TestSnapshotCleanIsFalseForEachDegradation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m := New("v", "s")
 			apply(m)
-			if snap := m.Snapshot(); snap.Clean() {
-				t.Errorf("%s: Clean() = true, want false", name)
+			if snap := m.Snapshot(); snap.Health != "degraded" {
+				t.Errorf("%s: Health = %q, want degraded", name, snap.Health)
 			}
 		})
 	}

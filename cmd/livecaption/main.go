@@ -16,11 +16,6 @@ import (
 
 	"livecaption/internal/cli"
 	"livecaption/internal/ui"
-
-	// Engines register themselves; main imports them for the side effect so
-	// adding a provider never means editing this file's logic.
-	_ "livecaption/internal/stt/deepgram"
-	_ "livecaption/internal/stt/mock"
 )
 
 func main() {
@@ -41,9 +36,7 @@ func run() error {
 
 	term, log := ui.Setup(ui.LogConfig{
 		Level:   c.LogLevel,
-		Format:  c.LogFormat,
 		Verbose: c.Verbose,
-		Quiet:   c.Quiet,
 		NoColor: c.NoColor,
 	})
 

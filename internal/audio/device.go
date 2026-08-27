@@ -12,9 +12,8 @@ import (
 
 // DeviceConfig configures live capture from an audio input.
 type DeviceConfig struct {
-	Device  string        // pulse sink/source name, or ALSA "hw:2,0"
-	Backend string        // "pulse" or "alsa"
-	Chunk   time.Duration // PCM chunk size, default 100ms
+	Device  string // pulse sink/source name, or ALSA "hw:2,0"
+	Backend string // "pulse" or "alsa"
 	Log     *slog.Logger
 
 	OnFrame   func(nbytes int, offset time.Duration)
@@ -34,7 +33,6 @@ type DeviceSource struct {
 
 	mu   sync.Mutex
 	proc *proc
-	err  error
 
 	// offset accumulates across restarts so media time stays monotonic even
 	// though each ffmpeg process starts counting from zero.
@@ -42,9 +40,6 @@ type DeviceSource struct {
 }
 
 func NewDeviceSource(cfg DeviceConfig) *DeviceSource {
-	if cfg.Chunk <= 0 {
-		cfg.Chunk = 100 * time.Millisecond
-	}
 	if cfg.Backend == "" {
 		cfg.Backend = "pulse"
 	}
@@ -53,8 +48,6 @@ func NewDeviceSource(cfg DeviceConfig) *DeviceSource {
 	}
 	return &DeviceSource{cfg: cfg}
 }
-
-func (s *DeviceSource) Format() Format { return PipelineFormat }
 
 // DeviceCallbacks are the metric hooks for live capture. Every one of these
 // corresponds to a way the capture path can degrade without the audio simply
@@ -132,8 +125,7 @@ func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeO
 	s.proc = p
 	s.mu.Unlock()
 
-	chunkBytes := PipelineFormat.BytesFor(s.cfg.Chunk)
-	buf := make([]byte, chunkBytes)
+	buf := make([]byte, PipelineFormat.BytesFor(chunkSize))
 
 	if probeOnly {
 		defer p.Close()
@@ -195,11 +187,10 @@ func (s *DeviceSource) probe(ctx context.Context, p *proc, buf []byte) error {
 	}
 }
 
-func (s *DeviceSource) Err() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.err
-}
+// Err always reports nil: live capture restarts ffmpeg forever rather than
+// giving up, so the only way out of Start's loop is ctx cancellation. Present
+// to satisfy Source, which FileSource does use meaningfully.
+func (s *DeviceSource) Err() error { return nil }
 
 func (s *DeviceSource) Close() error {
 	s.mu.Lock()

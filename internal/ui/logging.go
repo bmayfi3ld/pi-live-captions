@@ -16,9 +16,7 @@ import (
 // LogConfig resolves how diagnostics are rendered.
 type LogConfig struct {
 	Level   string // debug | info | warn | error
-	Format  string // auto | pretty | json
 	Verbose bool
-	Quiet   bool
 	NoColor bool
 }
 
@@ -43,39 +41,24 @@ func (c LogConfig) level() slog.Level {
 // Setup builds the terminal and logger together, because the pretty handler
 // has to write through the terminal's mutex to coexist with the status line.
 //
-// Format "auto" means: pretty when stderr is a terminal, JSON otherwise. That
-// makes the same binary pleasant interactively and parseable under systemd
-// with no flags.
+// Rendering follows stderr: pretty when it is a terminal, JSON when piped.
+// That makes the same binary pleasant interactively and parseable under
+// systemd with no flags.
 func Setup(c LogConfig) (*Terminal, *slog.Logger) {
 	isTTY := term.IsTerminal(int(os.Stderr.Fd()))
-
-	pretty := isTTY
-	switch strings.ToLower(c.Format) {
-	case "pretty":
-		pretty = true
-	case "json":
-		pretty = false
-	}
-
 	color := !c.NoColor && isTTY && os.Getenv("TERM") != "dumb"
-
-	// --quiet means warnings and errors only, whatever the level flag says.
 	level := c.level()
-	if c.Quiet && level < slog.LevelWarn {
-		level = slog.LevelWarn
-	}
 
 	t := NewTerminal(Options{
-		TTY:   isTTY && pretty,
+		TTY:   isTTY,
 		Color: color,
-		Quiet: c.Quiet,
 		// The live caption stream only shows on stdout at debug level (--verbose
 		// or --log-level=debug); otherwise only the status line is visible.
 		SuppressCaptions: level > slog.LevelDebug,
 	})
 
 	var h slog.Handler
-	if pretty {
+	if isTTY {
 		h = &prettyHandler{term: t, level: level, start: time.Now()}
 	} else {
 		h = slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})
