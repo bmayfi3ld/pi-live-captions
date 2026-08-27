@@ -106,3 +106,28 @@ func TestSetCallbacksWiresOnDrop(t *testing.T) {
 		t.Errorf("drops = %d, want 5", drops.Load())
 	}
 }
+
+// TestTapDuringCloseDoesNotPanic reproduces the shutdown race that killed a
+// live run: session.shutdown() closes the monitor *before* the audio source,
+// so Wrap's goroutine is still calling Tap while Close runs. Closing the
+// channel from Close's side made that a "send on closed channel" panic.
+func TestTapDuringCloseDoesNotPanic(t *testing.T) {
+	for range 50 {
+		m := NewMonitor(MonitorConfig{})
+
+		tapping := make(chan struct{})
+		go func() {
+			close(tapping)
+			for range 200 {
+				m.Tap([]byte{1, 2, 3, 4})
+			}
+		}()
+
+		<-tapping
+		if err := m.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		// Taps landing after Close must be silently ignored, not panic.
+		m.Tap([]byte{5, 6, 7, 8})
+	}
+}

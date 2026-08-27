@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"livecaption/internal/stt"
 	"livecaption/internal/stt/deepgram"
 	"livecaption/internal/stt/mock"
+	"livecaption/internal/stt/speechmatics"
 	"livecaption/internal/ui"
 	"livecaption/internal/web"
 )
@@ -319,11 +321,56 @@ func newEngine(name string, cfg stt.Config) (stt.Engine, error) {
 	switch name {
 	case "deepgram":
 		return deepgram.New(cfg), nil
+	case "speechmatics":
+		return speechmatics.New(cfg), nil
 	case "mock":
 		return mock.New(cfg), nil
 	default:
-		return nil, fmt.Errorf("unknown stt engine %q (available: deepgram, mock)", name)
+		return nil, fmt.Errorf("unknown stt engine %q (available: deepgram, speechmatics, mock)", name)
 	}
+}
+
+// engineDefaults is what --model and --language fall back to per engine, since
+// neither name means the same thing to two providers. Applied before the flags
+// are read anywhere, so the startup banner shows what will actually be sent.
+var engineDefaults = map[string]struct{ model, language string }{
+	"deepgram":     {"nova-3", "en-US"},
+	"speechmatics": {"enhanced", "en"},
+}
+
+// resolveSTTDefaults fills in whichever of --model, --language and --api-key
+// the user left blank, from the selected engine's own defaults and env var. An
+// explicit flag always wins; mock needs none of them.
+//
+// Must run before requireAPIKey and before the banner, both of which read
+// these as final.
+func resolveSTTDefaults(f *STTFlags) {
+	if f.APIKey == "" {
+		// Deliberately the engine's own variable and no other: falling back to
+		// whichever key happens to be set sends it to a provider that will
+		// reject it, and the 401 gives no hint that the wrong key was picked.
+		if env, ok := apiKeyEnv[f.Engine]; ok {
+			f.APIKey = os.Getenv(env)
+		}
+	}
+
+	d, ok := engineDefaults[f.Engine]
+	if !ok {
+		return
+	}
+	if f.Model == "" {
+		f.Model = d.model
+	}
+	if f.Language == "" {
+		f.Language = d.language
+	}
+}
+
+// apiKeyEnv names the environment variable that feeds --api-key for an engine,
+// so the "you forgot the key" error points at the right one.
+var apiKeyEnv = map[string]string{
+	"deepgram":     "DEEPGRAM_API_KEY",
+	"speechmatics": "SPEECHMATICS_API_KEY",
 }
 
 // requireAPIKey fails early and clearly rather than letting the recognizer
@@ -332,6 +379,10 @@ func requireAPIKey(engine, key string) error {
 	if engine == "mock" || strings.TrimSpace(key) != "" {
 		return nil
 	}
-	return errors.New("no Deepgram API key: set DEEPGRAM_API_KEY or pass --api-key " +
-		"(or use --engine mock to run offline)")
+	env, ok := apiKeyEnv[engine]
+	if !ok {
+		return fmt.Errorf("no API key for engine %q: pass --api-key", engine)
+	}
+	return fmt.Errorf("no API key for %s: set %s or pass --api-key "+
+		"(or use --engine mock to run offline)", engine, env)
 }

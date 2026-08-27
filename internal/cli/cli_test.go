@@ -52,15 +52,50 @@ func TestEnumsAreEnforced(t *testing.T) {
 
 // TestAPIKeyComesFromEnvironment keeps the key out of shell history.
 func TestAPIKeyComesFromEnvironment(t *testing.T) {
-	file := writeTempFile(t)
 	t.Setenv("DEEPGRAM_API_KEY", "secret-from-env")
 
-	_, c, err := Parse([]string{"replay", file})
-	if err != nil {
-		t.Fatal(err)
+	f := STTFlags{Engine: "deepgram"}
+	resolveSTTDefaults(&f)
+	if f.APIKey != "secret-from-env" {
+		t.Errorf("APIKey = %q, want it read from DEEPGRAM_API_KEY", f.APIKey)
 	}
-	if c.Replay.APIKey != "secret-from-env" {
-		t.Errorf("APIKey = %q, want it bound from DEEPGRAM_API_KEY", c.Replay.APIKey)
+}
+
+// TestAPIKeyIsPerEngine is a regression guard for a live run that died on a
+// 401: with both variables bound to one flag, whichever was set first won, so
+// a shell (or .env) carrying DEEPGRAM_API_KEY silently handed a Deepgram key
+// to Speechmatics. The key must come from the selected engine's variable only.
+func TestAPIKeyIsPerEngine(t *testing.T) {
+	t.Setenv("DEEPGRAM_API_KEY", "dg-key")
+	t.Setenv("SPEECHMATICS_API_KEY", "sm-key")
+
+	for engine, want := range map[string]string{
+		"deepgram":     "dg-key",
+		"speechmatics": "sm-key",
+	} {
+		f := STTFlags{Engine: engine}
+		resolveSTTDefaults(&f)
+		if f.APIKey != want {
+			t.Errorf("%s picked up %q, want %q", engine, f.APIKey, want)
+		}
+	}
+
+	// The exact failure: only the other engine's key is in the environment.
+	t.Setenv("SPEECHMATICS_API_KEY", "")
+	f := STTFlags{Engine: "speechmatics"}
+	resolveSTTDefaults(&f)
+	if f.APIKey == "dg-key" {
+		t.Error("speechmatics fell back to DEEPGRAM_API_KEY; that 401s at the recognizer")
+	}
+	if err := requireAPIKey(f.Engine, f.APIKey); err == nil {
+		t.Error("a missing SPEECHMATICS_API_KEY should fail before any audio flows")
+	}
+
+	// An explicit --api-key is never overwritten by the environment.
+	f = STTFlags{Engine: "deepgram", APIKey: "explicit"}
+	resolveSTTDefaults(&f)
+	if f.APIKey != "explicit" {
+		t.Errorf("APIKey = %q, want the explicit flag to win", f.APIKey)
 	}
 }
 
@@ -98,6 +133,37 @@ func TestRequireAPIKey(t *testing.T) {
 	if err := requireAPIKey("deepgram", "k"); err != nil {
 		t.Errorf("deepgram with a key should pass: %v", err)
 	}
+	if err := requireAPIKey("speechmatics", ""); err == nil {
+		t.Error("speechmatics without a key should fail fast")
+	} else if !strings.Contains(err.Error(), "SPEECHMATICS_API_KEY") {
+		t.Errorf("error should name the engine's own env var, got: %v", err)
+	}
+}
+
+// TestSTTDefaultsArePerEngine guards the reason --model and --language carry
+// no default tag: nova-3 and en-US are Deepgram's names, and sending either to
+// Speechmatics is an immediate invalid_model / invalid_language.
+func TestSTTDefaultsArePerEngine(t *testing.T) {
+	cases := []struct {
+		engine, model, language string
+	}{
+		{"deepgram", "nova-3", "en-US"},
+		{"speechmatics", "enhanced", "en"},
+	}
+	for _, c := range cases {
+		f := STTFlags{Engine: c.engine}
+		resolveSTTDefaults(&f)
+		if f.Model != c.model || f.Language != c.language {
+			t.Errorf("%s defaults = %q/%q, want %q/%q", c.engine, f.Model, f.Language, c.model, c.language)
+		}
+	}
+
+	// An explicit flag always wins over the engine's default.
+	f := STTFlags{Engine: "deepgram", Model: "nova-2", Language: "fr"}
+	resolveSTTDefaults(&f)
+	if f.Model != "nova-2" || f.Language != "fr" {
+		t.Errorf("explicit flags overwritten: got %q/%q", f.Model, f.Language)
+	}
 }
 
 // TestAutoPauseDefaults guards the intent that auto-pause is on by default
@@ -117,7 +183,7 @@ func TestAutoPauseDefaults(t *testing.T) {
 }
 
 // TestAutoPauseNegatable checks --no-auto-pause turns it off, matching how
-// deepgram.go decides whether to build an enabled Gate.
+// stt.RunSession decides whether to build an enabled Gate.
 func TestAutoPauseNegatable(t *testing.T) {
 	file := writeTempFile(t)
 	_, c, err := Parse([]string{"replay", file, "--no-auto-pause"})
@@ -146,7 +212,7 @@ func TestNewEngineRejectsUnknown(t *testing.T) {
 	if _, err := newEngine("nope", stt.Config{}); err == nil {
 		t.Error("newEngine should reject an unregistered name")
 	}
-	for _, name := range []string{"deepgram", "mock"} {
+	for _, name := range []string{"deepgram", "speechmatics", "mock"} {
 		if _, err := newEngine(name, stt.Config{}); err != nil {
 			t.Errorf("newEngine(%q) = %v, want an engine", name, err)
 		}

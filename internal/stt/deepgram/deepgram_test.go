@@ -614,28 +614,7 @@ func TestEngine_AuthFailureFailsFast(t *testing.T) {
 	close(frames)
 }
 
-// --- ring / anchor integration tests ---
-
-// TestRing_CapturedAtRoundTrip checks that push/pop carry a chunk's
-// CapturedAt through unchanged, since that value is what the anchor index
-// ultimately keys latency off of.
-func TestRing_CapturedAtRoundTrip(t *testing.T) {
-	r := newRing(1<<20, nil, nil)
-	now := time.Now()
-
-	r.push(audio.Frame{PCM: []byte{1, 2, 3, 4}, CapturedAt: now})
-
-	c, ok := r.pop()
-	if !ok {
-		t.Fatal("pop: expected a chunk")
-	}
-	if !c.capturedAt.Equal(now) {
-		t.Errorf("capturedAt = %v, want %v", c.capturedAt, now)
-	}
-	if len(c.pcm) != 4 {
-		t.Errorf("pcm len = %d, want 4", len(c.pcm))
-	}
-}
+// --- latency anchoring ---
 
 // TestEngine_TranscriptCapturedAt checks that a real Run() round trip stamps
 // CapturedAt on a final transcript from the frame's own capture time, not

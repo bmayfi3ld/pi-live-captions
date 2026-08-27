@@ -1,5 +1,10 @@
-// Package stt defines the speech-to-text abstraction. Adding a provider means
-// writing one Engine and adding a case to newEngine in internal/cli.
+// Package stt defines the speech-to-text abstraction and the machinery every
+// streaming provider needs around it: reconnect backoff, the silence gate, a
+// bounded audio buffer, and latency anchoring.
+//
+// Adding a provider means writing a Dialer and a Session for its protocol,
+// handing them to RunSession, and adding a case to newEngine in internal/cli.
+// Everything that is not protocol already lives here.
 package stt
 
 import (

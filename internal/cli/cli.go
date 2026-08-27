@@ -34,10 +34,18 @@ type Globals struct {
 
 // STTFlags configure the speech-to-text backend.
 type STTFlags struct {
-	Engine   string   `default:"deepgram" enum:"deepgram,mock" group:"Speech-to-text" help:"Recognizer to use. 'mock' runs offline with no API cost."`
-	APIKey   string   `env:"DEEPGRAM_API_KEY" group:"Speech-to-text" help:"Deepgram API key."`
-	Model    string   `default:"nova-3" group:"Speech-to-text" help:"Deepgram model."`
-	Language string   `default:"en-US" group:"Speech-to-text" help:"Recognition language."`
+	Engine string `default:"deepgram" enum:"deepgram,mock,speechmatics" group:"Speech-to-text" help:"Recognizer to use. 'mock' runs offline with no API cost."`
+	// No env tag: kong would take the first variable that happens to be set,
+	// which silently hands a Deepgram key to Speechmatics for anyone with both
+	// in their environment (or a .env). resolveSTTDefaults reads the one
+	// belonging to the engine actually selected.
+	APIKey string `group:"Speech-to-text" help:"API key for the selected engine ($DEEPGRAM_API_KEY / $SPEECHMATICS_API_KEY)."`
+	// Model and Language deliberately have no default tag: the right value
+	// depends on the engine (nova-3/en-US for Deepgram, enhanced/en for
+	// Speechmatics). resolveSTTDefaults fills the blank once --engine is
+	// known, before anything reads these.
+	Model    string   `group:"Speech-to-text" help:"Recognition model. Defaults to the selected engine's."`
+	Language string   `group:"Speech-to-text" help:"Recognition language. Defaults to the selected engine's."`
 	Keyterm  []string `group:"Speech-to-text" help:"Proper noun to bias recognition toward. Repeatable."`
 
 	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`

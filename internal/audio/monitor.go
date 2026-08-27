@@ -38,7 +38,13 @@ type Monitor struct {
 	cfg  MonitorConfig
 	ch   chan []byte
 	proc *proc
-	once sync.Once
+
+	// mu guards ch against the shutdown race: Tap sends from the pipeline
+	// goroutine while Close runs on the main one, and shutdown() closes the
+	// monitor *before* the audio source, so frames are still arriving. Only a
+	// sender may close a channel, so Close takes this lock to make itself one.
+	mu     sync.Mutex
+	closed bool
 }
 
 func NewMonitor(cfg MonitorConfig) *Monitor {
@@ -99,8 +105,14 @@ func (m *Monitor) Start(ctx context.Context) error {
 
 // Tap offers a frame to the monitor without ever blocking. If playback has
 // stalled the frame is dropped and counted; the caption path is never held up
-// by the sound card.
+// by the sound card. After Close it is a no-op — a frame arriving during
+// shutdown is neither played nor counted as a drop, since nothing degraded.
 func (m *Monitor) Tap(pcm []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
 	select {
 	case m.ch <- pcm:
 	default:
@@ -135,7 +147,13 @@ func (m *Monitor) setAlive(v bool) {
 }
 
 func (m *Monitor) Close() error {
-	m.once.Do(func() { close(m.ch) })
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		close(m.ch)
+	}
+	m.mu.Unlock()
+
 	if m.proc != nil {
 		return m.proc.Close()
 	}

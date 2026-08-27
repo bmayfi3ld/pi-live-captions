@@ -1,4 +1,4 @@
-package deepgram
+package stt
 
 import (
 	"testing"

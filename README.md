@@ -8,7 +8,12 @@ captioning. See [DESIGN.md](DESIGN.md) for the architecture and the reasoning be
 
 - Go 1.26+
 - `ffmpeg` and `ffprobe` on `PATH` (used for capture, decode, resample, and playback)
-- A [Deepgram](https://deepgram.com) API key, set via `DEEPGRAM_API_KEY` or `--api-key`
+- An API key for one of the recognizers, set via `--api-key` or its env var:
+  [Deepgram](https://deepgram.com) (`DEEPGRAM_API_KEY`, the default engine) or
+  [Speechmatics](https://speechmatics.com) (`SPEECHMATICS_API_KEY`, `--engine speechmatics`)
+
+`--model` and `--language` default to whatever the selected engine expects (`nova-3` / `en-US` for
+Deepgram, `enhanced` / `en` for Speechmatics), so switching engines needs only `--engine`.
 
 `--engine mock` needs neither a key nor network access — it emits canned transcripts driven by
 media time, which is what makes the tool testable without hardware or API spend.
@@ -43,7 +48,7 @@ behaves exactly as it will with the live feed:
 livecaption replay recording.mp3 --engine mock --no-transcript
 ```
 
-This is the primary development loop: no API key, no network, no Deepgram spend, and output is
+This is the primary development loop: no API key, no network, no recognizer spend, and output is
 reproducible run to run since the mock engine is driven by media time, not the wall clock. The
 file is released at true wall-clock rate, so a half-hour recording takes half an hour — that is
 the point, since it is what makes the dev loop predict the live run.
@@ -73,7 +78,7 @@ a typo is a clear startup error, not room noise captioned as your event.
 
 ### Auto-pause
 
-Both `live` and `replay` close the Deepgram connection during silence and reopen it when audio
+Both `live` and `replay` close the recognizer connection during silence and reopen it when audio
 returns, so a quiet room doesn't rack up recognizer charges (see DESIGN.md §3 for how it decides
 what counts as silence and why closing rather than idling the connection). It's on by default:
 
@@ -87,7 +92,7 @@ a materially hotter or colder feed needs that constant moved and a rebuild. Turn
 with `--no-auto-pause` for a venue where dead air should still keep the connection warm, or raise
 `--silence-hold` if pauses are firing during ordinary pauses for breath.
 `/admin` and the status line report `pauses_total` and `paused_sec` so a mistuned gate is visible
-rather than inferred from the Deepgram bill.
+rather than inferred from the recognizer bill.
 
 ### Speech timing
 
@@ -95,9 +100,10 @@ A pause of at least 1.5s counts as the speaker actually stopping: it freezes the
 it is and closes a transcript line. That threshold is the `breakGap` constant in
 `internal/caption/hub.go` — venue-tuned, but not a flag (see DESIGN.md §4).
 
-The engine publishes only Deepgram's settled (`is_final`) results, so a word never changes once
-it's on screen. Cadence is therefore governed by Deepgram's own endpointing window, left at the
-server default. Watch
+Every engine publishes only settled results — Deepgram's `is_final`, Speechmatics' `AddTranscript`
+— so a word never changes once it's on screen. Cadence is therefore governed by the recognizer's
+own finalisation window: Deepgram's `endpointing`, left at the server default, or Speechmatics'
+`max_delay`, pinned to 1.0s so it stays clear of the 1.5s speech-pause threshold below. Watch
 `Segments / lines` on `/admin` to check fragmentation: roughly 1–3 segments per line is healthy,
 and a ratio climbing well past that means phrases are splitting on every hesitation.
 
@@ -173,14 +179,17 @@ written to `transcripts/<session>/transcript.txt`.
 
 ## Troubleshooting
 
-- **401 on first connect** — check `DEEPGRAM_API_KEY` (or `--api-key`).
-- **`unknown stt engine`** — only `deepgram` and `mock` exist; check `--engine`.
+- **401 on first connect** — check the env var for your engine, `DEEPGRAM_API_KEY` or
+  `SPEECHMATICS_API_KEY` (or `--api-key`). The run stops immediately rather than retrying, and so
+  does a rejected `--model` / `--language`, which each engine names its own way.
+- **`unknown stt engine`** — only `deepgram`, `speechmatics` and `mock` exist; check `--engine`.
 - **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
   / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
   fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.
-- **Captions lagging** — text lands when Deepgram finalizes a window, so the `endpointing` value in
-  `dialURL` is the knob. Watch `Segments / lines` on `/admin`: a ratio climbing well past a few
-  segments per line means phrases are fragmenting, i.e. endpointing is too aggressive.
+- **Captions lagging** — text lands when the recognizer finalizes a window, so that window is the
+  knob: `endpointing` in `dialURL` for Deepgram, `maxDelay` in `speechmatics.go` for Speechmatics.
+  Watch `Segments / lines` on `/admin`: a ratio climbing well past a few segments per line means
+  phrases are fragmenting, i.e. the window is too aggressive.
   Check the latency waterfall on `/admin` to see which leg (upload / recognize / assemble) is
   slow, and see DESIGN.md §4.
 - **First word after a quiet spell is missing/late, or the connection pauses during ordinary

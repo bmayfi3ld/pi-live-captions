@@ -1,4 +1,4 @@
-package deepgram
+package stt
 
 import (
 	"sort"
@@ -14,10 +14,10 @@ const (
 )
 
 // anchorIndex maps a media time on ONE WebSocket stream to the wall-clock
-// instant those samples were captured. Deepgram's `start` counts bytes it has
-// received on the current stream, so the mapping is only meaningful for one
-// connection: a fresh index is built per connection and discarded with it.
-// That is why there is no Reset — lifetime IS the reset.
+// instant those samples were captured. A recognizer's media times count the
+// audio it has received on the current stream, so the mapping is only
+// meaningful for one connection: a fresh index is built per connection and
+// discarded with it. That is why there is no Reset — lifetime IS the reset.
 type anchorIndex struct {
 	format audio.Format
 
@@ -93,7 +93,7 @@ func (a *anchorIndex) At(media time.Duration) (capturedAt, sentAt time.Time, ok 
 
 	want := int64(a.format.BytesFor(media))
 
-	// Clamp to the newest entry: Deepgram rounds start+duration to 2-3
+	// Clamp to the newest entry: recognizers round start+duration to 2-3
 	// decimals, so a final can land a few ms past our byte count. That is
 	// not an error, just floating-point rounding on the far side.
 	if want >= a.written {

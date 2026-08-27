@@ -117,8 +117,41 @@ type Engine interface {
 }
 ```
 
-Engines self-register (`stt.Register`) and `main` blank-imports them, so adding AssemblyAI or a
-local whisper.cpp touches no existing file.
+Adding a provider means writing one adapter and adding a case to `newEngine` in `internal/cli`.
+There is no registry: a `switch` over three names does not need one, and the compiler catches a
+missing case where a self-registering engine would only fail at run time.
+
+What an adapter actually writes is the *protocol*, not the plumbing. Reconnect backoff, the silence
+gate, the bounded audio ring and the latency anchoring are provider-neutral and live once, in
+`stt.RunSession`:
+
+```go
+// Opens one connection and completes whatever handshake must precede audio.
+type Dialer func(ctx context.Context) (*websocket.Conn, Session, error)
+
+// One connection's protocol state; a fresh one per Dialer call.
+type Session interface {
+	SendAudio(ctx context.Context, pcm []byte) error
+	Idle(ctx context.Context) error                        // keepalive, if the protocol has one
+	Decode(data []byte) (t Transcript, ok bool, err error) // ok=false: nothing to publish
+	Finish(ctx context.Context) error                      // polite end-of-stream
+}
+```
+
+A provider's `Run` is then one line delegating to `stt.RunSession`. The split was made when
+Speechmatics arrived: two providers is what turns "shared plumbing" from speculation into the
+smaller amount of code. Two consequences worth naming:
+
+- **`Decode`'s error is fatal** — it drops the connection. Acks, metadata, and undecodable frames
+  are the provider's own noise to log and swallow with `ok=false, nil`. Only genuine protocol
+  failures come back as errors.
+- **The "settled text only" guarantee is enforced per-protocol**, inside each `Decode`. The driver
+  publishes whatever it is handed, so each adapter drops its own revisable results (Deepgram's
+  non-`is_final`, Speechmatics' `AddPartialTranscript`) before they get that far.
+
+A `PermanentError` from the `Dialer` — a rejected key, an unknown model, a language the provider
+does not have — stops the run on the first attempt instead of backing off forever against a typo.
+Only providers can tell those apart from a network blip, so they do the classifying.
 
 `Transcript` is pure observation, with no control flags for the hub to interpret: the engine only
 ever emits text it will not revise, so there is nothing left to flag as final. It carries `Text`,
@@ -150,11 +183,54 @@ connection, which gorilla would require a hand-rolled mutex for).
 Used directly rather than via `deepgram-go-sdk`: it's a single endpoint, the client is small, and
 the official SDK has lagged on new streaming models. Reversible if that changes.
 
-Structure: a writer goroutine (PCM → binary frames, `{"type":"KeepAlive"}` every 5 s when idle) and
-a reader goroutine (JSON → `Transcript`). On shutdown it sends `{"type":"CloseStream"}` and drains
-remaining results so the tail of a session isn't lost. On disconnect it reconnects with exponential
-backoff (250 ms → 8 s, jittered), holding ~2 s of audio in a bounded drop-oldest ring so a brief
-blip loses nothing.
+Structure (all of it in `stt.RunSession`, driven by this adapter): a writer goroutine (PCM → binary
+frames, `{"type":"KeepAlive"}` every 5 s when idle) and a reader goroutine (JSON → `Transcript`). On
+shutdown it sends `{"type":"CloseStream"}` and drains remaining results so the tail of a session
+isn't lost. On disconnect it reconnects with exponential backoff (250 ms → 8 s, jittered), holding
+~2 s of audio in a bounded drop-oldest ring so a brief blip loses nothing.
+
+### Speechmatics (`internal/stt/speechmatics`)
+
+`wss://global.rt.speechmatics.com/v2`, header `Authorization: Bearer <key>`. Hand-rolled against
+`coder/websocket` for the same reasons as Deepgram, and again in preference to a vendor SDK.
+
+Unlike Deepgram it has a handshake — `StartRecognition`, acknowledged with `RecognitionStarted` —
+which the adapter completes inside its `Dialer`, so the driver only ever sees a connection that is
+ready for audio. It also numbers its `AddAudio` messages, and `EndOfStream` has to report the final
+count, so a session here holds real per-connection state where Deepgram's holds none.
+
+```json
+{"message":"StartRecognition",
+ "audio_format":{"type":"raw","encoding":"pcm_s16le","sample_rate":16000},
+ "transcription_config":{"language":"en","model":"enhanced",
+                         "max_delay":1.0,"enable_partials":false,
+                         "additional_vocab":[{"content":"<keyterm>"}]}}
+```
+
+**`max_delay` is load-bearing, and its default is wrong for us.** It is how long Speechmatics may
+wait before committing a final, and it defaults to 4 s (valid range 0.7–4). `breakGap` is 1.5 s, so
+the default puts the finalisation window *above* the gap that means "the speaker paused" — every
+committed chunk would also read as a pause, which is exactly the ragged-rows bug described in §4.
+Pinned to 1.0 s. It is the knob equivalent to Deepgram's `endpointing`: lower for sooner text in
+smaller pieces, higher if phrases fragment across rows, but never within reach of `breakGap`.
+
+Two gaps against the Deepgram engine, both deliberate:
+
+- **No profanity filter.** Deepgram takes `profanity_filter=true`; Speechmatics has no equivalent
+  one-line switch, so this engine currently does not filter. Not for lack of a mechanism — there
+  are two, and either would work server-side if it becomes necessary:
+  `transcript_filtering_config.replacements` takes `from`/`to` pairs where `from` may be an
+  ECMAScript regex in `/…/` delimiters, so `/^[sS][hH][iI][tT]$/` handles both the case-sensitivity
+  (replacement is case-sensitive) and the whole-word anchoring that stops "class" being masked for
+  containing "ass"; separately, `results` carries a `tags: ["profanity"]` marker on individual
+  words for en/es/it. What is *not* viable is substituting into the server's pre-assembled
+  `transcript` string — there are no character offsets to join on, only text, and a plain
+  `ReplaceAll` mangles innocent words. Either mechanism needs a word list, which for a church is a
+  judgement call rather than boilerplate: "hell" and "damn" are sermon vocabulary, and "ass",
+  "cock" and "prick" all have scriptural senses.
+- **Confidence is averaged**, not reported. Speechmatics gives one confidence per word where
+  Deepgram gives one per segment, so the adapter means the word-level figures (skipping punctuation
+  and entities, which say nothing about how well speech was heard).
 
 ### Auto-pause
 
