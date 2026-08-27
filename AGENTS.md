@@ -23,6 +23,7 @@ Assume the user already has an instance running when you need one.
 ## Dev Work
 - Do not do work inside of worktrees in harness specific folders (eg: .claude/**), instead do all work in this local project directly
 - Do not create commits, wait for the user to review the changes
+- Do not create new branches, check that the current branch is clean then do work there, ask the user if the current branch is dirty
 
 ## Lint
 
