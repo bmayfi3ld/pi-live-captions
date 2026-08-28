@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 
 	"github.com/coder/websocket"
 
@@ -195,8 +194,7 @@ type resultsMessage struct {
 	Duration float64 `json:"duration"`
 	Channel  struct {
 		Alternatives []struct {
-			Transcript string  `json:"transcript"`
-			Confidence float64 `json:"confidence"`
+			Transcript string `json:"transcript"`
 			// Words is populated when diarize=true and carries per-word
 			// speaker attribution; empty with diarization off (or a server
 			// that ignored the param), in which case decodeTranscript falls
@@ -206,7 +204,6 @@ type resultsMessage struct {
 				PunctuatedWord string  `json:"punctuated_word"`
 				Start          float64 `json:"start"`
 				End            float64 `json:"end"`
-				Confidence     float64 `json:"confidence"`
 				Speaker        int     `json:"speaker"`
 			} `json:"words"`
 		} `json:"alternatives"`
@@ -255,10 +252,9 @@ func decodeTranscript(data []byte) (ts []stt.Transcript, isFinal bool, err error
 			return nil, false, nil
 		}
 		return []stt.Transcript{{
-			Text:       alt.Transcript,
-			Start:      stt.SecondsToDuration(msg.Start),
-			Duration:   stt.SecondsToDuration(msg.Duration),
-			Confidence: alt.Confidence,
+			Words:    stt.Untimed(alt.Transcript),
+			Start:    stt.SecondsToDuration(msg.Start),
+			Duration: stt.SecondsToDuration(msg.Duration),
 		}}, msg.IsFinal, nil
 	}
 
@@ -272,13 +268,9 @@ func decodeTranscript(data []byte) (ts []stt.Transcript, isFinal bool, err error
 			return
 		}
 		first, last := alt.Words[run[0]], alt.Words[run[len(run)-1]]
-		var text strings.Builder
-		var confSum float64
-		for i, wi := range run {
+		words := make([]stt.Word, 0, len(run))
+		for _, wi := range run {
 			w := alt.Words[wi]
-			if i > 0 {
-				text.WriteByte(' ')
-			}
 			// punctuated_word carries the casing and punctuation that
 			// caption.Hub.closeLocked's endsSentence check depends on to
 			// close transcript lines; the raw word field is lowercase and
@@ -289,16 +281,18 @@ func decodeTranscript(data []byte) (ts []stt.Transcript, isFinal bool, err error
 			if pw == "" {
 				pw = w.Word
 			}
-			text.WriteString(pw)
-			confSum += w.Confidence
+			// Per-word Start is kept, not collapsed into the run's span: it
+			// is the segment's measured prosody, and Transcript.Text()
+			// rebuilds exactly the space-joined string this used to build
+			// eagerly.
+			words = append(words, stt.Word{Text: pw, Start: stt.SecondsToDuration(w.Start)})
 		}
 		ts = append(ts, stt.Transcript{
-			Text:  text.String(),
+			Words: words,
 			Start: stt.SecondsToDuration(first.Start),
 			// Duration spans first word's start to last word's end, not the
 			// message's overall Start/Duration, which cover every speaker.
-			Duration:   stt.SecondsToDuration(last.End - first.Start),
-			Confidence: confSum / float64(len(run)),
+			Duration: stt.SecondsToDuration(last.End - first.Start),
 			// Deepgram speaker indices are 0-based; this package's Speaker
 			// is 1-based with 0 reserved for "unknown", so every index
 			// shifts up by one. first.Speaker, not the word that triggered

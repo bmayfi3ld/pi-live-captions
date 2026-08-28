@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -155,9 +156,9 @@ func TestEventsRelaysPausedStatus(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	r := bufio.NewReader(resp.Body)
-	nextSSEData(t, r) // discard the initial snapshot
+	nextSSEData(t, r) // discard the initial status
 
-	hub.PublishStatus("paused", "")
+	hub.PublishStatus("paused")
 
 	data := nextSSEData(t, r)
 	var ev caption.Event
@@ -170,23 +171,20 @@ func TestEventsRelaysPausedStatus(t *testing.T) {
 	if ev.State != "paused" {
 		t.Errorf("event state = %q, want %q", ev.State, "paused")
 	}
-	if ev.Detail != "" {
-		t.Errorf("event detail = %q, want empty — the page decides the wording", ev.Detail)
-	}
 }
 
-// TestEventsSnapshotReplaysLastStatus is the actual regression guard for the
+// TestEventsFirstEventReplaysLastStatus is the actual regression guard for the
 // hub-memory bug: publish "paused" BEFORE any client connects, then confirm
-// the very first event a new subscriber receives — the snapshot — already
-// carries state "paused". TestEventsRelaysPausedStatus above connects first
-// and publishes second, so it cannot catch a client that missed the edge
-// (e.g. a page loaded mid-pause, or an EventSource that reconnected mid-pause
-// after a phone's screen slept).
-func TestEventsSnapshotReplaysLastStatus(t *testing.T) {
+// the very first event a new subscriber receives already carries state
+// "paused". TestEventsRelaysPausedStatus above connects first and publishes
+// second, so it cannot catch a client that missed the edge (e.g. a page loaded
+// mid-pause, or an EventSource that reconnected mid-pause after a phone's
+// screen slept).
+func TestEventsFirstEventReplaysLastStatus(t *testing.T) {
 	cfg := newTestConfig()
 	base, hub, _ := startTestServer(t, cfg)
 
-	hub.PublishStatus("paused", "")
+	hub.PublishStatus("paused")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -201,21 +199,21 @@ func TestEventsSnapshotReplaysLastStatus(t *testing.T) {
 	data := nextSSEData(t, r)
 	var ev caption.Event
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
-		t.Fatalf("snapshot event is not valid JSON: %v (%q)", err, data)
+		t.Fatalf("first event is not valid JSON: %v (%q)", err, data)
 	}
-	if ev.Kind != caption.KindSnapshot {
-		t.Fatalf("event kind = %q, want %q", ev.Kind, caption.KindSnapshot)
+	if ev.Kind != caption.KindStatus {
+		t.Fatalf("event kind = %q, want %q", ev.Kind, caption.KindStatus)
 	}
 	if ev.State != "paused" {
-		t.Errorf("snapshot state = %q, want %q — a late joiner must learn the current state from the snapshot, not wait for a change that may never come", ev.State, "paused")
+		t.Errorf("first event state = %q, want %q — a late joiner must learn the current state immediately, not wait for a change that may never come", ev.State, "paused")
 	}
 }
 
-// TestEventsSnapshotOmitsStateWhenNonePublished confirms the replay in
+// TestEventsFirstEventOmitsStateWhenNonePublished confirms the replay in
 // Subscribe doesn't change the wire format for the common case: a client
-// connecting before any status has ever been published still gets a
-// snapshot with no "state" field at all (omitempty), not state: "".
-func TestEventsSnapshotOmitsStateWhenNonePublished(t *testing.T) {
+// connecting before any status has ever been published still gets an event
+// with no "state" field at all (omitempty), not state: "".
+func TestEventsFirstEventOmitsStateWhenNonePublished(t *testing.T) {
 	base, _, _ := startTestServer(t, newTestConfig())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -231,21 +229,20 @@ func TestEventsSnapshotOmitsStateWhenNonePublished(t *testing.T) {
 	data := nextSSEData(t, r)
 	var raw map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &raw); err != nil {
-		t.Fatalf("snapshot event is not valid JSON: %v (%q)", err, data)
+		t.Fatalf("first event is not valid JSON: %v (%q)", err, data)
 	}
 	if _, present := raw["state"]; present {
-		t.Errorf("snapshot JSON has a %q key when no status was ever published, want it omitted entirely: %q", "state", data)
+		t.Errorf("event JSON has a %q key when no status was ever published, want it omitted entirely: %q", "state", data)
 	}
 }
 
-// TestEventsHeadersAndSnapshotFirst covers the SSE contract every viewer
-// relies on: the right headers to survive proxies, and a snapshot as the
-// very first event so a page load is never blank.
-func TestEventsHeadersAndSnapshotFirst(t *testing.T) {
+// TestEventsHeadersAndStatusFirst covers the SSE contract every viewer relies
+// on: the right headers to survive proxies, and a status as the very first
+// event. Text published before the client connected is deliberately NOT
+// replayed — a late joiner starts from the next segment.
+func TestEventsHeadersAndStatusFirst(t *testing.T) {
 	cfg := newTestConfig()
-	// Seed history before any client connects, so the snapshot has to carry
-	// something for a late joiner.
-	cfg.Hub.Publish(stt.Transcript{Text: "already said"})
+	cfg.Hub.Publish(stt.Transcript{Words: stt.Untimed("already said")})
 	base, _, _ := startTestServer(t, cfg)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -272,16 +269,16 @@ func TestEventsHeadersAndSnapshotFirst(t *testing.T) {
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		t.Fatalf("first event is not valid JSON: %v (%q)", err, data)
 	}
-	if ev.Kind != caption.KindSnapshot {
-		t.Fatalf("first event kind = %q, want snapshot", ev.Kind)
+	if ev.Kind != caption.KindStatus {
+		t.Fatalf("first event kind = %q, want status", ev.Kind)
 	}
-	if ev.Text != "already said" {
-		t.Errorf("snapshot text = %q, want the seeded history %q", ev.Text, "already said")
+	if len(ev.Words) != 0 {
+		t.Errorf("first event carries %d words, want none — history is not replayed", len(ev.Words))
 	}
 }
 
 // TestEventsDeliversPublishedEvents proves the stream isn't just the initial
-// snapshot: events published after connecting must reach the client too.
+// status: events published after connecting must reach the client too.
 func TestEventsDeliversPublishedEvents(t *testing.T) {
 	cfg := newTestConfig()
 	base, hub, _ := startTestServer(t, cfg)
@@ -295,17 +292,23 @@ func TestEventsDeliversPublishedEvents(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	r := bufio.NewReader(resp.Body)
-	nextSSEData(t, r) // discard the initial snapshot
+	nextSSEData(t, r) // discard the initial status
 
-	hub.Publish(stt.Transcript{Text: "live line"})
+	hub.Publish(stt.Transcript{Words: []stt.Word{
+		{Text: "live", Start: 0},
+		{Text: "line", Start: 250 * time.Millisecond},
+	}})
 
 	data := nextSSEData(t, r)
 	var ev caption.Event
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		t.Fatalf("published event is not valid JSON: %v (%q)", err, data)
 	}
-	if ev.Kind != caption.KindCaption || ev.Text != "live line" {
-		t.Errorf("event = %+v, want a caption event with text %q", ev, "live line")
+	// A caption event carries words, not Text — and their onsets survive the
+	// round trip through JSON, which is the whole point of sending them.
+	want := []caption.Word{{Text: "live", OffsetMS: 0}, {Text: "line", OffsetMS: 250}}
+	if ev.Kind != caption.KindCaption || !slices.Equal(ev.Words, want) {
+		t.Errorf("event = %+v, want a caption event carrying %+v", ev, want)
 	}
 }
 
@@ -327,9 +330,9 @@ func TestEventsCarrySpeakerOnTheWire(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	r := bufio.NewReader(resp.Body)
-	nextSSEData(t, r) // discard the initial snapshot
+	nextSSEData(t, r) // discard the initial status
 
-	hub.Publish(stt.Transcript{Text: "the guest speaks", Speaker: 2})
+	hub.Publish(stt.Transcript{Words: stt.Untimed("the guest speaks"), Speaker: 2})
 	data := nextSSEData(t, r)
 	if !strings.Contains(data, `"speaker":2`) {
 		t.Errorf("caption event = %q, want it to carry \"speaker\":2", data)
@@ -339,7 +342,7 @@ func TestEventsCarrySpeakerOnTheWire(t *testing.T) {
 	// pipeline's "unknown" sentinel, never a real speaker, so it must not
 	// appear at all — a `"speaker":0` on the wire would draw a badge for a
 	// turn change that never happened.
-	hub.Publish(stt.Transcript{Text: "unattributed audio", Start: 200 * time.Millisecond})
+	hub.Publish(stt.Transcript{Words: stt.Untimed("unattributed audio"), Start: 200 * time.Millisecond})
 	data = nextSSEData(t, r)
 	if strings.Contains(data, "speaker") {
 		t.Errorf("caption event = %q, want no speaker field for an unknown speaker", data)
@@ -362,7 +365,7 @@ func TestClientDisconnectCleansUpSubscription(t *testing.T) {
 	r := bufio.NewReader(resp.Body)
 	nextSSEData(t, r) // wait for the subscription to actually be established
 
-	if got := m.SSEClients(); got != 1 {
+	if got := m.Snapshot().Web.Clients; got != 1 {
 		t.Fatalf("sse_clients = %d after connect, want 1", got)
 	}
 
@@ -371,16 +374,16 @@ func TestClientDisconnectCleansUpSubscription(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if m.SSEClients() == 0 {
+		if m.Snapshot().Web.Clients == 0 {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Errorf("sse_clients = %d after disconnect, want 0", m.SSEClients())
+	t.Errorf("sse_clients = %d after disconnect, want 0", m.Snapshot().Web.Clients)
 }
 
-// TestLogoUnsetReturns404 makes sure an unconfigured logo falls through to
-// pageHandler's catch-all 404 rather than serving something unexpected.
+// TestLogoUnsetReturns404 makes sure an unconfigured logo falls through to the
+// mux's 404 rather than serving something unexpected.
 func TestLogoUnsetReturns404(t *testing.T) {
 	base, _, _ := startTestServer(t, newTestConfig())
 	resp, err := http.Get(base + "/logo")

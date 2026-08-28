@@ -1,7 +1,6 @@
 package mock
 
 import (
-	"math/rand"
 	"strings"
 	"time"
 
@@ -58,8 +57,6 @@ const (
 // tests. It also carries the current speaker, set from phrases on each
 // restart, so step can stamp it onto every Transcript it emits.
 type phraseState struct {
-	rng *rand.Rand
-
 	phraseIdx int
 	// speaker is the current phrase's speaker, cached at restart so step
 	// doesn't need to re-index phrases on every segment.
@@ -78,9 +75,7 @@ type phraseState struct {
 	gapUntil    time.Duration
 }
 
-func newPhraseState(rng *rand.Rand) *phraseState {
-	return &phraseState{rng: rng}
-}
+func newPhraseState() *phraseState { return &phraseState{} }
 
 // restart begins a fresh utterance at media time now, discarding whatever was
 // in flight. step calls this both for the very first phrase and whenever a
@@ -120,11 +115,10 @@ func (p *phraseState) step(now time.Duration, emit func(stt.Transcript) bool) bo
 
 	seg := p.segments[p.segIdx]
 	if !emit(stt.Transcript{
-		Text:       seg,
-		Speaker:    p.speaker,
-		Start:      p.segStart,
-		Duration:   now - p.segStart,
-		Confidence: 0.90 + p.rng.Float64()*0.09,
+		Words:    timeWords(seg, p.segStart, now-p.segStart),
+		Speaker:  p.speaker,
+		Start:    p.segStart,
+		Duration: now - p.segStart,
 	}) {
 		return false
 	}
@@ -139,6 +133,32 @@ func (p *phraseState) step(now time.Duration, emit func(stt.Transcript) bool) bo
 	p.segStart = now
 	p.nextSegment = now + segmentAudio
 	return true
+}
+
+// timeWords gives each word in seg an onset inside [start, start+dur), so the
+// offline dev loop carries per-word timing on the same path a real provider
+// does rather than leaving that field empty everywhere but production.
+//
+// ponytail: character-proportional and gapless — a longer word gets a longer
+// slice of the segment, and nobody ever pauses mid-clause. Enough to exercise
+// a pacer, not enough to judge one by. Upgrade to a syllable estimate, or
+// script real pauses into phrases, if the dev loop ever needs honest prosody.
+func timeWords(seg string, start, dur time.Duration) []stt.Word {
+	fields := strings.Fields(seg)
+	if len(fields) <= 1 || dur <= 0 {
+		return stt.Untimed(seg)
+	}
+	chars := 0
+	for _, f := range fields {
+		chars += len(f)
+	}
+	words := make([]stt.Word, 0, len(fields))
+	at := start
+	for _, f := range fields {
+		words = append(words, stt.Word{Text: f, Start: at})
+		at += dur * time.Duration(len(f)) / time.Duration(chars)
+	}
+	return words
 }
 
 // splitSegments divides one phrase into clause-sized pieces the way endpointing

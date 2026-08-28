@@ -49,7 +49,7 @@ func (r *ring) push(f audio.Frame) {
 		// uncounted. While the gate is active, though, evicting live audio
 		// means the link isn't draining fast enough to keep up — that IS
 		// worth flagging.
-		if r.met != nil && r.gate != nil && r.gate.Active() {
+		if r.gate.Active() {
 			r.met.STTBufferDrop()
 		}
 	}

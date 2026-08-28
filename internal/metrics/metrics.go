@@ -7,7 +7,7 @@ package metrics
 
 import (
 	"runtime"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,9 +68,11 @@ type Metrics struct {
 	monitorAlive   atomic.Bool
 
 	// STT.
-	Engine         string
+	Engine string
+	// sttStateHook is set once at startup, before any goroutine that could
+	// fire it exists, so it needs no synchronization of its own.
+	sttStateHook   func(ConnState)
 	sttState       atomic.Int32
-	sttStateHook   atomic.Pointer[func(ConnState)]
 	sttReconnect   atomic.Int64
 	sttSegments    atomic.Int64
 	sttLines       atomic.Int64
@@ -165,7 +167,7 @@ func (s *latencySeries) stats(now time.Time) (last, p50, p95, max time.Duration,
 	for i, samp := range s.samples {
 		sorted[i] = samp.d
 	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	slices.Sort(sorted)
 	p50 = percentile(sorted, 0.50)
 	p95 = percentile(sorted, 0.95)
 	max = sorted[n-1]
@@ -256,8 +258,8 @@ func (m *Metrics) SetSTTState(s ConnState) {
 	if old == int32(s) {
 		return
 	}
-	if hook := m.sttStateHook.Load(); hook != nil {
-		(*hook)(s)
+	if m.sttStateHook != nil {
+		m.sttStateHook(s)
 	}
 }
 func (m *Metrics) STTState() ConnState { return ConnState(m.sttState.Load()) }
@@ -281,11 +283,10 @@ func (m *Metrics) STTBytesSent(n int) { m.sttBytesSent.Add(int64(n)) }
 func (m *Metrics) STTBufferDrop() { m.degrade(&m.sttBufferDrops) }
 
 // SetSTTStateHook registers a callback invoked when the STT state changes.
-// Set once before the session starts; called from engine goroutines, so the
-// callback must not block.
-func (m *Metrics) SetSTTStateHook(f func(ConnState)) {
-	m.sttStateHook.Store(&f)
-}
+// Must be called before the session starts — it is not safe against a
+// concurrent SetSTTState — and is called from engine goroutines thereafter, so
+// the callback must not block.
+func (m *Metrics) SetSTTStateHook(f func(ConnState)) { m.sttStateHook = f }
 
 func (m *Metrics) SetSTTError(err error) {
 	m.mu.Lock()
@@ -371,10 +372,9 @@ func (m *Metrics) SSEConnect() {
 	m.sseClients.Add(1)
 	m.sseClientsTotal.Add(1)
 }
-func (m *Metrics) SSEDisconnect()  { m.sseClients.Add(-1) }
-func (m *Metrics) SSEEvent()       { m.sseEvents.Add(1) }
-func (m *Metrics) SSESlowDrop()    { m.degrade(&m.sseSlowDrops) }
-func (m *Metrics) SSEClients() int { return int(m.sseClients.Load()) }
+func (m *Metrics) SSEDisconnect() { m.sseClients.Add(-1) }
+func (m *Metrics) SSEEvent()      { m.sseEvents.Add(1) }
+func (m *Metrics) SSESlowDrop()   { m.degrade(&m.sseSlowDrops) }
 
 // --- Transcript ---
 

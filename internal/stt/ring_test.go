@@ -5,13 +5,16 @@ import (
 	"time"
 
 	"livecaption/internal/audio"
+	"livecaption/internal/metrics"
 )
 
 // TestRing_CapturedAtRoundTrip checks that push/pop carry a chunk's
 // CapturedAt through unchanged, since that value is what the anchor index
 // ultimately keys latency off of.
 func TestRing_CapturedAtRoundTrip(t *testing.T) {
-	r := newRing(1<<20, nil, nil)
+	// Real metrics and gate, not nil: push consults both on eviction, and this
+	// cap is only large enough to avoid one by accident.
+	r := newRing(1<<20, metrics.New("test", "test"), NewGate(PauseConfig{}))
 	now := time.Now()
 
 	r.push(audio.Frame{PCM: []byte{1, 2, 3, 4}, CapturedAt: now})

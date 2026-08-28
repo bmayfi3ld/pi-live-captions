@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -102,8 +103,7 @@ func testEngine(wsURL string) *Engine {
 
 // addTranscript builds an AddTranscript the way the API documents it: one
 // "word" result spanning the whole range, so tests that don't care about
-// diarization can still assert on Start/Duration/Confidence the way they
-// always have. The flat transcript/metadata fields are populated too, purely
+// diarization can still assert on Start/Duration the way they always have. The flat transcript/metadata fields are populated too, purely
 // as the hedge Speechmatics itself requires (see transcripts()) — with
 // results present they are not what decodeTranscript actually reads.
 func addTranscript(text string, start, end float64) map[string]any {
@@ -207,17 +207,14 @@ func TestDecode(t *testing.T) {
 			t.Fatalf("Decode = (%v, %v), want one transcript", ts, err)
 		}
 		tr := ts[0]
-		if tr.Text != "hello there" {
-			t.Errorf("Text = %q", tr.Text)
+		if tr.Text() != "hello there" {
+			t.Errorf("Text = %q", tr.Text())
 		}
 		if tr.Start != 1500*time.Millisecond {
 			t.Errorf("Start = %v, want 1.5s", tr.Start)
 		}
 		if tr.Duration != time.Second {
 			t.Errorf("Duration = %v, want 1s (end_time - start_time)", tr.Duration)
-		}
-		if tr.Confidence != 0.9 {
-			t.Errorf("Confidence = %v, want the mean word confidence", tr.Confidence)
 		}
 	})
 
@@ -283,7 +280,7 @@ func TestDecode_TranscriptInMetadata(t *testing.T) {
 	data := []byte(`{"message":"AddTranscript",
 		"metadata":{"start_time":0,"end_time":1,"transcript":"nested"}}`)
 	ts, err := s.Decode(data)
-	if err != nil || len(ts) != 1 || ts[0].Text != "nested" {
+	if err != nil || len(ts) != 1 || ts[0].Text() != "nested" {
 		t.Fatalf("Decode = (%v, %v), want the metadata transcript", ts, err)
 	}
 	if ts[0].Speaker != 0 {
@@ -324,8 +321,19 @@ func TestTranscripts_Diarization(t *testing.T) {
 		t.Fatalf("got %d transcripts, want 2: %+v", len(ts), ts)
 	}
 
-	if ts[0].Text != "Hello, there" {
-		t.Errorf("run 0 Text = %q, want %q (punctuation attaches with no space)", ts[0].Text, "Hello, there")
+	if ts[0].Text() != "Hello, there" {
+		t.Errorf("run 0 Text = %q, want %q (punctuation attaches with no space)", ts[0].Text(), "Hello, there")
+	}
+	// Each word keeps its own onset, and the comma is glued onto the word it
+	// follows rather than becoming a Word of its own — punctuation is not a
+	// beat a pacer should reveal separately, and a stray entry here would
+	// also desync every downstream index into the segment.
+	wantRun0 := []stt.Word{
+		{Text: "Hello,", Start: 0},
+		{Text: "there", Start: 400 * time.Millisecond},
+	}
+	if !slices.Equal(ts[0].Words, wantRun0) {
+		t.Errorf("run 0 Words = %+v, want %+v", ts[0].Words, wantRun0)
 	}
 	if ts[0].Speaker != 1 {
 		t.Errorf("run 0 Speaker = %d, want 1 (S1)", ts[0].Speaker)
@@ -333,21 +341,22 @@ func TestTranscripts_Diarization(t *testing.T) {
 	if ts[0].Start != 0 || ts[0].Duration != 800*time.Millisecond {
 		t.Errorf("run 0 Start/Duration = %v/%v, want 0/800ms", ts[0].Start, ts[0].Duration)
 	}
-	if got, want := ts[0].Confidence, (0.95+0.93)/2; got != want {
-		t.Errorf("run 0 Confidence = %v, want %v (punctuation excluded)", got, want)
-	}
 
-	if ts[1].Text != "Hi there." {
-		t.Errorf("run 1 Text = %q, want %q", ts[1].Text, "Hi there.")
+	if ts[1].Text() != "Hi there." {
+		t.Errorf("run 1 Text = %q, want %q", ts[1].Text(), "Hi there.")
+	}
+	wantRun1 := []stt.Word{
+		{Text: "Hi", Start: 800 * time.Millisecond},
+		{Text: "there.", Start: 1100 * time.Millisecond},
+	}
+	if !slices.Equal(ts[1].Words, wantRun1) {
+		t.Errorf("run 1 Words = %+v, want %+v", ts[1].Words, wantRun1)
 	}
 	if ts[1].Speaker != 2 {
 		t.Errorf("run 1 Speaker = %d, want 2 (S2)", ts[1].Speaker)
 	}
 	if ts[1].Start != 800*time.Millisecond || ts[1].Duration != 700*time.Millisecond {
 		t.Errorf("run 1 Start/Duration = %v/%v, want 800ms/700ms", ts[1].Start, ts[1].Duration)
-	}
-	if got, want := ts[1].Confidence, (0.90+0.92)/2; got != want {
-		t.Errorf("run 1 Confidence = %v, want %v (punctuation excluded)", got, want)
 	}
 }
 
@@ -445,8 +454,8 @@ func TestEngine_FullSession(t *testing.T) {
 
 	select {
 	case tr := <-out:
-		if tr.Text != "hello" {
-			t.Errorf("Text = %q, want the final only (a partial leaked)", tr.Text)
+		if tr.Text() != "hello" {
+			t.Errorf("Text = %q, want the final only (a partial leaked)", tr.Text())
 		}
 		if tr.ReceivedAt.IsZero() {
 			t.Error("ReceivedAt should be stamped by the driver")

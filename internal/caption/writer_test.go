@@ -1,8 +1,6 @@
 package caption
 
 import (
-	"bufio"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,10 +10,10 @@ import (
 	"livecaption/internal/metrics"
 )
 
-// TestWriterCreatesSessionFilesWithExpectedFormats covers the contract the
-// rest of the tool depends on: a session directory with both a human-
-// readable transcript and a machine-readable one, in the documented formats.
-func TestWriterCreatesSessionFilesWithExpectedFormats(t *testing.T) {
+// TestWriterCreatesSessionFileWithExpectedFormat covers the contract the rest
+// of the tool depends on: a session directory named after the start time,
+// holding a transcript in the documented format.
+func TestWriterCreatesSessionFileWithExpectedFormat(t *testing.T) {
 	m := metrics.New("v", "s")
 	started := time.Date(2026, 8, 19, 9, 31, 5, 0, time.UTC)
 	w, err := NewWriter(t.TempDir(), started, m)
@@ -24,7 +22,7 @@ func TestWriterCreatesSessionFilesWithExpectedFormats(t *testing.T) {
 	}
 
 	at := time.Date(2026, 8, 19, 9, 32, 0, 0, time.UTC)
-	w.Write(Line{ID: "u1", Text: "hello there", OffsetMS: 754000, At: at})
+	w.Write(Line{Text: "hello there", OffsetMS: 754000, At: at})
 
 	if err := w.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -43,28 +41,30 @@ func TestWriterCreatesSessionFilesWithExpectedFormats(t *testing.T) {
 		t.Errorf("transcript.txt = %q, want %q", string(txt), want)
 	}
 
-	jsonl, err := os.ReadFile(filepath.Join(w.Dir(), "transcript.jsonl"))
+}
+
+// TestWriterSpeakerPrefix pins the one piece of formatting the plain-text file
+// carries beyond clock and text: who was speaking, spelled out for a reader
+// returning to the transcript later.
+func TestWriterSpeakerPrefix(t *testing.T) {
+	m := metrics.New("v", "s")
+	w, err := NewWriter(t.TempDir(), time.Now(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lines := strings.Split(strings.TrimRight(string(jsonl), "\n"), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("transcript.jsonl has %d lines, want 1: %q", len(lines), jsonl)
+	w.Write(Line{Text: "over here", OffsetMS: 0, At: time.Now(), Speaker: 2})
+	w.Write(Line{Text: "unattributed", OffsetMS: 0, At: time.Now()})
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
-	var rec map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
-		t.Fatalf("transcript.jsonl line is not valid JSON: %v", err)
+
+	txt, err := os.ReadFile(filepath.Join(w.Dir(), "transcript.txt"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, field := range []string{"id", "text", "offset_ms", "clock", "at"} {
-		if _, ok := rec[field]; !ok {
-			t.Errorf("jsonl record missing field %q: %v", field, rec)
-		}
-	}
-	if rec["id"] != "u1" || rec["text"] != "hello there" || rec["clock"] != "12:34" {
-		t.Errorf("jsonl record = %v", rec)
-	}
-	if rec["offset_ms"].(float64) != 754000 {
-		t.Errorf("offset_ms = %v, want 754000", rec["offset_ms"])
+	want := "[00:00] [S2] over here\n[00:00] unattributed\n"
+	if string(txt) != want {
+		t.Errorf("transcript.txt = %q, want %q", string(txt), want)
 	}
 }
 
@@ -76,7 +76,7 @@ func TestWriterFlushesOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.Write(Line{ID: "u1", Text: "not yet flushed by the ticker", At: time.Now()})
+	w.Write(Line{Text: "not yet flushed by the ticker", At: time.Now()})
 	dir := w.Dir()
 
 	if err := w.Close(); err != nil {
@@ -102,8 +102,8 @@ func TestWriterMetricsTrackLinesAndBytes(t *testing.T) {
 	}
 	defer w.Close()
 
-	w.Write(Line{ID: "u1", Text: "one", At: time.Now()})
-	w.Write(Line{ID: "u2", Text: "two", At: time.Now()})
+	w.Write(Line{Text: "one", At: time.Now()})
+	w.Write(Line{Text: "two", At: time.Now()})
 
 	snap := m.Snapshot()
 	if snap.Transcript.Lines != 2 {
@@ -134,7 +134,7 @@ func TestWriterCloseIsIdempotentAndWriteAfterCloseIsSafe(t *testing.T) {
 		t.Fatalf("second Close: %v", err)
 	}
 
-	w.Write(Line{ID: "late", Text: "after close", At: time.Now()})
+	w.Write(Line{Text: "after close", At: time.Now()})
 
 	txt, err := os.ReadFile(filepath.Join(w.Dir(), "transcript.txt"))
 	if err != nil {
@@ -145,36 +145,27 @@ func TestWriterCloseIsIdempotentAndWriteAfterCloseIsSafe(t *testing.T) {
 	}
 }
 
-// TestWriterContentSurvivesMultipleWrites is a light end-to-end check that
-// two lines land in order on both files, which the format tests above assume
-// but don't directly exercise across more than one record.
+// TestWriterContentSurvivesMultipleWrites is a light end-to-end check that two
+// lines land in order, which the format tests above assume but don't directly
+// exercise across more than one write.
 func TestWriterContentSurvivesMultipleWrites(t *testing.T) {
 	m := metrics.New("v", "s")
 	w, err := NewWriter(t.TempDir(), time.Now(), m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.Write(Line{ID: "u1", Text: "first", At: time.Now()})
-	w.Write(Line{ID: "u2", Text: "second", At: time.Now()})
+	w.Write(Line{Text: "first", At: time.Now()})
+	w.Write(Line{Text: "second", At: time.Now()})
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	f, err := os.Open(filepath.Join(w.Dir(), "transcript.jsonl"))
+	txt, err := os.ReadFile(filepath.Join(w.Dir(), "transcript.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	var texts []string
-	for sc.Scan() {
-		var rec struct{ Text string }
-		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
-			t.Fatalf("invalid JSON line %q: %v", sc.Text(), err)
-		}
-		texts = append(texts, rec.Text)
-	}
-	if len(texts) != 2 || texts[0] != "first" || texts[1] != "second" {
-		t.Errorf("texts = %v, want [first second] in order", texts)
+	lines := strings.Split(strings.TrimRight(string(txt), "\n"), "\n")
+	if len(lines) != 2 || !strings.HasSuffix(lines[0], "first") || !strings.HasSuffix(lines[1], "second") {
+		t.Errorf("transcript.txt = %q, want first then second in order", string(txt))
 	}
 }

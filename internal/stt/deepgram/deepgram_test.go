@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,21 +35,21 @@ func TestDecodeTranscript(t *testing.T) {
 			json: `{"type":"Results","is_final":false,"start":1.5,"duration":0.4,
 				"channel":{"alternatives":[{"transcript":"hello there","confidence":0.82}]}}`,
 			want: []stt.Transcript{{
-				Text:  "hello there",
-				Start: 1500 * time.Millisecond, Duration: 400 * time.Millisecond, Confidence: 0.82,
+				Words: stt.Untimed("hello there"),
+				Start: 1500 * time.Millisecond, Duration: 400 * time.Millisecond,
 			}},
 			wantFinal: false,
 		},
 		{
 			// No words[] (diarize off, or a server that ignored it): falls
-			// back to the flat transcript/start/duration/confidence fields,
+			// back to the flat transcript/start/duration fields,
 			// unconditionally Speaker 0.
 			name: "final result with no words falls back to Speaker 0",
 			json: `{"type":"Results","is_final":true,"start":0,"duration":2.1,
 				"channel":{"alternatives":[{"transcript":"good morning everyone","confidence":0.95}]}}`,
 			want: []stt.Transcript{{
-				Text:  "good morning everyone",
-				Start: 0, Duration: 2100 * time.Millisecond, Confidence: 0.95, Speaker: 0,
+				Words: stt.Untimed("good morning everyone"),
+				Start: 0, Duration: 2100 * time.Millisecond, Speaker: 0,
 			}},
 			wantFinal: true,
 		},
@@ -81,8 +82,12 @@ func TestDecodeTranscript(t *testing.T) {
 						{"word":"world","start":0.2,"end":0.4,"confidence":0.9,"speaker":0}
 					]}]}}`,
 			want: []stt.Transcript{{
-				Text: "Hello, world", Start: 0, Duration: 400 * time.Millisecond,
-				Confidence: 0.9, Speaker: 1,
+				Words: []stt.Word{
+					{Text: "Hello,", Start: 0},
+					{Text: "world", Start: 200 * time.Millisecond},
+				},
+				Start: 0, Duration: 400 * time.Millisecond,
+				Speaker: 1,
 			}},
 			wantFinal: true,
 		},
@@ -101,12 +106,22 @@ func TestDecodeTranscript(t *testing.T) {
 					]}]}}`,
 			want: []stt.Transcript{
 				{
-					Text: "Hello there,", Start: 0, Duration: 800 * time.Millisecond,
-					Confidence: (0.95 + 0.93) / 2, Speaker: 1, // Deepgram 0 -> our 1
+					// Each run keeps its own words, with the onsets the
+					// speaker actually had — not the run's span alone.
+					Words: []stt.Word{
+						{Text: "Hello", Start: 0},
+						{Text: "there,", Start: 400 * time.Millisecond},
+					},
+					Start: 0, Duration: 800 * time.Millisecond,
+					Speaker: 1, // Deepgram 0 -> our 1
 				},
 				{
-					Text: "Hi there.", Start: 800 * time.Millisecond, Duration: 700 * time.Millisecond,
-					Confidence: (0.90 + 0.92) / 2, Speaker: 2, // Deepgram 1 -> our 2
+					Words: []stt.Word{
+						{Text: "Hi", Start: 800 * time.Millisecond},
+						{Text: "there.", Start: 1100 * time.Millisecond},
+					},
+					Start: 800 * time.Millisecond, Duration: 700 * time.Millisecond,
+					Speaker: 2, // Deepgram 1 -> our 2
 				},
 			},
 			wantFinal: true,
@@ -130,9 +145,15 @@ func TestDecodeTranscript(t *testing.T) {
 			}
 			for i, w := range tc.want {
 				g := got[i]
-				if g.Text != w.Text || g.Start != w.Start || g.Duration != w.Duration ||
-					g.Confidence != w.Confidence || g.Speaker != w.Speaker {
+				if !slices.Equal(g.Words, w.Words) || g.Start != w.Start ||
+					g.Duration != w.Duration || g.Speaker != w.Speaker {
 					t.Errorf("transcript[%d] = %+v, want %+v", i, g, w)
+				}
+				// The join is what every downstream consumer actually reads,
+				// so it is pinned separately: a words slice that compares
+				// equal but reassembles wrong would still be a bug.
+				if g.Text() != w.Text() {
+					t.Errorf("transcript[%d].Text() = %q, want %q", i, g.Text(), w.Text())
 				}
 			}
 			// Runs must never overlap in media time: each one's End() is the
@@ -343,7 +364,7 @@ func TestEngine_FullSession(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("expected 1 transcript (the non-final must be dropped), got %d: %+v", len(got), got)
 	}
-	if got[0].Text != "hello world" {
+	if got[0].Text() != "hello world" {
 		t.Errorf("final segment wrong: %+v", got[0])
 	}
 	if atomic.LoadInt64(&bytesReceived) == 0 {
@@ -420,10 +441,10 @@ loop:
 	if len(got) < 2 {
 		t.Fatalf("expected transcripts from both connections, got %+v", got)
 	}
-	if got[0].Text != "first connection" {
-		t.Errorf("first connection text = %q", got[0].Text)
+	if got[0].Text() != "first connection" {
+		t.Errorf("first connection text = %q", got[0].Text())
 	}
-	if got[1].Text != "second connection" {
+	if got[1].Text() != "second connection" {
 		t.Errorf("second connection transcript wrong: %+v", got[1])
 	}
 	if eng.cfg.Metrics.Snapshot().STT.Reconnects == 0 {
@@ -709,7 +730,7 @@ func TestEngine_TranscriptCapturedAt(t *testing.T) {
 	var got stt.Transcript
 	found := false
 	for tr := range out {
-		if tr.Text == "hello" {
+		if tr.Text() == "hello" {
 			got, found = tr, true
 		}
 	}
@@ -890,7 +911,7 @@ loop:
 	for {
 		select {
 		case tr := <-out:
-			if tr.Text == "resumed" {
+			if tr.Text() == "resumed" {
 				got, found = tr, true
 				break loop
 			}

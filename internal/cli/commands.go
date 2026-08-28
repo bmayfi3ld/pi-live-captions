@@ -14,7 +14,7 @@ import (
 // Run executes a replay session: an audio file streamed through the real
 // pipeline at wall-clock rate, so everything downstream behaves exactly as it
 // will with the live feed.
-func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger, g Globals) error {
+func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger) error {
 	if err := resolveSTTDefaults(&c.STTFlags); err != nil {
 		return err
 	}
@@ -42,7 +42,6 @@ func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger
 		stt:         c.STTFlags,
 		server:      c.ServerFlags,
 		output:      c.OutputFlags,
-		globals:     g,
 	}
 
 	s, err := newSession(o, term, log)
@@ -62,7 +61,7 @@ func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger
 }
 
 // Run executes a live capture session.
-func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger, g Globals) error {
+func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger) error {
 	if err := resolveSTTDefaults(&c.STTFlags); err != nil {
 		return err
 	}
@@ -94,7 +93,6 @@ func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger, 
 		stt:         c.STTFlags,
 		server:      c.ServerFlags,
 		output:      c.OutputFlags,
-		globals:     g,
 	}
 
 	s, err := newSession(o, term, log)

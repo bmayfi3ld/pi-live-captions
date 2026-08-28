@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -345,8 +344,7 @@ type serverMessage struct {
 		StartTime    float64 `json:"start_time"`
 		EndTime      float64 `json:"end_time"`
 		Alternatives []struct {
-			Content    string  `json:"content"`
-			Confidence float64 `json:"confidence"`
+			Content string `json:"content"`
 			// Speaker is Speechmatics' own label: "S1", "S2", ... per
 			// identified speaker, or "UU" for unattributed audio. Empty when
 			// diarization was never requested.
@@ -378,13 +376,12 @@ func (m serverMessage) asError() error {
 // metadata across doc revisions (both are decoded, whichever is populated
 // wins).
 //
-// With Results present, text is assembled from Results[] instead of the flat
+// With Results present, the words come from Results[] instead of the flat
 // field, grouped into consecutive runs by speaker: one Transcript per run, so
 // a window that itself spans a speaker change (an MC interrupted by a
-// question, say) still splits correctly. Per-word confidence averaging
-// (previously a standalone confidence() method) is folded into the same walk,
-// per run, exactly as it worked before: only "word" results count, "entity"
-// and "punctuation" are skipped.
+// question, say) still splits correctly. Each word keeps its own start_time —
+// Transcript.Text() rebuilds the flat string on demand. Only "word" results
+// build text; "entity" and "punctuation" are handled separately below.
 func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 	if len(m.Results) == 0 {
 		text := m.Transcript
@@ -397,7 +394,7 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		start := stt.SecondsToDuration(m.Metadata.StartTime)
 		end := stt.SecondsToDuration(m.Metadata.EndTime)
 		return []stt.Transcript{{
-			Text: text,
+			Words: stt.Untimed(text),
 			// Media time on the current connection, exactly like Deepgram's
 			// byte clock, which is what lets the shared anchor index resolve
 			// CapturedAt/SentAt for both engines the same way.
@@ -407,30 +404,22 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 	}
 
 	var ts []stt.Transcript
-	var text strings.Builder
+	var words []stt.Word
 	var speaker int
 	var start, end float64
-	var confSum float64
-	var confN int
 	open := false
 
 	flush := func() {
 		if !open {
 			return
 		}
-		var confidence float64
-		if confN > 0 {
-			confidence = confSum / float64(confN)
-		}
 		ts = append(ts, stt.Transcript{
-			Text:       text.String(),
-			Start:      stt.SecondsToDuration(start),
-			Duration:   stt.SecondsToDuration(end - start),
-			Confidence: confidence,
-			Speaker:    speaker,
+			Words:    words,
+			Start:    stt.SecondsToDuration(start),
+			Duration: stt.SecondsToDuration(end - start),
+			Speaker:  speaker,
 		})
-		text.Reset()
-		confSum, confN = 0, 0
+		words = nil // a fresh slice per run: the one above is now owned by ts
 		open = false
 	}
 
@@ -447,9 +436,14 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		// belongs together). If somehow the very first result is
 		// punctuation, there is no run to attach to yet, so it is dropped
 		// rather than starting one for a symbol alone.
+		// It also attaches to the preceding Word rather than becoming one of
+		// its own: punctuation is not a word a pacer should reveal on its
+		// own beat, and gluing it here is what keeps Transcript.Text() —
+		// which joins Words with single spaces — identical to the string
+		// this loop used to build.
 		if r.Type == "punctuation" {
-			if open {
-				text.WriteString(alt.Content)
+			if open && len(words) > 0 {
+				words[len(words)-1].Text += alt.Content
 				end = r.EndTime
 			}
 			continue
@@ -459,9 +453,7 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		// twenty six" -> "2026"); it is gated behind enable_entities, which
 		// startMessage never sets, but assembling text from every non-
 		// punctuation type would silently double those words if that ever
-		// changed. The old code was immune by construction, taking text from
-		// the flat transcript field and walking Results only for confidence —
-		// reassembling from Results is what makes this guard load-bearing.
+		// changed.
 		if r.Type != "word" {
 			continue
 		}
@@ -473,13 +465,8 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 			start = r.StartTime
 			open = true
 		}
-		if text.Len() > 0 {
-			text.WriteByte(' ')
-		}
-		text.WriteString(alt.Content)
+		words = append(words, stt.Word{Text: alt.Content, Start: stt.SecondsToDuration(r.StartTime)})
 		end = r.EndTime
-		confSum += alt.Confidence
-		confN++
 	}
 	flush()
 

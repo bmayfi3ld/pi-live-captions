@@ -133,7 +133,7 @@ recognition delay it can cost.
 ## Transcripts
 
 On by default — every session writes to `./transcripts/<YYYY-MM-DDTHH-MM-SS>/`, both
-`transcript.txt` (human-readable, timestamped) and `transcript.jsonl` (one record per line, for
+`transcript.txt` (human-readable, timestamped, with a `[S2]` prefix when the speaker is known, for
 tooling). Change the location with `--transcript-dir` or `LIVECAPTION_TRANSCRIPT_DIR`; disable
 with `--no-transcript`.
 

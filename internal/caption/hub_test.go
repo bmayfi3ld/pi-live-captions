@@ -1,6 +1,7 @@
 package caption
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,17 @@ const testBreakGap = breakGap
 
 func newTestHub() *Hub {
 	return NewHub(metrics.New("test", "test"))
+}
+
+// captionText rejoins a caption event's words, which is what the viewer's
+// shim does with them until it paces to their offsets. Assertions about a
+// segment's text go through it; assertions about timing read ev.Words.
+func captionText(ev Event) string {
+	var parts []string
+	for _, w := range ev.Words {
+		parts = append(parts, w.Text)
+	}
+	return strings.Join(parts, " ")
 }
 
 func drain(ch <-chan Event) []Event {
@@ -39,10 +51,10 @@ func TestUtteranceAssembly(t *testing.T) {
 
 	sub, unsub := h.Subscribe()
 	defer unsub()
-	drain(sub) // discard the initial snapshot
+	drain(sub) // discard the initial status
 
-	h.Publish(stt.Transcript{Text: "hello there,", Start: time.Second, Duration: 500 * time.Millisecond})
-	h.Publish(stt.Transcript{Text: "how are you?", Start: 1500 * time.Millisecond, Duration: 500 * time.Millisecond})
+	h.Publish(stt.Transcript{Words: stt.Untimed("hello there,"), Start: time.Second, Duration: 500 * time.Millisecond})
+	h.Publish(stt.Transcript{Words: stt.Untimed("how are you?"), Start: 1500 * time.Millisecond, Duration: 500 * time.Millisecond})
 
 	if len(finals) != 1 {
 		t.Fatalf("expected 1 finalized line, got %d: %v", len(finals), finals)
@@ -59,8 +71,8 @@ func TestUtteranceAssembly(t *testing.T) {
 	var captions, texts []string
 	for _, ev := range events {
 		if ev.Kind == KindCaption {
-			captions = append(captions, ev.Text)
-			texts = append(texts, ev.Text)
+			captions = append(captions, captionText(ev))
+			texts = append(texts, captionText(ev))
 		}
 	}
 	if len(captions) != 2 {
@@ -83,7 +95,7 @@ func TestPunctuationClosesLine(t *testing.T) {
 	var finals []Line
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
 
-	h.Publish(stt.Transcript{Text: "that's the whole sentence.", Start: time.Second})
+	h.Publish(stt.Transcript{Words: stt.Untimed("that's the whole sentence."), Start: time.Second})
 	if len(finals) != 1 {
 		t.Fatalf("expected punctuation to close the line immediately, got %d finals", len(finals))
 	}
@@ -104,9 +116,9 @@ func TestPauseAndPunctuationBothClose(t *testing.T) {
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
 
 	// Left open: no terminal punctuation, no gap yet.
-	h.Publish(stt.Transcript{Text: "we will begin in a moment", Start: 0, Duration: time.Second})
+	h.Publish(stt.Transcript{Words: stt.Untimed("we will begin in a moment"), Start: 0, Duration: time.Second})
 	// A gap well past testBreakGap, then a one-segment complete sentence.
-	h.Publish(stt.Transcript{Text: "Good morning.", Start: 3 * time.Second, Duration: time.Second})
+	h.Publish(stt.Transcript{Words: stt.Untimed("Good morning."), Start: 3 * time.Second, Duration: time.Second})
 
 	if len(finals) != 2 {
 		t.Fatalf("closed %d lines, want 2 (the pause closes the first, the period the second)", len(finals))
@@ -127,13 +139,13 @@ func TestSpeechGapClosesUnpunctuatedLine(t *testing.T) {
 	var finals []Line
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
 
-	h.Publish(stt.Transcript{Text: "item one", Start: 0})
+	h.Publish(stt.Transcript{Words: stt.Untimed("item one"), Start: 0})
 	if len(finals) != 0 {
 		t.Fatalf("expected no line closed yet, got %d", len(finals))
 	}
 
 	// A gap comfortably past testBreakGap.
-	h.Publish(stt.Transcript{Text: "item two", Start: 2 * time.Second})
+	h.Publish(stt.Transcript{Words: stt.Untimed("item two"), Start: 2 * time.Second})
 
 	if len(finals) != 1 {
 		t.Fatalf("expected the speech gap to close the unpunctuated line, got %d finals", len(finals))
@@ -152,19 +164,19 @@ func TestSpeechGapSetsBreakFlag(t *testing.T) {
 	defer unsub()
 	drain(sub)
 
-	h.Publish(stt.Transcript{Text: "first", Start: 0, Duration: 100 * time.Millisecond})
+	h.Publish(stt.Transcript{Words: stt.Untimed("first"), Start: 0, Duration: 100 * time.Millisecond})
 	drain(sub)
 
 	// Gap of exactly testBreakGap: isBreakLocked uses >=, so this must break.
-	h.Publish(stt.Transcript{Text: "second", Start: 100*time.Millisecond + testBreakGap})
+	h.Publish(stt.Transcript{Words: stt.Untimed("second"), Start: 100*time.Millisecond + testBreakGap})
 
 	events := drain(sub)
 	found := false
 	for _, ev := range events {
-		if ev.Kind == KindCaption && ev.Text == "second" {
+		if ev.Kind == KindCaption && captionText(ev) == "second" {
 			found = true
 			if !ev.Break {
-				t.Errorf("caption event for %q: Break = false, want true (gap == breakGap)", ev.Text)
+				t.Errorf("caption event for %q: Break = false, want true (gap == breakGap)", captionText(ev))
 			}
 		}
 	}
@@ -179,19 +191,19 @@ func TestSmallGapDoesNotBreak(t *testing.T) {
 	defer unsub()
 	drain(sub)
 
-	h.Publish(stt.Transcript{Text: "first", Start: 0, Duration: 100 * time.Millisecond})
+	h.Publish(stt.Transcript{Words: stt.Untimed("first"), Start: 0, Duration: 100 * time.Millisecond})
 	drain(sub)
 
 	// Comfortably under testBreakGap.
-	h.Publish(stt.Transcript{Text: "second", Start: 200 * time.Millisecond})
+	h.Publish(stt.Transcript{Words: stt.Untimed("second"), Start: 200 * time.Millisecond})
 
 	events := drain(sub)
 	found := false
 	for _, ev := range events {
-		if ev.Kind == KindCaption && ev.Text == "second" {
+		if ev.Kind == KindCaption && captionText(ev) == "second" {
 			found = true
 			if ev.Break {
-				t.Errorf("caption event for %q: Break = true, want false (gap well under breakGap)", ev.Text)
+				t.Errorf("caption event for %q: Break = true, want false (gap well under breakGap)", captionText(ev))
 			}
 		}
 	}
@@ -212,14 +224,14 @@ func TestNegativeGapBreaks(t *testing.T) {
 	defer unsub()
 	drain(sub)
 
-	h.Publish(stt.Transcript{Text: "before the restart", Start: 10 * time.Second, Duration: time.Second})
+	h.Publish(stt.Transcript{Words: stt.Untimed("before the restart"), Start: 10 * time.Second, Duration: time.Second})
 	drain(sub)
 	if len(finals) != 0 {
 		t.Fatalf("expected no line closed yet, got %d", len(finals))
 	}
 
 	// A fresh connection's media clock restarts at (or near) 0.
-	h.Publish(stt.Transcript{Text: "after the restart", Start: 0})
+	h.Publish(stt.Transcript{Words: stt.Untimed("after the restart"), Start: 0})
 
 	if len(finals) != 1 {
 		t.Fatalf("expected the clock restart to close the pending line, got %d finals", len(finals))
@@ -231,7 +243,7 @@ func TestNegativeGapBreaks(t *testing.T) {
 	events := drain(sub)
 	found := false
 	for _, ev := range events {
-		if ev.Kind == KindCaption && ev.Text == "after the restart" {
+		if ev.Kind == KindCaption && captionText(ev) == "after the restart" {
 			found = true
 			if !ev.Break {
 				t.Error("expected Break = true for a negative gap (media clock restart)")
@@ -255,7 +267,7 @@ func TestOverlongUtteranceIsForceClosed(t *testing.T) {
 	// maxUtteranceChars.
 	start := time.Duration(0)
 	for len(finals) == 0 {
-		h.Publish(stt.Transcript{Text: "word", Start: start})
+		h.Publish(stt.Transcript{Words: stt.Untimed("word"), Start: start})
 		start += 10 * time.Millisecond
 		if start > 10*time.Second {
 			t.Fatal("maxUtteranceChars guard never fired")
@@ -273,7 +285,7 @@ func TestFlushClosesPendingUtterance(t *testing.T) {
 	var finals []Line
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
 
-	h.Publish(stt.Transcript{Text: "an unfinished sentence", Start: 0})
+	h.Publish(stt.Transcript{Words: stt.Untimed("an unfinished sentence"), Start: 0})
 	h.Flush()
 
 	if len(finals) != 1 {
@@ -303,7 +315,7 @@ func TestSlowSubscriberIsDropped(t *testing.T) {
 
 	start := time.Duration(0)
 	for i := 0; i < subscriberBuffer*3; i++ {
-		h.Publish(stt.Transcript{Text: "line.", Start: start})
+		h.Publish(stt.Transcript{Words: stt.Untimed("line."), Start: start})
 		start += 10 * time.Millisecond
 	}
 
@@ -320,24 +332,29 @@ func TestSlowSubscriberIsDropped(t *testing.T) {
 	}
 }
 
-// TestSnapshotForLateJoiner covers the browser-refresh case: a page that
-// connects mid-session must not be blank. The snapshot's Text is the replay
-// flow — history joined plus the open committed text — since a caption
-// event's Text is a flat delta too, with no lines/pending distinction left.
-func TestSnapshotForLateJoiner(t *testing.T) {
+// TestFirstEventIsStatusWithNoCatchUp pins what a late joiner gets. There is
+// deliberately no replay of what was already said: the first event is a status
+// carrying the last published state, so a page that connects mid-pause shows
+// the right indicator, and nothing else. A blank display until the next
+// segment is the accepted cost of having exactly one rendering path.
+func TestFirstEventIsStatusWithNoCatchUp(t *testing.T) {
 	h := newTestHub()
-	h.Publish(stt.Transcript{Text: "earlier line.", Start: 0})
-	h.Publish(stt.Transcript{Text: "in progress", Start: 5 * time.Second})
+	h.PublishStatus("paused")
+	h.Publish(stt.Transcript{Words: stt.Untimed("earlier line."), Start: 0})
+	h.Publish(stt.Transcript{Words: stt.Untimed("in progress"), Start: 5 * time.Second})
 
 	sub, unsub := h.Subscribe()
 	defer unsub()
 
 	ev := <-sub
-	if ev.Kind != KindSnapshot {
-		t.Fatalf("first event kind = %q, want snapshot", ev.Kind)
+	if ev.Kind != KindStatus {
+		t.Fatalf("first event kind = %q, want status", ev.Kind)
 	}
-	if want := "earlier line. in progress"; ev.Text != want {
-		t.Errorf("snapshot text = %q, want %q", ev.Text, want)
+	if ev.State != "paused" {
+		t.Errorf("first event State = %q, want the last published state", ev.State)
+	}
+	if len(ev.Words) != 0 {
+		t.Errorf("first event carries %d words, want none — there is no catch-up", len(ev.Words))
 	}
 }
 
@@ -348,9 +365,9 @@ func TestCaptionEventCarriesAt(t *testing.T) {
 	h := newTestHub()
 	sub, unsub := h.Subscribe()
 	defer unsub()
-	drain(sub) // discard the initial snapshot
+	drain(sub) // discard the initial status
 
-	h.Publish(stt.Transcript{Text: "in progress", Start: time.Second})
+	h.Publish(stt.Transcript{Words: stt.Untimed("in progress"), Start: time.Second})
 
 	events := drain(sub)
 	var found bool
@@ -368,18 +385,37 @@ func TestCaptionEventCarriesAt(t *testing.T) {
 	}
 }
 
-// TestHistoryIsBounded stops a long session from growing memory without
-// limit. Each publish is its own punctuated sentence so every one closes a
-// line immediately.
-func TestHistoryIsBounded(t *testing.T) {
+// TestCaptionWordsAreSegmentRelative pins the wire's timing contract: a word
+// travels with the onset the speaker actually gave it, rebased onto its own
+// segment so the client never has to know the media clock — and a word
+// claiming to start before its segment is clamped rather than sent negative.
+func TestCaptionWordsAreSegmentRelative(t *testing.T) {
 	h := newTestHub()
-	start := time.Duration(0)
-	for i := 0; i < historyLimit+50; i++ {
-		h.Publish(stt.Transcript{Text: "line.", Start: start})
-		start += 10 * time.Millisecond
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub)
+
+	h.Publish(stt.Transcript{
+		Start:    10 * time.Second,
+		Duration: 900 * time.Millisecond,
+		Words: []stt.Word{
+			{Text: "measured", Start: 9500 * time.Millisecond}, // before its own segment
+			{Text: "at", Start: 10250 * time.Millisecond},
+			{Text: "speed.", Start: 10600 * time.Millisecond},
+		},
+	})
+
+	events := drain(sub)
+	if len(events) != 1 || events[0].Kind != KindCaption {
+		t.Fatalf("expected one caption event, got %+v", events)
 	}
-	if len(h.history) != historyLimit {
-		t.Errorf("history = %d lines, want %d", len(h.history), historyLimit)
+	want := []Word{
+		{Text: "measured", OffsetMS: 0},
+		{Text: "at", OffsetMS: 250},
+		{Text: "speed.", OffsetMS: 600},
+	}
+	if !slices.Equal(events[0].Words, want) {
+		t.Errorf("words = %+v, want %+v", events[0].Words, want)
 	}
 }
 
@@ -394,8 +430,8 @@ func TestBreakClosesLineBeforeSegmentIsAppended(t *testing.T) {
 	var finals []Line
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
 
-	h.Publish(stt.Transcript{Text: "before the pause", Start: 0, Duration: 100 * time.Millisecond})
-	h.Publish(stt.Transcript{Text: "after the pause", Start: 100*time.Millisecond + testBreakGap})
+	h.Publish(stt.Transcript{Words: stt.Untimed("before the pause"), Start: 0, Duration: 100 * time.Millisecond})
+	h.Publish(stt.Transcript{Words: stt.Untimed("after the pause"), Start: 100*time.Millisecond + testBreakGap})
 
 	if len(finals) != 1 {
 		t.Fatalf("expected the pause to close exactly one line, got %d", len(finals))
@@ -417,9 +453,9 @@ func TestSpeakerChangeClosesLine(t *testing.T) {
 	var finals []Line
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
 
-	h.Publish(stt.Transcript{Text: "the MC is talking", Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
+	h.Publish(stt.Transcript{Words: stt.Untimed("the MC is talking"), Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
 	// No gap at all: Start picks up exactly where the previous segment ended.
-	h.Publish(stt.Transcript{Text: "now the guest is", Start: 100 * time.Millisecond, Speaker: 2})
+	h.Publish(stt.Transcript{Words: stt.Untimed("now the guest is"), Start: 100 * time.Millisecond, Speaker: 2})
 
 	if len(finals) != 1 {
 		t.Fatalf("expected the speaker change to close exactly one line, got %d", len(finals))
@@ -442,8 +478,8 @@ func TestUnknownSpeakerNeverCountsAsAChange(t *testing.T) {
 	var finals []Line
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
 
-	h.Publish(stt.Transcript{Text: "known speaker", Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
-	h.Publish(stt.Transcript{Text: "then unknown", Start: 100 * time.Millisecond, Speaker: 0})
+	h.Publish(stt.Transcript{Words: stt.Untimed("known speaker"), Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
+	h.Publish(stt.Transcript{Words: stt.Untimed("then unknown"), Start: 100 * time.Millisecond, Speaker: 0})
 
 	if len(finals) != 0 {
 		t.Fatalf("expected Speaker 0 to not force a close, got %d finals: %+v", len(finals), finals)
@@ -456,9 +492,9 @@ func TestEventCarriesSpeaker(t *testing.T) {
 	h := newTestHub()
 	sub, unsub := h.Subscribe()
 	defer unsub()
-	drain(sub) // discard the initial snapshot
+	drain(sub) // discard the initial status
 
-	h.Publish(stt.Transcript{Text: "hello", Start: 0, Speaker: 2})
+	h.Publish(stt.Transcript{Words: stt.Untimed("hello"), Start: 0, Speaker: 2})
 
 	events := drain(sub)
 	var found bool
@@ -486,16 +522,16 @@ func TestSpeakerChangeDoesNotSetBreak(t *testing.T) {
 	defer unsub()
 	drain(sub)
 
-	h.Publish(stt.Transcript{Text: "first speaker", Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
+	h.Publish(stt.Transcript{Words: stt.Untimed("first speaker"), Start: 0, Duration: 100 * time.Millisecond, Speaker: 1})
 	drain(sub)
 
 	// No gap: Start picks up exactly where the previous segment ended.
-	h.Publish(stt.Transcript{Text: "second speaker", Start: 100 * time.Millisecond, Speaker: 2})
+	h.Publish(stt.Transcript{Words: stt.Untimed("second speaker"), Start: 100 * time.Millisecond, Speaker: 2})
 
 	events := drain(sub)
 	var found bool
 	for _, ev := range events {
-		if ev.Kind == KindCaption && ev.Text == "second speaker" {
+		if ev.Kind == KindCaption && captionText(ev) == "second speaker" {
 			found = true
 			if ev.Break {
 				t.Error("Break = true for a speaker change with no pause, want false")

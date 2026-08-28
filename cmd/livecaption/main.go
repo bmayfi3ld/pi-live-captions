@@ -56,5 +56,5 @@ func run() error {
 	// context.Context is an interface, so kong needs to be told the binding
 	// type explicitly; the concrete values bind positionally.
 	kctx.BindTo(ctx, (*context.Context)(nil))
-	return kctx.Run(term, log, c.Globals)
+	return kctx.Run(term, log)
 }

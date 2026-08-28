@@ -19,7 +19,7 @@ func TestObserveLatency_UsesCapturedAt(t *testing.T) {
 	now := time.Now()
 
 	s.observeLatency(stt.Transcript{
-		Text:       "hello",
+		Words:      stt.Untimed("hello"),
 		ReceivedAt: now,
 		CapturedAt: now.Add(-300 * time.Millisecond),
 	}, time.Time{})
@@ -40,7 +40,7 @@ func TestObserveLatency_IgnoresZeroCapturedAt(t *testing.T) {
 	// nothing rather than resurrecting the old, unbounded StartedAt-relative
 	// figure.
 	s.observeLatency(stt.Transcript{
-		Text:       "hello",
+		Words:      stt.Untimed("hello"),
 		ReceivedAt: time.Now(),
 	}, time.Time{})
 
@@ -57,7 +57,7 @@ func TestObserveLatency_KeepsSmallSample(t *testing.T) {
 	// clip a small-but-real 2ms sample, since both timestamps come from
 	// time.Now() in-process and Sub uses the monotonic reading.
 	s.observeLatency(stt.Transcript{
-		Text:       "hello",
+		Words:      stt.Untimed("hello"),
 		ReceivedAt: now,
 		CapturedAt: now.Add(-2 * time.Millisecond),
 	}, time.Time{})
@@ -81,7 +81,7 @@ func TestObserveLatency_IgnoresEmptyText(t *testing.T) {
 	now := time.Now()
 
 	s.observeLatency(stt.Transcript{
-		Text:       "",
+		Words:      stt.Untimed(""),
 		ReceivedAt: now,
 		CapturedAt: now.Add(-300 * time.Millisecond),
 	}, time.Time{})
@@ -106,7 +106,7 @@ func TestObserveLatency_PhasesSumToTotal(t *testing.T) {
 	published := received.Add(5 * time.Millisecond)
 
 	s.observeLatency(stt.Transcript{
-		Text:       "hello",
+		Words:      stt.Untimed("hello"),
 		CapturedAt: captured,
 		SentAt:     sent,
 		ReceivedAt: received,
@@ -132,7 +132,7 @@ func TestObserveLatency_ZeroSentAtRecordsTotalNoPhases(t *testing.T) {
 	now := time.Now()
 
 	s.observeLatency(stt.Transcript{
-		Text:       "hello",
+		Words:      stt.Untimed("hello"),
 		ReceivedAt: now,
 		CapturedAt: now.Add(-300 * time.Millisecond),
 	}, now.Add(305*time.Millisecond))

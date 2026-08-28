@@ -3,7 +3,6 @@
 package caption
 
 import (
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,20 +15,20 @@ import (
 type Kind string
 
 const (
-	KindCaption  Kind = "caption"  // one settled segment, append-only
-	KindStatus   Kind = "status"   // connection state changed
-	KindSnapshot Kind = "snapshot" // catch-up sent to a new subscriber
+	KindCaption Kind = "caption" // one settled segment, append-only
+	KindStatus  Kind = "status"  // connection state changed
 )
 
 // Event is what goes over SSE. One JSON object per message.
 type Event struct {
 	Seq  int64 `json:"seq"`
 	Kind Kind  `json:"kind"`
-	// Text is the new segment only on a caption event — never the
-	// accumulated utterance — so the client can append it blindly. On a
-	// snapshot event it is the whole replay flow instead: history joined
-	// plus the open committed text.
-	Text string `json:"text,omitempty"`
+	// Words is the new segment on a caption event — never the accumulated
+	// utterance — so the client can append it blindly. There is no catch-up
+	// payload anywhere on the wire: a client that connects mid-session simply
+	// starts from the next segment, which is what let the replay path (and
+	// with it the viewer's whole second, unpaced rendering path) go away.
+	Words []Word `json:"words,omitempty"`
 	// Break asks the viewer to freeze the current row before appending Text:
 	// the speaker actually stopped talking, for a pause of breakGap or more
 	// (or a media-clock discontinuity — see isBreakLocked). It stays
@@ -47,33 +46,37 @@ type Event struct {
 	// unset time would serialize as "0001-01-01T00:00:00Z".
 	At time.Time `json:"at,omitzero"`
 
-	// Status and snapshot events only.
-	State  string `json:"state,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	// Status events only.
+	State string `json:"state,omitempty"`
+}
+
+// Word is one word on the wire: its text, and when the speaker began it,
+// in ms from its own segment's start.
+//
+// Relative rather than media time on purpose: the client never has to learn
+// the media clock, and a reconnect or auto-pause resume that restarts that
+// clock (the discontinuity isBreakLocked catches) cannot poison the offsets
+// of a segment that arrives across it.
+type Word struct {
+	Text     string `json:"t"`
+	OffsetMS int64  `json:"o"`
 }
 
 // Line is one finalized caption: the OnFinal payload for the transcript
 // writer and terminal. It never appears on the wire.
 type Line struct {
-	ID       string    `json:"id"`
-	Text     string    `json:"text"`
-	OffsetMS int64     `json:"offset_ms"`
-	At       time.Time `json:"at"`
+	Text     string
+	OffsetMS int64
+	At       time.Time
 	// Speaker is the line's speaker (1-based, 0 unknown). A closed line
 	// belongs to whichever speaker was talking when Publish appended its
 	// text, which closeLocked has no way to see itself — see Hub.Publish.
 	Speaker int
 }
 
-// historyLimit is how many finalized lines are kept for late joiners, and
-// with Hub.Snapshot() gone this is also the whole replay window: a snapshot
-// event is its only reader, so a second "how much to replay" constant would
-// be dead weight. 20 is well more than the 6 rows a viewer shows.
-const historyLimit = 20
-
 // subscriberBuffer is how far a subscriber may fall behind before being
 // dropped. Captions are realtime — a browser that cannot keep up is better off
-// reconnecting and getting a fresh snapshot than receiving stale text.
+// reconnecting and picking up the live stream than receiving stale text.
 const subscriberBuffer = 16
 
 // maxUtteranceChars force-closes a transcript line if neither punctuation nor
@@ -101,10 +104,8 @@ const breakGap = 1500 * time.Millisecond
 // when a transcript line closes — from media-time gaps and terminal
 // punctuation, since the engine itself no longer reports either.
 type Hub struct {
-	mu      sync.RWMutex
-	seq     int64
-	uttSeq  int64
-	history []Line
+	mu  sync.RWMutex
+	seq int64
 	// committed is the text of the transcript line in progress.
 	committed string
 	uttStart  time.Duration
@@ -124,11 +125,12 @@ type Hub struct {
 	// must not force a break, and a run of unknown-speaker segments must not
 	// look like it's constantly changing speakers.
 	lastSpeaker int
-	// lastState/lastDetail are the most recent status published via
-	// PublishStatus. Subscribe replays them into the snapshot event so a
-	// client that connects (or reconnects) mid-pause learns the current
-	// state immediately, instead of waiting for a change that may never come.
-	lastState, lastDetail string
+	// lastState is the most recent status published via PublishStatus.
+	// Subscribe replays it as the first event a client receives, so one that
+	// connects (or reconnects) mid-pause learns the current state
+	// immediately, instead of waiting for a change that may never come. This
+	// is now the only thing a subscriber is told about the past.
+	lastState string
 
 	subs    map[chan Event]struct{}
 	metrics *metrics.Metrics
@@ -138,6 +140,9 @@ type Hub struct {
 	OnFinal func(Line)
 }
 
+// NewHub builds a hub. m must be non-nil — every construction site has one,
+// so the alternative was a nil check on every counter bump for a case that
+// has never existed.
 func NewHub(m *metrics.Metrics) *Hub {
 	return &Hub{subs: make(map[chan Event]struct{}), metrics: m}
 }
@@ -146,7 +151,7 @@ func NewHub(m *metrics.Metrics) *Hub {
 // below is deliberate: there is exactly one thing to do with a segment, not
 // three branches keyed off control flags the engine no longer reports.
 func (h *Hub) Publish(t stt.Transcript) {
-	text := strings.TrimSpace(t.Text)
+	text := strings.TrimSpace(t.Text())
 	if text == "" {
 		return
 	}
@@ -169,7 +174,7 @@ func (h *Hub) Publish(t stt.Transcript) {
 	h.prevEnd = t.End()
 
 	ev := h.newEventLocked(KindCaption)
-	ev.Text, ev.Break = text, broke // the delta, never the accumulation
+	ev.Words, ev.Break = wireWords(t), broke // the delta, never the accumulation
 	ev.Speaker = t.Speaker
 
 	// Deliberately unconditional, not gated on the flush above having been a
@@ -187,15 +192,11 @@ func (h *Hub) Publish(t stt.Transcript) {
 	onFinal := h.OnFinal
 	h.mu.Unlock()
 
-	if h.metrics != nil {
-		h.metrics.STTSegment()
-	}
+	h.metrics.STTSegment()
 	h.broadcast(ev)
 
 	closeLine := func(l Line) {
-		if h.metrics != nil {
-			h.metrics.STTLine()
-		}
+		h.metrics.STTLine()
 		if onFinal != nil {
 			onFinal(l)
 		}
@@ -206,6 +207,19 @@ func (h *Hub) Publish(t stt.Transcript) {
 	if closedAfter {
 		closeLine(after)
 	}
+}
+
+// wireWords converts a segment's words to the wire's relative-millisecond
+// form. A word that claims to start before its own segment would mean the
+// provider contradicted itself; it is clamped to 0 rather than sent negative,
+// so no client has to defend against an offset that runs backwards.
+func wireWords(t stt.Transcript) []Word {
+	words := make([]Word, 0, len(t.Words))
+	for _, w := range t.Words {
+		off := max(w.Start-t.Start, 0)
+		words = append(words, Word{Text: w.Text, OffsetMS: off.Milliseconds()})
+	}
+	return words
 }
 
 // isBreakLocked reports whether the gap between the previous segment and t
@@ -240,17 +254,11 @@ func (h *Hub) closeLocked(broke bool) (Line, bool) {
 		return Line{}, false
 	}
 
-	h.uttSeq++
 	line := Line{
-		ID:       "u" + strconv.FormatInt(h.uttSeq, 10),
 		Text:     h.committed,
 		OffsetMS: h.uttStart.Milliseconds(),
 		At:       time.Now(),
 		Speaker:  h.uttSpeaker,
-	}
-	h.history = append(h.history, line)
-	if len(h.history) > historyLimit {
-		h.history = h.history[len(h.history)-historyLimit:]
 	}
 	h.committed = ""
 	return line, true
@@ -270,11 +278,11 @@ func endsSentence(s string) bool {
 }
 
 // PublishStatus broadcasts a connection state change.
-func (h *Hub) PublishStatus(state, detail string) {
+func (h *Hub) PublishStatus(state string) {
 	h.mu.Lock()
 	ev := h.newEventLocked(KindStatus)
-	ev.State, ev.Detail = state, detail
-	h.lastState, h.lastDetail = state, detail
+	ev.State = state
+	h.lastState = state
 	h.mu.Unlock()
 	h.broadcast(ev)
 }
@@ -289,9 +297,7 @@ func (h *Hub) Flush() {
 	if !closed {
 		return
 	}
-	if h.metrics != nil {
-		h.metrics.STTLine()
-	}
+	h.metrics.STTLine()
 	if onFinal != nil {
 		onFinal(line)
 	}
@@ -307,32 +313,27 @@ func (h *Hub) newEventLocked(k Kind) Event {
 }
 
 // Subscribe registers a new listener and returns its channel plus an
-// unsubscribe function. The first event delivered is always a snapshot.
+// unsubscribe function.
+//
+// The first event delivered is a status carrying the last published state, so
+// a client that connects (or reconnects) mid-pause shows the right indicator
+// immediately rather than defaulting to "ok" until the state happens to change
+// again — which, during a pause, may be never. It is a plain status event
+// rather than a kind of its own: with no catch-up text left to send, a
+// dedicated "snapshot" kind would have carried nothing a status doesn't.
+//
+// No caption history follows it. A late joiner starts from the next segment.
 func (h *Hub) Subscribe() (<-chan Event, func()) {
 	ch := make(chan Event, subscriberBuffer)
 
 	h.mu.Lock()
-	h.seq++
-	snap := Event{Seq: h.seq, Kind: KindSnapshot, At: time.Now()}
-	// The replay flow: history joined, plus the open committed text. The
-	// client just appends it — there is no lines/pending distinction left
-	// now that a caption event's Text is always a flat string too.
-	snap.Text = joinHistory(h.history, h.committed)
-	// Replay the last published status so a subscriber who connects (or
-	// reconnects) mid-pause sees the correct indicator immediately, rather
-	// than defaulting to "ok" until the state happens to change again.
-	snap.State, snap.Detail = h.lastState, h.lastDetail
-	// So a client reconnecting mid-session already knows who was talking,
-	// and can tell the NEXT caption event's Speaker apart as an actual
-	// change rather than treating it as the first speaker it has ever seen.
-	snap.Speaker = h.lastSpeaker
+	ev := h.newEventLocked(KindStatus)
+	ev.State = h.lastState
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 
-	ch <- snap // buffered and empty, cannot block
-	if h.metrics != nil {
-		h.metrics.SSEConnect()
-	}
+	ch <- ev // buffered and empty, cannot block
+	h.metrics.SSEConnect()
 
 	var once sync.Once
 	return ch, func() {
@@ -341,9 +342,7 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 			delete(h.subs, ch)
 			h.mu.Unlock()
 			close(ch)
-			if h.metrics != nil {
-				h.metrics.SSEDisconnect()
-			}
+			h.metrics.SSEDisconnect()
 		})
 	}
 }
@@ -352,8 +351,8 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 //
 // A subscriber that cannot keep up is dropped rather than backpressured: the
 // audio pipeline must never be held up by a slow browser. EventSource
-// reconnects on its own and gets a fresh snapshot, so the cost of being
-// dropped is one round trip.
+// reconnects on its own, so the cost of being dropped is one round trip plus
+// whatever was said during it.
 func (h *Hub) broadcast(ev Event) {
 	h.mu.RLock()
 	targets := make([]chan Event, 0, len(h.subs))
@@ -362,41 +361,14 @@ func (h *Hub) broadcast(ev Event) {
 	}
 	h.mu.RUnlock()
 
-	if h.metrics != nil {
-		h.metrics.SSEEvent()
-	}
+	h.metrics.SSEEvent()
 	for _, ch := range targets {
 		select {
 		case ch <- ev:
 		default:
-			if h.metrics != nil {
-				h.metrics.SSESlowDrop()
-			}
+			h.metrics.SSESlowDrop()
 		}
 	}
-}
-
-// ponytail: joinHistory flattens history to one string, so a snapshot replays
-// as plain text with no per-line Speaker structure — a client reconnecting
-// mid-session sees no speaker badges on the replayed text until the next
-// live change. Accepted for now: fixing it means the snapshot event carrying
-// history as []Line (or similar) instead of one joined string, which is a
-// wire-format change the viewer side would need to match.
-func joinHistory(history []Line, committed string) string {
-	var b strings.Builder
-	for _, l := range history {
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(l.Text)
-	}
-	if committed != "" {
-		if b.Len() > 0 {
-			b.WriteByte(' ')
-		}
-		b.WriteString(committed)
-	}
-	return b.String()
 }
 
 func joinText(a, b string) string {

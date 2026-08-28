@@ -52,10 +52,9 @@ type buildOpts struct {
 	mediaTotal  time.Duration
 	conversion  string
 
-	stt     STTFlags
-	server  ServerFlags
-	output  OutputFlags
-	globals Globals
+	stt    STTFlags
+	server ServerFlags
+	output OutputFlags
 }
 
 func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, error) {
@@ -75,7 +74,7 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 	// Wired before anything starts so the very first SetSTTState call (idle ->
 	// connecting) already reaches the viewer. Hub.PublishStatus takes its own
 	// lock and never met's, so this can't deadlock against the metrics mutex.
-	met.SetSTTStateHook(func(s metrics.ConnState) { hub.PublishStatus(s.String(), "") })
+	met.SetSTTStateHook(func(s metrics.ConnState) { hub.PublishStatus(s.String()) })
 
 	engine, err := newEngine(o.stt.Engine, stt.Config{
 		Format:   audio.PipelineFormat,
@@ -249,14 +248,14 @@ func (s *session) run(ctx context.Context) error {
 // It additionally splits the total into upload / recognize / assemble phases
 // using SentAt and publishedAt, when both are available.
 func (s *session) observeLatency(t stt.Transcript, publishedAt time.Time) {
-	// The empty-Text guard used to exist for Deepgram's synthetic
+	// The empty-text guard used to exist for Deepgram's synthetic
 	// UtteranceEnd, which carried no media range and would let idx.At(0)
 	// resolve an unrelated capture instant. UtteranceEnd is gone and
 	// decodeTranscript already rejects a Results message with an empty
-	// alternative, so nothing in this pipeline can reach here with an empty
-	// Text today — this is now belt-and-braces against a future engine
-	// emitting a synthetic zero-range result.
-	if t.ReceivedAt.IsZero() || t.CapturedAt.IsZero() || t.Text == "" {
+	// alternative, so nothing in this pipeline can reach here with empty text
+	// today — this is now belt-and-braces against a future engine emitting a
+	// synthetic zero-range result.
+	if t.ReceivedAt.IsZero() || t.CapturedAt.IsZero() || t.Text() == "" {
 		return
 	}
 	s.met.ObserveLatency(t.ReceivedAt.Sub(t.CapturedAt))

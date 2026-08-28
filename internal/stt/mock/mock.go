@@ -7,7 +7,6 @@ package mock
 
 import (
 	"context"
-	"math/rand"
 	"time"
 
 	"livecaption/internal/audio"
@@ -24,10 +23,10 @@ type Engine struct {
 	ps  *phraseState
 }
 
-// New builds the offline mock engine. The fixed seed is what makes its output
-// reproducible run to run.
+// New builds the offline mock engine. Its output is fully determined by the
+// media time of the frames it consumes — there is no randomness left to seed.
 func New(cfg stt.Config) *Engine {
-	return &Engine{cfg: cfg, ps: newPhraseState(rand.New(rand.NewSource(1)))}
+	return &Engine{cfg: cfg, ps: newPhraseState()}
 }
 
 func (e *Engine) Name() string { return "mock" }

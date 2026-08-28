@@ -10,6 +10,7 @@ package stt
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"livecaption/internal/audio"
@@ -22,7 +23,12 @@ import (
 // transcript line breaks) is derived downstream from Start/Duration and
 // punctuation, not reported here.
 type Transcript struct {
-	Text string
+	// Words is the segment as heard, in order, and the only place its text
+	// lives — Text() joins them back. Never empty on a published transcript:
+	// a provider with no per-word timing reports the whole segment as a
+	// single Word (see Untimed), so every consumer downstream has exactly one
+	// shape to handle.
+	Words []Word
 	// Speaker is 1-based; 0 means unknown (diarization off, or the provider
 	// didn't attribute this segment). Every provider labels speakers its own
 	// way — Deepgram hands back a 0-based int, Speechmatics a string like
@@ -33,7 +39,6 @@ type Transcript struct {
 	// way for a replayed file and a live capture.
 	Start      time.Duration
 	Duration   time.Duration
-	Confidence float64
 	ReceivedAt time.Time
 	// CapturedAt is when the audio this transcript covers was released into the
 	// pipeline. Zero when the engine could not resolve it; latency is then simply
@@ -44,6 +49,47 @@ type Transcript struct {
 	// total latency into upload / recognition phases. Zero when the engine
 	// could not resolve it, in which case the split is simply not recorded.
 	SentAt time.Time
+}
+
+// Word is one word as the recognizer heard it: its text, and when it began,
+// on the same media clock as Transcript.Start. This is the segment's measured
+// prosody — where the speaker actually paused and how fast they were going —
+// and it keeps its shape all the way to the browser rather than being
+// flattened into a string at any hop.
+//
+// No end time. A pacer reveals a word at its onset; the gap to the next word
+// already covers that word's duration plus any pause after it, and the last
+// word is bounded by the segment's own Start+Duration. Both providers decode
+// end/end_time already, so this is a small addition later if something ever
+// needs to tell a drawn-out word from a short word followed by a pause.
+type Word struct {
+	Text  string
+	Start time.Duration
+}
+
+// Untimed is the whole segment as one Word, for a provider (or a test) with
+// no per-word detail to report. Text() reproduces the segment exactly, and a
+// pacer simply reveals it in one go — the honest behaviour when nothing finer
+// was measured.
+func Untimed(text string) []Word { return []Word{{Text: text}} }
+
+// Text is the segment's text: the words joined with single spaces. Providers
+// build Words so this reproduces exactly what the recognizer sent.
+func (t Transcript) Text() string {
+	switch len(t.Words) {
+	case 0:
+		return ""
+	case 1:
+		return t.Words[0].Text // the Untimed case, no join to do
+	}
+	var b strings.Builder
+	for i, w := range t.Words {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(w.Text)
+	}
+	return b.String()
 }
 
 // End is the media time of the last sample this transcript covers.

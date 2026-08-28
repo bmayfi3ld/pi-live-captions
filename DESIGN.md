@@ -155,7 +155,7 @@ Only providers can tell those apart from a network blip, so they do the classify
 
 `Transcript` is pure observation, with no control flags for the hub to interpret: the engine only
 ever emits text it will not revise, so there is nothing left to flag as final. It carries `Text`,
-media-time `Start`/`Duration` for ordering, display, and gap arithmetic (§4), `Confidence`, and
+media-time `Start`/`Duration` for ordering, display, and gap arithmetic (§4), and
 `CapturedAt`/`ReceivedAt`/`SentAt` — the wall-clock instants latency is actually measured from (see
 section 6) — so replay and live measure latency identically. Structure
 (when a display row breaks, when a transcript line closes) is derived downstream in the hub, not
@@ -228,9 +228,9 @@ Two gaps against the Deepgram engine, both deliberate:
   `ReplaceAll` mangles innocent words. Either mechanism needs a word list, which for a church is a
   judgement call rather than boilerplate: "hell" and "damn" are sermon vocabulary, and "ass",
   "cock" and "prick" all have scriptural senses.
-- **Confidence is averaged**, not reported. Speechmatics gives one confidence per word where
-  Deepgram gives one per segment, so the adapter means the word-level figures (skipping punctuation
-  and entities, which say nothing about how well speech was heard).
+- **Confidence is not decoded.** Both providers report it — Speechmatics per word, Deepgram per
+  segment — and nothing downstream ever read the value: not the hub, not the transcript, not the
+  admin page. It is dropped at the decoder rather than carried unused.
 
 ### Auto-pause
 
@@ -313,6 +313,11 @@ The current row freezes where it is, even half-full, and the stack glides. New s
 | If you can't hear me at the back |   <- new thought, new row
 ```
 
+**Words land on the speaker's beat.** Not on a metronome: each word is revealed at the onset the
+recognizer measured for it, so the pauses inside a sentence show up as the display briefly
+holding still and a fast talker reads fast. The mechanism, and what happens when the timing is
+missing or the display falls behind the audio, is the pacer — §5.
+
 **A change of speaker breaks the row too.** Two people's words sharing one line is worse than
 any marker design, so a turn always starts clean, and the viewer draws a small numbered dot in
 a left gutter beside that first row (§5). Note where this break is *decided*: unlike the pause,
@@ -358,10 +363,16 @@ lost when the speaker was still talking.
 
 **Fan-out never blocks.** Subscribers get a 16-deep buffered channel; one that can't keep up is
 dropped and counted (`slow_disconnects_total`) rather than backpressured. `EventSource` reconnects
-on its own and receives a fresh snapshot, so the cost of a drop is one round trip.
+on its own, so the cost of a drop is one round trip plus whatever was said during it.
 
-History is capped at 20 lines for late-joiner snapshots — well more than the 6 rows a viewer shows,
-and the snapshot event is now its only reader (`Hub.Snapshot()` had no other callers and is gone).
+**Nothing is replayed.** The hub keeps no caption history at all: a client that connects or
+reconnects mid-session receives a `status` event carrying the last published state, and then starts
+from the next segment. Replay used to exist and cost more than it was worth — the catch-up text
+arrived without per-word timing or speaker structure, so it needed a second, unpaced rendering path
+through the whole viewer typesetter, which then had to be kept correct in parallel with the live
+one. Deleting it removed that path, the `snapshot` event kind, `Event.Text`, and the client's
+`resetAll()`. The visible cost is that a late joiner sees a blank display for the second or two
+until the next segment lands.
 
 ### Who is speaking
 
@@ -450,7 +461,7 @@ reversal:
 | Route | Purpose |
 |---|---|
 | `GET /` | Viewer page |
-| `GET /events` | SSE stream: `snapshot` on connect, then incremental events |
+| `GET /events` | SSE stream: `status` on connect, then incremental events |
 | `GET /admin` | Metrics dashboard (no auth) |
 | `GET /api/stats` | JSON metrics snapshot |
 | `GET /api/time` | Server wall clock, for the viewer's own clock-offset estimation |
@@ -466,34 +477,42 @@ closing the connection.
 Event wire format:
 
 ```json
-{"seq":42,"kind":"caption","text":"a few announcements before the","break":false,"speaker":1,"at":"2026-08-19T09:31:05.912Z"}
-{"seq":43,"kind":"caption","text":"main session.","break":false,"speaker":1,"at":"2026-08-19T09:31:06.301Z"}
-{"seq":44,"kind":"caption","text":"Sorry, can you repeat that?","break":true,"speaker":2,"at":"2026-08-19T09:31:08.912Z"}
+{"seq":42,"kind":"caption","words":[{"t":"a","o":0},{"t":"few","o":110},{"t":"announcements","o":340},{"t":"before","o":900},{"t":"the","o":1120}],"speaker":1,"at":"2026-08-19T09:31:05.912Z"}
+{"seq":43,"kind":"caption","words":[{"t":"main","o":0},{"t":"session.","o":260}],"speaker":1,"at":"2026-08-19T09:31:06.301Z"}
+{"seq":44,"kind":"caption","words":[{"t":"Sorry,","o":0},{"t":"can","o":300},{"t":"you","o":420},{"t":"repeat","o":560},{"t":"that?","o":830}],"break":true,"speaker":2,"at":"2026-08-19T09:31:08.912Z"}
 {"seq":45,"kind":"status","state":"reconnecting","detail":"stt websocket closed","at":"2026-08-19T09:31:10.442Z"}
 {"seq":46,"kind":"status","state":"paused","detail":"","at":"2026-08-19T09:31:40.000Z"}
-{"seq":47,"kind":"snapshot","text":"...history joined, plus the open committed text","state":"connected","speaker":2,"at":"2026-08-19T09:31:41.000Z"}
+{"seq":47,"kind":"status","state":"connected","at":"2026-08-19T09:31:41.000Z"}
 ```
 
 `kind: "final"` and `kind: "interim"` are gone; there is one text-carrying event kind now,
-`caption`. Its `text` is always the new segment only — never the accumulated utterance — so the
-client can append it blindly, and `break` asks the viewer to freeze the current row before
+`caption`. Its `words` are always the new segment only — never the accumulated utterance — so the
+client can append them blindly, and `break` asks the viewer to freeze the current row before
 appending: the speaker actually stopped (§4). `Event` dropped from ten fields to seven along with
-`id`, `offset_ms`, `lines` and `pending` (`speaker` later brought it back to eight): a `caption`
-event carries nothing about utterance structure any more, because there's no revision left to
-protect the client from.
+`id`, `offset_ms`, `lines` and `pending` (`speaker` and later `words` brought it back to nine): a
+`caption` event carries nothing about utterance structure any more, because there's no revision
+left to protect the client from.
+
+`words` is where a segment's text lives on a `caption` event, one entry per word, each with its
+`o` — the onset the recognizer measured, in milliseconds from that segment's own start. Relative
+rather than media time on purpose: the client never has to learn the media clock, and a reconnect
+or auto-pause resume that restarts that clock can't poison the offsets of a segment arriving
+across it. The shape survives every hop — `stt.Word` off both providers, never flattened into a
+string until the viewer paces it — because timing discarded at any hop cannot be recovered later.
+A provider with no per-word detail reports the whole segment as one `stt.Untimed` word, so
+consumers have exactly one shape to handle. There is no end time: a pacer reveals a word at its
+onset, and the gap to the next one already covers that word plus any pause after it. `words` is
+now the only text-bearing field on the wire at all: with replay gone there is no `text` field and
+no event that carries a flat string.
 
 `speaker` (§4, omitted when unknown) is the one exception to that last sentence, and it is
 deliberately *not* folded into `break`. `break` is a one-shot instruction — freeze the row now —
 while `speaker` is a property of the text itself, which is why the client stores it per word and
 derives its own turn break from it. Fold the two together and a rotation would lose every turn
 boundary, because `rebuild()` re-lays the ledger from scratch and can only see what an entry
-carries. On a `snapshot` it reports the speaker in progress, so a client reconnecting mid-session
-detects the *next* change correctly rather than mistaking a continuation for a new turn.
-
-Known ceiling: `joinHistory` flattens replayed history to one string, so a snapshot's text has no
-internal speaker structure — a reconnect loses the badges on already-painted text until the next
-change. Cheap to fix by replaying history as structured lines; not worth it for text the viewer
-has usually already read.
+carries. A reconnecting client is told nothing about who was speaking before it arrived: it treats
+the first speaker it sees as its own baseline, which costs at most one missing badge on the first
+row of the reconnect — not worth a field on the wire to carry mid-sentence.
 
 `at` (the publish instant) is stamped on every event kind by `newEventLocked`, unconditionally —
 there is no longer a "which kinds get a timestamp" question, since every event kind is
@@ -531,6 +550,34 @@ change font, doesn't move sideways or down. It only ever moves up, by constructi
 careful diffing, since `appendSegment` is the *only* way text enters and nothing calls it with
 anything but a fresh segment. Row opacity by age is the only recency cue left, since there's no more
 revision state for word color to carry.
+
+**The pacer.** *When* a word lands is a separate decision from where, and it is made from the
+speaker's own timing. `appendSegment` doesn't typeset anything: it normalizes the event
+(`paceWords`) into `{text, ms}` items and queues them, and `drain()` releases one per tick. That
+queue exists first for a mechanical reason — `freezeAndGlide` sets a fixed-duration CSS
+transition on `#stack`, so two glides fired in the same tick would overwrite each other and
+several rows would jump at once instead of gliding independently — and the one-item-per-tick
+drain is what guarantees at most one glide in flight.
+
+What each tick *waits* is where `Event.Words` earns its place. A word's hold is the gap
+between its own onset and the next word's, which covers the word plus any pause after it. The
+character roll is fitted inside that hold but never runs slower than the base rate, so the
+leftover becomes dwell: a word followed by a real pause types at normal speed and then the screen
+simply sits there. That is the whole point — a pause reads as a pause rather than as slow-motion
+typing, and a fast talker reveals fast. Two gaps are unknowable and fall back to a
+character-count estimate rather than a guess: the last word of a segment (the wire carries no
+duration, and the next segment's onsets restart at 0 on their own clock) and every word of an
+`stt.Untimed` segment, where the provider reported no per-word detail at all.
+
+Played back at 1× this would add a whole segment-duration of latency, since a segment only
+arrives after it was spoken. So every wait — measured hold and character roll alike — is divided
+by a backlog factor, which compresses the speaker's prosody instead of discarding it. The factor
+is derived from queued *milliseconds*, not queued items: with real holds, forty words can be
+three seconds of fast speech or fifteen of slow, and only the latter should speed up. Steady
+state is a slight accelerando into each segment easing back toward 1× as the queue empties, then
+a gap before the next arrives — which is the between-segment silence, preserved. `CHAR_MS`,
+`RATE_MS` and `MAX_HOLD_MS` are the tuning knobs; they are set by eye against live audio, and a
+venue with a slow speaker wants different ones.
 
 `computeMetrics()` calibrates canvas measurement against a hidden probe row's real rendered width,
 because canvas resolves a font stack independently of layout and an under-measure would clip a
@@ -732,7 +779,6 @@ it; `--no-transcript` is the explicit opt-out.
 Per session, `<dir>/<YYYY-MM-DDTHH-MM-SS>/`:
 
 - `transcript.txt` — `[00:12:34] text`, or `[00:12:34] [S2] text` when the speaker is known, for humans
-- `transcript.jsonl` — one record per line with offsets, timestamps and speaker, for tooling
 
 The speaker *is* spelled out here, unlike on screen. The argument against an inline `Speaker 2:`
 label is entirely about the display's row-width budget and the fact that a caption is read once,

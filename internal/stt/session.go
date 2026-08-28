@@ -134,7 +134,7 @@ func (d *driver) run(ctx context.Context, out chan<- Transcript) error {
 			return nil
 		}
 
-		setSTTState(d.met, metrics.StateConnecting)
+		d.met.SetSTTState(metrics.StateConnecting)
 		conn, sess, err := d.dial(ctx)
 		if err != nil {
 			// Only the first attempt fails fast: a misconfiguration is
@@ -153,7 +153,7 @@ func (d *driver) run(ctx context.Context, out chan<- Transcript) error {
 
 		firstAttempt = false
 		backoff = minBackoff
-		setSTTState(d.met, metrics.StateConnected)
+		d.met.SetSTTState(metrics.StateConnected)
 		d.log.Info(d.name + ": connected")
 
 		oc, rerr := d.runConnection(ctx, conn, sess, out)
@@ -210,11 +210,9 @@ func (d *driver) waitResume(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
-	setSTTState(d.met, metrics.StatePaused)
-	if d.met != nil {
-		d.met.STTPauseBegin()
-		defer d.met.STTPauseEnd()
-	}
+	d.met.SetSTTState(metrics.StatePaused)
+	d.met.STTPauseBegin()
+	defer d.met.STTPauseEnd()
 	d.log.Info(d.name + ": audio silent, connection paused")
 
 	// Wait for the gate to go active again rather than polling it. Changed()
@@ -247,22 +245,14 @@ func (d *driver) retryAfter(ctx context.Context, err error, msg string, backoff 
 	if ctx.Err() != nil {
 		return backoff, false
 	}
-	if d.met != nil {
-		d.met.SetSTTError(err)
-		d.met.SetSTTState(metrics.StateReconnecting)
-		d.met.STTReconnect()
-	}
+	d.met.SetSTTError(err)
+	d.met.SetSTTState(metrics.StateReconnecting)
+	d.met.STTReconnect()
 	d.log.Warn(d.name+": "+msg, "err", err, "retry_in", backoff)
 	if !sleepBackoff(ctx, backoff, rng) {
 		return backoff, false
 	}
 	return nextBackoff(backoff), true
-}
-
-func setSTTState(met *metrics.Metrics, s metrics.ConnState) {
-	if met != nil {
-		met.SetSTTState(s)
-	}
 }
 
 func audioExhausted(framesClosed <-chan struct{}, buf *ring) bool {
@@ -387,9 +377,7 @@ func (d *driver) writeLoop(ctx, connCtx context.Context, sess Session, idx *anch
 			if err := sess.SendAudio(connCtx, c.pcm); err != nil {
 				return err
 			}
-			if d.met != nil {
-				d.met.STTBytesSent(len(c.pcm))
-			}
+			d.met.STTBytesSent(len(c.pcm))
 			lastActivity = time.Now()
 			continue
 		}

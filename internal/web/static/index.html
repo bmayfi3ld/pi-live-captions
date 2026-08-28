@@ -432,9 +432,8 @@
     } catch (err) { /* telemetry must never break caption rendering */ }
   }
 
-  // Called for "caption" SSE events only — never "snapshot", whose text is a
-  // catch-up replay stamped with the subscribe instant, so a paint
-  // measurement against it would be measuring nothing real.
+  // Called for "caption" SSE events only — a status event paints nothing, so
+  // a paint measurement against it would be measuring nothing real.
   function schedulePaintReport(ev) {
     if (!ev || !ev.at) return; // no timestamp to compare against; skip silently
     var publishedAt = Date.parse(ev.at);
@@ -547,23 +546,17 @@
     var ev;
     try { ev = JSON.parse(e.data); } catch (err) { return; }
     switch (ev.kind) {
-      case "snapshot":
-        captionStack.resetAll();
-        if (ev.text) captionStack.appendSegment(ev.text, false, ev.speaker);
-        sseOpen = true;
-        // Replay the server's last-known state: a client that (re)connects
-        // mid-pause would otherwise sit on hubState's initial null and
-        // render a plain "ok" dot until something happens to change state
-        // again, which during a pause may be never. Absence of ev.state
-        // just means nothing has been published yet, not "back to ok" — so
-        // don't clobber a state this client already knows about.
-        if (ev.state) { hubState = ev.state; }
-        break;
       case "caption":
-        if (ev.break) captionStack.breakRow(true);
-        captionStack.appendSegment(ev.text || "", true, ev.speaker);
+        if (ev.break) captionStack.breakRow();
+        captionStack.appendSegment(ev.words, ev.speaker);
         schedulePaintReport(ev);
         break;
+      // The first event on every connection is a status carrying the server's
+      // last-known state, so a client that (re)connects mid-pause shows the
+      // right indicator immediately instead of sitting on hubState's initial
+      // null and rendering a plain "ok" dot until something changes — which,
+      // during a pause, may be never. Nothing is replayed but the state: a
+      // late joiner starts from the next caption.
       case "status":
         hubState = ev.state || null;
         applyIndicator();

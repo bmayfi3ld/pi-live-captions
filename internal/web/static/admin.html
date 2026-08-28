@@ -870,16 +870,12 @@
     var ev;
     try { ev = JSON.parse(e.data); } catch (err) { return; }
     switch (ev.kind) {
-      case "snapshot":
-        captionStack.resetAll();
-        if (ev.text) captionStack.appendSegment(ev.text, false, ev.speaker);
-        sseOpen = true;
-        if (ev.state) hubState = ev.state;
-        break;
       case "caption":
-        if (ev.break) captionStack.breakRow(true);
-        captionStack.appendSegment(ev.text || "", true, ev.speaker);
+        if (ev.break) captionStack.breakRow();
+        captionStack.appendSegment(ev.words, ev.speaker);
         break;
+      // First event on every connection carries the server's last-known
+      // state — same as the viewer, which this must render identically to.
       case "status":  hubState = ev.state || null; applyIndicator(); return;
       default: return;
     }

@@ -74,7 +74,9 @@ func NewServer(cfg Config) (*Server, error) {
 		w.Write([]byte("ok"))
 	})
 	mux.Handle("GET /admin", pageHandler(static, "admin.html"))
-	mux.Handle("GET /", pageHandler(static, "index.html"))
+	// "/{$}" is an exact match, not a prefix: an unknown path falls through to
+	// the mux's own 404 instead of silently rendering the viewer.
+	mux.Handle("GET /{$}", pageHandler(static, "index.html"))
 
 	for _, a := range []struct{ name, ctype string }{
 		{"caption.js", "text/javascript; charset=utf-8"},
@@ -108,14 +110,10 @@ func NewServer(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// pageHandler serves one HTML file, falling through to 404 for unknown paths
-// so a typo doesn't silently render the viewer.
+// pageHandler serves one HTML file. Routing is the mux's job — both patterns
+// registered above are exact matches, so nothing else reaches here.
 func pageHandler(static fs.FS, name string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" && r.URL.Path != "/admin" {
-			http.NotFound(w, r)
-			return
-		}
 		body, err := fs.ReadFile(static, name)
 		if err != nil {
 			http.Error(w, "asset not found: "+name, http.StatusInternalServerError)
