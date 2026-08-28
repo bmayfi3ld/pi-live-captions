@@ -83,8 +83,8 @@ func TestDecodeTranscript(t *testing.T) {
 					]}]}}`,
 			want: []stt.Transcript{{
 				Words: []stt.Word{
-					{Text: "Hello,", Start: 0},
-					{Text: "world", Start: 200 * time.Millisecond},
+					{Text: "Hello,", Start: 0, End: 200 * time.Millisecond},
+					{Text: "world", Start: 200 * time.Millisecond, End: 400 * time.Millisecond},
 				},
 				Start: 0, Duration: 400 * time.Millisecond,
 				Speaker: 1,
@@ -109,16 +109,16 @@ func TestDecodeTranscript(t *testing.T) {
 					// Each run keeps its own words, with the onsets the
 					// speaker actually had — not the run's span alone.
 					Words: []stt.Word{
-						{Text: "Hello", Start: 0},
-						{Text: "there,", Start: 400 * time.Millisecond},
+						{Text: "Hello", Start: 0, End: 400 * time.Millisecond},
+						{Text: "there,", Start: 400 * time.Millisecond, End: 800 * time.Millisecond},
 					},
 					Start: 0, Duration: 800 * time.Millisecond,
 					Speaker: 1, // Deepgram 0 -> our 1
 				},
 				{
 					Words: []stt.Word{
-						{Text: "Hi", Start: 800 * time.Millisecond},
-						{Text: "there.", Start: 1100 * time.Millisecond},
+						{Text: "Hi", Start: 800 * time.Millisecond, End: 1100 * time.Millisecond},
+						{Text: "there.", Start: 1100 * time.Millisecond, End: 1500 * time.Millisecond},
 					},
 					Start: 800 * time.Millisecond, Duration: 700 * time.Millisecond,
 					Speaker: 2, // Deepgram 1 -> our 2

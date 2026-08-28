@@ -50,16 +50,23 @@ type Event struct {
 	State string `json:"state,omitempty"`
 }
 
-// Word is one word on the wire: its text, and when the speaker began it,
-// in ms from its own segment's start.
+// Word is one word on the wire: its text, when the speaker began it in ms from
+// its own segment's start, and how long they spent saying it.
 //
 // Relative rather than media time on purpose: the client never has to learn
 // the media clock, and a reconnect or auto-pause resume that restarts that
 // clock (the discontinuity isBreakLocked catches) cannot poison the offsets
 // of a segment that arrives across it.
+//
+// DurMS is what lets the viewer subtract speaking time from onset-to-onset and
+// be left with the silence that actually followed the word. Without it a long
+// word reads as a pause after a short one — the pause landing a word early.
+// Omitted (0) when the provider reported no per-word end, which the viewer
+// reads as unmeasured rather than as an instantaneous word.
 type Word struct {
 	Text     string `json:"t"`
 	OffsetMS int64  `json:"o"`
+	DurMS    int64  `json:"d,omitempty"`
 }
 
 // Line is one finalized caption: the OnFinal payload for the transcript
@@ -217,7 +224,15 @@ func wireWords(t stt.Transcript) []Word {
 	words := make([]Word, 0, len(t.Words))
 	for _, w := range t.Words {
 		off := max(w.Start-t.Start, 0)
-		words = append(words, Word{Text: w.Text, OffsetMS: off.Milliseconds()})
+		// Clamped the same way and for the same reason: a provider that hands
+		// back an end before its own start would otherwise put a negative
+		// duration on the wire for every client to defend against.
+		dur := max(w.End-w.Start, 0)
+		words = append(words, Word{
+			Text:     w.Text,
+			OffsetMS: off.Milliseconds(),
+			DurMS:    dur.Milliseconds(),
+		})
 	}
 	return words
 }

@@ -22,19 +22,22 @@
   }
 
   // paceWords normalizes a caption event's Words into the queue's item shape:
-  // [{text, ms}], where ms is how long to sit on that word before the next one
-  // lands, and null means "nobody measured it — pace by character".
+  // [{text, dur, ms}], where dur is how long the speaker spent saying the word
+  // and ms is the silence that followed it before the next one began. null on
+  // either means "nobody measured it — pace by character".
   //
-  // The wire shape is [{t, o}, ...]. o is the speaker's onset in ms from the
-  // segment's own start, so a word's ms is just the next word's onset minus
-  // its own. That gap covers the word AND any pause after it, which is the
-  // whole point — see drain(), where the leftover after the roll becomes
-  // dwell.
+  // The wire shape is [{t, o, d}, ...]. o is the speaker's onset in ms from the
+  // segment's own start and d is the word's spoken duration, so the silence
+  // after a word is the next word's onset minus this word's own END, not its
+  // onset. Onset-to-onset conflates the two, and drain() would then paint the
+  // word instantly and sit out the entire time it took to say — a phantom
+  // pause landing one word before the real one. Splitting them is what lets a
+  // phrase spoken without a break come out without a break.
   //
-  // Two sources of null, both honest rather than defensive:
-  //   - The LAST word of a segment. Its gap would need the segment's end, and
-  //     the wire carries no duration; the next segment's onsets restart at 0
-  //     on their own clock, so they cannot supply it either.
+  // Sources of null, all honest rather than defensive:
+  //   - The LAST word of a segment has no ms: the next segment's onsets
+  //     restart at 0 on their own clock and cannot supply the gap.
+  //   - A word with no d has no dur: the provider reported no end for it.
   //   - An stt.Untimed segment, where the provider had no per-word detail and
   //     sent the entire segment as one wire word. Its `t` therefore contains
   //     spaces: it tokenizes into several display words, of which only the
@@ -49,13 +52,23 @@
         // Only a wire word's first token can carry its onset; a multi-token
         // one is the Untimed case, and inventing offsets inside it would be
         // fabricating prosody nobody measured.
-        var at = (j === 0 && typeof seg[i].o === "number") ? seg[i].o : null;
-        items.push({ text: parts[j], ms: null, at: at });
+        var timed = (j === 0 && typeof seg[i].o === "number");
+        items.push({
+          text: parts[j],
+          dur: (timed && typeof seg[i].d === "number") ? seg[i].d : null,
+          ms: null,
+          at: timed ? seg[i].o : null
+        });
       }
     }
     for (var k = 0; k < items.length; k++) {
       var next = items[k + 1];
-      if (items[k].at !== null && next && next.at !== null) items[k].ms = next.at - items[k].at;
+      if (items[k].at !== null && next && next.at !== null) {
+        // Never negative: providers do round word boundaries independently,
+        // so an end can land a few ms past the next onset. That is a rounding
+        // artifact, not the speaker talking backwards.
+        items[k].ms = Math.max(0, next.at - items[k].at - (items[k].dur || 0));
+      }
       delete items[k].at; // onsets were only ever a means to the gaps
     }
     return items;
@@ -104,29 +117,45 @@
     // pending decouples "when text arrives" from "when it's typeset": every
     // incoming word (and every break) is queued here and drained one item
     // per tick by drain(), below. Three item shapes share the queue —
-    // {text, ms} words from paceWords, {speaker} markers, and the BREAK
+    // {text, dur, ms} words from paceWords, {speaker} markers, and the BREAK
     // sentinel — and drain() tells them apart by their fields rather than by
     // type, which is why a word is an object and not a bare string. BREAK
     // must stay IN the queue (never jump ahead of already-queued words) or a
     // break could freeze a row before the words meant to land in it have.
     //
     // How long each tick waits is the pacing decision, and it is made from a
-    // word's own ms — the gap the recognizer measured between this word's
-    // onset and the next one's — so the display follows the speaker's real
-    // rhythm rather than a constant rate. See drain().
+    // word's own dur and ms — how long the speaker spent saying it and the
+    // silence that followed — so the display follows the speaker's real rhythm
+    // rather than a constant rate. A word appears whole, at its onset: there is
+    // no per-character reveal, because a caption is read, not watched, and
+    // animating the glyphs of a word the reader has already recognized buys
+    // motion at the cost of legibility. See drain().
     var pending = [];
     var drainTimer = null;
-    var CHAR_MS = 1;   // per-character reveal delay (the roll's base speed)
-    var MAX_HOLD_MS = 900; // ceiling on one word's dwell, so an outlier onset or a
-                           // long silence inside a segment can't stall the display
-    // CATCHUP_LEN is the backlog at which pacing is abandoned wholesale. In
-    // steady state the queue holds well under a segment's worth of words,
-    // because segments arrive at roughly the rate speech is spoken. It only
-    // blows past this after a stall — a reconnect flushing several segments at
-    // once, or a backgrounded tab waking up — where honoring the measured gaps
-    // would mean replaying minutes-old prosody in front of a live speaker.
-    // Past the threshold the queue drains flat-out until it clears.
-    var CATCHUP_LEN = 40;
+    var CHAR_MS = 1;   // stands in for a word's spoken length when the provider
+                       // measured none, so an untimed segment lands in one go
+    var MAX_HOLD_MS = 900; // ceiling on the SILENCE after one word, so an outlier
+                           // onset or a long pause inside a segment can't stall
+                           // the display. Not applied to the word's own spoken
+                           // duration, which is bounded by its segment already.
+    // RATE_MS is the backlog at which the display plays at 2x, and the reason
+    // it can ever catch up at all.
+    //
+    // Replaying prosody at 1x costs exactly as much wall time as the speech it
+    // describes, so a display running at 1x can never recover the recognizer's
+    // latency — it can only add to it, since every row glide floors a tick at
+    // GLIDE_MS and every setTimeout lands a few ms late. The result is drift
+    // that grows without bound, which is what a fixed rate always gives you.
+    //
+    // So the rate rises with the backlog: rate = 1 + queued_ms / RATE_MS. That
+    // is proportional rather than a threshold — a slight accelerando into each
+    // segment easing back toward 1x as the queue empties, instead of pacing
+    // normally until some cliff and then dumping the backlog flat. It is also
+    // self-limiting: falling further behind speeds the display up, which is
+    // what stops it falling further behind. Derived from queued MILLISECONDS,
+    // not queued items: forty words can be three seconds of fast speech or
+    // fifteen of slow, and only the latter should hurry.
+    var RATE_MS = 3000;
     var GLIDE_MS = 130; // MUST equal both the transition set in freezeAndGlide and
                         // the `transition: opacity` on .row in index.html —
                         // the serialization guarantee (never two glides in flight)
@@ -134,53 +163,24 @@
                         // glide animation takes.
     var BREAK = {};
 
-    // ---- per-character reveal ----
+    // How much unplayed speech the queue is holding, in ms. Summed on each tick
+    // rather than tracked as a running total: the queue is small (the rate
+    // factor below is what keeps it that way) and a running total is one more
+    // thing for every push and shift site to get wrong.
     //
-    // A word is measured, placed, and pushed to the ledger whole — layout is
-    // decided before a single glyph is visible. The roll is purely cosmetic:
-    // the span goes in empty and fills one character at a time. Because a row
-    // only ever grows rightward from its last word, a partially filled span
-    // shifts nothing that's already on screen.
-    //
-    // curCharMs is recomputed once per drain tick (not per character) so the
-    // reveal and the queue's inter-word delay always agree on the current
-    // speed. Per tick, not per word, is also what lets a timed word roll at
-    // its own rate: drain() fits the roll inside that word's measured hold
-    // before starting it.
-    var curCharMs = CHAR_MS;
-    var revealTimer = null;
-    var revealSpan = null;
-    var revealText = "";
-    var revealAt = 0;
-
-    // Finish whatever is mid-roll immediately. Called before starting the next
-    // reveal — the queue's pacing should already guarantee the previous one
-    // finished, but a glide's GLIDE_MS floor is the only thing enforcing it.
-    function flushReveal() {
-      if (revealTimer !== null) {
-        clearTimeout(revealTimer);
-        revealTimer = null;
+    // ponytail: O(n) per tick over a queue the rate factor bounds at a few
+    // dozen. If the queue ever needs to hold minutes, track the sum instead.
+    function backlogMs() {
+      var total = 0;
+      for (var i = 0; i < pending.length; i++) {
+        var it = pending[i];
+        // Markers and BREAK carry no speech; a BREAK's own GLIDE_MS is real
+        // wall time but is not the speaker's, and hurrying the queue on
+        // account of it would be the display racing its own animation.
+        if (it === BREAK || it.speaker !== undefined) continue;
+        total += (it.dur || 0) + (it.ms || 0);
       }
-      if (revealSpan) revealSpan.textContent = revealText;
-      revealSpan = null;
-    }
-
-    function revealStep() {
-      revealTimer = null;
-      revealAt++;
-      revealSpan.textContent = revealText.slice(0, revealAt);
-      if (revealAt < revealText.length) revealTimer = setTimeout(revealStep, curCharMs);
-      else revealSpan = null;
-    }
-
-    function startReveal(span, text) {
-      flushReveal();
-      if (text.length < 2) return; // nothing to roll
-      revealSpan = span;
-      revealText = text;
-      revealAt = 0;
-      span.textContent = "";
-      revealTimer = setTimeout(revealStep, curCharMs);
+      return total;
     }
 
     // currentSpeaker is the 1-based speaker id (0 = unknown) pushWord stamps
@@ -212,16 +212,13 @@
       return parts.join(" ");
     }
 
-    // roll === true reveals the word one character at a time; rebuild() passes
-    // false, because a reflow must repaint what's already on screen instantly.
-    function placeInRow(row, entry, roll) {
+    function placeInRow(row, entry) {
       var isFirst = row.words.length === 0;
       if (row.words.length) row.el.appendChild(document.createTextNode(" "));
       var span = document.createElement("span");
       span.className = "w";
       span.textContent = entry.text;
       row.el.appendChild(span);
-      if (roll) startReveal(span, entry.text);
       row.words.push(entry);
       // Badge decision happens exactly once per row, right here, so the live
       // path and rebuild() (which also funnels every placement through this
@@ -331,7 +328,7 @@
       if (measureWidth(cand) <= usableWidth) {
         var entry = { text: text, speaker: currentSpeaker };
         ledger.push(entry);
-        placeInRow(row, entry, true);
+        placeInRow(row, entry);
       } else {
         freezeAndGlide(); // doesn't-fit trigger
         row = activeRow();
@@ -342,10 +339,14 @@
           // like a word would. unshift so the chunks are the very next things
           // drained (in original order), ahead of whatever was already queued
           // behind this word.
-          // ms: null on every chunk — a word's measured gap describes the
-          // word, and subdividing it across glyph runs would be inventing
-          // timing for something the speaker never said as separate words.
-          var chunks = splitToChunks(text).map(function (c) { return { text: c, ms: null }; });
+          // dur and ms null on every chunk — a word's measured timing
+          // describes the word, and subdividing it across glyph runs would be
+          // inventing timing for something the speaker never said as separate
+          // words. Both fields, not just ms: drain() reads dur too, and an
+          // item missing it would make its hold NaN and stall the queue.
+          var chunks = splitToChunks(text).map(function (c) {
+            return { text: c, dur: null, ms: null };
+          });
           // A single glyph wider than the whole row splits to itself
           // (splitToChunks' end<=i progress guard). Re-queueing that would
           // land back here next tick and loop forever, gliding each time —
@@ -353,7 +354,7 @@
           if (chunks.length === 1) {
             var wide = { text: chunks[0].text, speaker: currentSpeaker };
             ledger.push(wide);
-            placeInRow(activeRow(), wide, true);
+            placeInRow(activeRow(), wide);
             trimLedger();
             return;
           }
@@ -363,7 +364,7 @@
         }
         var e2 = { text: text, speaker: currentSpeaker };
         ledger.push(e2);
-        placeInRow(row, e2, true);
+        placeInRow(row, e2);
       }
       trimLedger();
     }
@@ -435,7 +436,7 @@
       adjustMaxRows();
     }
 
-    // Rebuilds rows from the ledger from scratch, reveal suppressed. Used at
+    // Rebuilds rows from the ledger from scratch. Used at
     // construction and by retypeset(). Row structure after a resize is purely
     // a function of width and each entry's stored speaker, which is what makes
     // this correct without replaying any boundary metadata.
@@ -462,7 +463,7 @@
           stack.appendChild(row.el);
           rows.push(row);
         }
-        placeInRow(row, entry, false);
+        placeInRow(row, entry);
       }
       trimRows();
       applyRowOpacities();
@@ -490,7 +491,7 @@
 
     // scheduleDrain()/drain() pace the queue one item per tick. Because
     // drain() only ever schedules its own next call after the current item has
-    // fully finished — and waits GLIDE_MS, not the word's roll time, whenever
+    // fully finished — and waits GLIDE_MS, not the word's own hold, whenever
     // that item caused a glide — at most one freezeAndGlide can ever be in
     // flight at a time. That invariant is the entire point of this queue.
     function scheduleDrain() {
@@ -519,26 +520,19 @@
         freezeAndGlide();
         delay = GLIDE_MS;
       } else {
-        var chars = item.text.length + 1; // +1 for the space that follows
-        // How long this word owns the screen. When the recognizer measured it
-        // (ms), that IS the speaker's pacing; otherwise fall back to the
-        // roll-time estimate. Capped so one outlier can't stall the stack.
-        // Past CATCHUP_LEN the queue is far enough behind that the measured
-        // prosody is stale, so it is abandoned and the backlog drains flat.
-        //
-        // No lower bound: a short word simply flashes past, which is what the
-        // speaker actually did. A non-monotonic pair of onsets can make ms
-        // negative — setTimeout clamps that to 0, so it costs a frame, not a
-        // guard.
-        var hold;
-        if (pending.length > CATCHUP_LEN) hold = 0;
-        else if (item.ms === null) hold = chars * CHAR_MS;
-        else hold = Math.min(MAX_HOLD_MS, item.ms);
-        // The roll fits inside the hold but never runs slower than the base
-        // speed: a word followed by a long pause types at normal speed and
-        // then the screen simply sits there. That leftover dwell is what makes
-        // a pause read as a pause instead of as slow-motion typing.
-        curCharMs = Math.min(CHAR_MS, hold / chars);
+        // A word owns the screen for two distinct spans, and they are kept
+        // distinct because only one of them may be capped: `say` is the time
+        // the speaker spent on the word, bounded by its own segment already,
+        // and `gap` is the silence that followed, which one outlier onset
+        // could otherwise stretch until the display stalls. Unmeasured falls
+        // back to a character estimate, which lands an untimed segment in one
+        // go rather than guessing at prosody nobody reported.
+        var say = (item.dur === null) ? (item.text.length + 1) * CHAR_MS : item.dur;
+        var gap = (item.ms === null) ? 0 : Math.min(MAX_HOLD_MS, item.ms);
+        // Divided, not thresholded: see RATE_MS. The backlog is measured
+        // AFTER the shift above, so it is what remains to be played, and this
+        // word's own hold is not counted against itself.
+        var hold = (say + gap) / (1 + backlogMs() / RATE_MS);
         var before = rows.length;
         pushWord(item);
         delay = (rows.length > before) ? Math.max(hold, GLIDE_MS) : hold;

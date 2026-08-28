@@ -285,7 +285,11 @@ func decodeTranscript(data []byte) (ts []stt.Transcript, isFinal bool, err error
 			// is the segment's measured prosody, and Transcript.Text()
 			// rebuilds exactly the space-joined string this used to build
 			// eagerly.
-			words = append(words, stt.Word{Text: pw, Start: stt.SecondsToDuration(w.Start)})
+			words = append(words, stt.Word{
+				Text:  pw,
+				Start: stt.SecondsToDuration(w.Start),
+				End:   stt.SecondsToDuration(w.End),
+			})
 		}
 		ts = append(ts, stt.Transcript{
 			Words: words,

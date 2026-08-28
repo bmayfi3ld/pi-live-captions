@@ -22,22 +22,52 @@ var paceWords = window.CaptionStack.paceWords;
 function holds(items) {
   return items.map(function (i) { return i.ms; });
 }
+function durs(items) {
+  return items.map(function (i) { return i.dur; });
+}
 function texts(items) {
   return items.map(function (i) { return i.text; });
 }
 
-// A caption event's words: each hold is the next word's onset minus its own,
-// so the pause the speaker actually took between "two" and "three" survives.
+// A caption event's words: each hold is the SILENCE after the word — the next
+// word's onset minus this word's end — so the pause the speaker actually took
+// between "two" and "three" survives while the time they spent saying "two"
+// does not masquerade as one.
 var timed = paceWords([
-  { t: "one", o: 0 },
-  { t: "two", o: 300 },
-  { t: "three", o: 800 }
+  { t: "one", o: 0, d: 200 },
+  { t: "two", o: 300, d: 400 },
+  { t: "three", o: 800, d: 300 }
 ]);
 assert.deepStrictEqual(texts(timed), ["one", "two", "three"]);
-// The last word has no successor onset and the wire carries no duration, so
-// null — drain() falls back to its character estimate there.
-assert.deepStrictEqual(holds(timed), [300, 500, null]);
-console.log("ok  gaps from onsets");
+assert.deepStrictEqual(durs(timed), [200, 400, 300]);
+// one ends at 200, two starts at 300 -> 100ms of silence.
+// two ends at 700, three starts at 800 -> 100ms, NOT the 500ms onset gap.
+// The last word has no successor onset, so null.
+assert.deepStrictEqual(holds(timed), [100, 100, null]);
+console.log("ok  silence from onsets and durations");
+
+// The regression this split exists for: a long word followed immediately by
+// the next one. Onset-to-onset would report a 480ms hold and paint it as a
+// pause after "consecrate"; the silence is actually zero.
+var fluent = paceWords([
+  { t: "consecrate", o: 0, d: 480 },
+  { t: "themselves", o: 480, d: 560 }
+]);
+assert.deepStrictEqual(holds(fluent), [0, null]);
+console.log("ok  a long word is not a pause");
+
+// Rounding can put a word's end a hair past the next word's onset. That is an
+// artifact of two independently rounded boundaries, not negative silence.
+var overlap = paceWords([{ t: "a", o: 0, d: 260 }, { t: "b", o: 240, d: 100 }]);
+assert.deepStrictEqual(holds(overlap), [0, null]);
+console.log("ok  overlapping boundaries clamp to zero");
+
+// No d on the wire (provider reported no end): dur is null and drain() falls
+// back to its character estimate, with the whole onset gap left as silence.
+var noDur = paceWords([{ t: "one", o: 0 }, { t: "two", o: 300 }]);
+assert.deepStrictEqual(durs(noDur), [null, null]);
+assert.deepStrictEqual(holds(noDur), [300, null]);
+console.log("ok  missing duration falls back to the onset gap");
 
 // An event with no words at all. There is no flat-string wire shape left to
 // handle — the snapshot replay that was its only source is gone.

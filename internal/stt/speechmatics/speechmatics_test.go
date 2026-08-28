@@ -328,9 +328,12 @@ func TestTranscripts_Diarization(t *testing.T) {
 	// follows rather than becoming a Word of its own — punctuation is not a
 	// beat a pacer should reveal separately, and a stray entry here would
 	// also desync every downstream index into the segment.
+	// End is the word's own end, not the comma's: a punctuation result carries
+	// an end_time but no spoken duration, so folding it in would tell the pacer
+	// "Hello," takes longer to say than it does.
 	wantRun0 := []stt.Word{
-		{Text: "Hello,", Start: 0},
-		{Text: "there", Start: 400 * time.Millisecond},
+		{Text: "Hello,", Start: 0, End: 400 * time.Millisecond},
+		{Text: "there", Start: 400 * time.Millisecond, End: 800 * time.Millisecond},
 	}
 	if !slices.Equal(ts[0].Words, wantRun0) {
 		t.Errorf("run 0 Words = %+v, want %+v", ts[0].Words, wantRun0)
@@ -346,8 +349,8 @@ func TestTranscripts_Diarization(t *testing.T) {
 		t.Errorf("run 1 Text = %q, want %q", ts[1].Text(), "Hi there.")
 	}
 	wantRun1 := []stt.Word{
-		{Text: "Hi", Start: 800 * time.Millisecond},
-		{Text: "there.", Start: 1100 * time.Millisecond},
+		{Text: "Hi", Start: 800 * time.Millisecond, End: 1100 * time.Millisecond},
+		{Text: "there.", Start: 1100 * time.Millisecond, End: 1500 * time.Millisecond},
 	}
 	if !slices.Equal(ts[1].Words, wantRun1) {
 		t.Errorf("run 1 Words = %+v, want %+v", ts[1].Words, wantRun1)

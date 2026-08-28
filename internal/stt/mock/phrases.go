@@ -155,8 +155,9 @@ func timeWords(seg string, start, dur time.Duration) []stt.Word {
 	words := make([]stt.Word, 0, len(fields))
 	at := start
 	for _, f := range fields {
-		words = append(words, stt.Word{Text: f, Start: at})
-		at += dur * time.Duration(len(f)) / time.Duration(chars)
+		end := at + dur*time.Duration(len(f))/time.Duration(chars)
+		words = append(words, stt.Word{Text: f, Start: at, End: end})
+		at = end // gapless: each word ends where the next begins
 	}
 	return words
 }

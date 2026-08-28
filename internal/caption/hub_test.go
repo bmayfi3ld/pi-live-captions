@@ -399,9 +399,12 @@ func TestCaptionWordsAreSegmentRelative(t *testing.T) {
 		Start:    10 * time.Second,
 		Duration: 900 * time.Millisecond,
 		Words: []stt.Word{
-			{Text: "measured", Start: 9500 * time.Millisecond}, // before its own segment
-			{Text: "at", Start: 10250 * time.Millisecond},
-			{Text: "speed.", Start: 10600 * time.Millisecond},
+			// Starts before its own segment, and ends before it starts: both
+			// are provider self-contradictions, and both clamp to 0 rather
+			// than putting a negative number on the wire.
+			{Text: "measured", Start: 9500 * time.Millisecond, End: 9400 * time.Millisecond},
+			{Text: "at", Start: 10250 * time.Millisecond, End: 10400 * time.Millisecond},
+			{Text: "speed.", Start: 10600 * time.Millisecond, End: 10900 * time.Millisecond},
 		},
 	})
 
@@ -409,10 +412,13 @@ func TestCaptionWordsAreSegmentRelative(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != KindCaption {
 		t.Fatalf("expected one caption event, got %+v", events)
 	}
+	// DurMS is the word's own spoken length, NOT the gap to the next onset:
+	// "at" runs 10250-10400 even though the next word starts at 10600, so the
+	// viewer can tell the 200ms of silence after it from the 150ms of speech.
 	want := []Word{
-		{Text: "measured", OffsetMS: 0},
-		{Text: "at", OffsetMS: 250},
-		{Text: "speed.", OffsetMS: 600},
+		{Text: "measured", OffsetMS: 0, DurMS: 0},
+		{Text: "at", OffsetMS: 250, DurMS: 150},
+		{Text: "speed.", OffsetMS: 600, DurMS: 300},
 	}
 	if !slices.Equal(events[0].Words, want) {
 		t.Errorf("words = %+v, want %+v", events[0].Words, want)

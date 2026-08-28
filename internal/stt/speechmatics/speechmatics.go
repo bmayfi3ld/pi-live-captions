@@ -465,7 +465,15 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 			start = r.StartTime
 			open = true
 		}
-		words = append(words, stt.Word{Text: alt.Content, Start: stt.SecondsToDuration(r.StartTime)})
+		// End is the word's own end, not the punctuation-extended run end
+		// above: a trailing comma has an end_time but no spoken duration, and
+		// folding it in would give the pacer a word that takes longer to say
+		// than it does.
+		words = append(words, stt.Word{
+			Text:  alt.Content,
+			Start: stt.SecondsToDuration(r.StartTime),
+			End:   stt.SecondsToDuration(r.EndTime),
+		})
 		end = r.EndTime
 	}
 	flush()

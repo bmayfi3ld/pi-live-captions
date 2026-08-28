@@ -51,20 +51,22 @@ type Transcript struct {
 	SentAt time.Time
 }
 
-// Word is one word as the recognizer heard it: its text, and when it began,
-// on the same media clock as Transcript.Start. This is the segment's measured
-// prosody — where the speaker actually paused and how fast they were going —
-// and it keeps its shape all the way to the browser rather than being
+// Word is one word as the recognizer heard it: its text, and when it began and
+// ended, on the same media clock as Transcript.Start. This is the segment's
+// measured prosody — where the speaker actually paused and how fast they were
+// going — and it keeps its shape all the way to the browser rather than being
 // flattened into a string at any hop.
 //
-// No end time. A pacer reveals a word at its onset; the gap to the next word
-// already covers that word's duration plus any pause after it, and the last
-// word is bounded by the segment's own Start+Duration. Both providers decode
-// end/end_time already, so this is a small addition later if something ever
-// needs to tell a drawn-out word from a short word followed by a pause.
+// End is what separates a drawn-out word from a short word followed by a
+// pause: onset-to-onset alone conflates the two, and a pacer that treats the
+// whole of it as dwell paints the word instantly and then sits through the
+// time the speaker spent saying it — a phantom pause landing one word early.
+// Zero when the provider reported no end (the Untimed case), which downstream
+// reads as "unmeasured", not as a zero-length word.
 type Word struct {
 	Text  string
 	Start time.Duration
+	End   time.Duration
 }
 
 // Untimed is the whole segment as one Word, for a provider (or a test) with

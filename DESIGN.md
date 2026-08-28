@@ -313,8 +313,8 @@ The current row freezes where it is, even half-full, and the stack glides. New s
 | If you can't hear me at the back |   <- new thought, new row
 ```
 
-**Words land on the speaker's beat.** Not on a metronome: each word is revealed at the onset the
-recognizer measured for it, so the pauses inside a sentence show up as the display briefly
+**Words land on the speaker's beat.** Not on a metronome: each word appears whole at the onset
+the recognizer measured for it, so the pauses inside a sentence show up as the display briefly
 holding still and a fast talker reads fast. The mechanism, and what happens when the timing is
 missing or the display falls behind the audio, is the pacer — §5.
 
@@ -477,9 +477,9 @@ closing the connection.
 Event wire format:
 
 ```json
-{"seq":42,"kind":"caption","words":[{"t":"a","o":0},{"t":"few","o":110},{"t":"announcements","o":340},{"t":"before","o":900},{"t":"the","o":1120}],"speaker":1,"at":"2026-08-19T09:31:05.912Z"}
-{"seq":43,"kind":"caption","words":[{"t":"main","o":0},{"t":"session.","o":260}],"speaker":1,"at":"2026-08-19T09:31:06.301Z"}
-{"seq":44,"kind":"caption","words":[{"t":"Sorry,","o":0},{"t":"can","o":300},{"t":"you","o":420},{"t":"repeat","o":560},{"t":"that?","o":830}],"break":true,"speaker":2,"at":"2026-08-19T09:31:08.912Z"}
+{"seq":42,"kind":"caption","words":[{"t":"a","o":0,"d":90},{"t":"few","o":110,"d":180},{"t":"announcements","o":340,"d":540},{"t":"before","o":900,"d":200},{"t":"the","o":1120,"d":90}],"speaker":1,"at":"2026-08-19T09:31:05.912Z"}
+{"seq":43,"kind":"caption","words":[{"t":"main","o":0,"d":240},{"t":"session.","o":260,"d":420}],"speaker":1,"at":"2026-08-19T09:31:06.301Z"}
+{"seq":44,"kind":"caption","words":[{"t":"Sorry,","o":0,"d":280},{"t":"can","o":300,"d":110},{"t":"you","o":420,"d":120},{"t":"repeat","o":560,"d":250},{"t":"that?","o":830,"d":300}],"break":true,"speaker":2,"at":"2026-08-19T09:31:08.912Z"}
 {"seq":45,"kind":"status","state":"reconnecting","detail":"stt websocket closed","at":"2026-08-19T09:31:10.442Z"}
 {"seq":46,"kind":"status","state":"paused","detail":"","at":"2026-08-19T09:31:40.000Z"}
 {"seq":47,"kind":"status","state":"connected","at":"2026-08-19T09:31:41.000Z"}
@@ -494,16 +494,23 @@ appending: the speaker actually stopped (§4). `Event` dropped from ten fields t
 left to protect the client from.
 
 `words` is where a segment's text lives on a `caption` event, one entry per word, each with its
-`o` — the onset the recognizer measured, in milliseconds from that segment's own start. Relative
-rather than media time on purpose: the client never has to learn the media clock, and a reconnect
-or auto-pause resume that restarts that clock can't poison the offsets of a segment arriving
-across it. The shape survives every hop — `stt.Word` off both providers, never flattened into a
-string until the viewer paces it — because timing discarded at any hop cannot be recovered later.
-A provider with no per-word detail reports the whole segment as one `stt.Untimed` word, so
-consumers have exactly one shape to handle. There is no end time: a pacer reveals a word at its
-onset, and the gap to the next one already covers that word plus any pause after it. `words` is
-now the only text-bearing field on the wire at all: with replay gone there is no `text` field and
-no event that carries a flat string.
+`o` — the onset the recognizer measured, in milliseconds from that segment's own start — and its
+`d`, how long the speaker spent saying it. Relative rather than media time on purpose: the client
+never has to learn the media clock, and a reconnect or auto-pause resume that restarts that clock
+can't poison the offsets of a segment arriving across it. The shape survives every hop —
+`stt.Word` off both providers, never flattened into a string until the viewer paces it — because
+timing discarded at any hop cannot be recovered later. A provider with no per-word detail reports
+the whole segment as one `stt.Untimed` word, so consumers have exactly one shape to handle; `d`
+is then omitted, which the viewer reads as unmeasured rather than as an instantaneous word.
+`words` is now the only text-bearing field on the wire at all: with replay gone there is no `text`
+field and no event that carries a flat string.
+
+`d` exists because onset-to-onset alone cannot tell a drawn-out word from a short word followed
+by a pause — it is the sum of the two. A pacer given only that sum paints the word instantly and
+then sits out the entire time the speaker spent saying it, which reads as a pause landing one
+word before the real one. Since the last word of a phrase carries phrase-final lengthening, the
+biggest phantom pause reliably appeared right before it. `o` and `d` together separate speech
+from silence, and the viewer paces each on its own.
 
 `speaker` (§4, omitted when unknown) is the one exception to that last sentence, and it is
 deliberately *not* folded into `break`. `break` is a one-shot instruction — freeze the row now —
@@ -559,25 +566,36 @@ transition on `#stack`, so two glides fired in the same tick would overwrite eac
 several rows would jump at once instead of gliding independently — and the one-item-per-tick
 drain is what guarantees at most one glide in flight.
 
-What each tick *waits* is where `Event.Words` earns its place. A word's hold is the gap
-between its own onset and the next word's, which covers the word plus any pause after it. The
-character roll is fitted inside that hold but never runs slower than the base rate, so the
-leftover becomes dwell: a word followed by a real pause types at normal speed and then the screen
-simply sits there. That is the whole point — a pause reads as a pause rather than as slow-motion
-typing, and a fast talker reveals fast. Two gaps are unknowable and fall back to a
-character-count estimate rather than a guess: the last word of a segment (the wire carries no
-duration, and the next segment's onsets restart at 0 on their own clock) and every word of an
-`stt.Untimed` segment, where the provider reported no per-word detail at all.
+A word appears whole, at its onset. There is no per-character reveal: a caption is read, not
+watched, and animating the glyphs of a word the reader has already recognized costs legibility to
+buy motion. The typesetter decides *where* a word goes; the pacer decides only *when*.
 
-Played back at 1× this would add a whole segment-duration of latency, since a segment only
-arrives after it was spoken. So every wait — measured hold and character roll alike — is divided
-by a backlog factor, which compresses the speaker's prosody instead of discarding it. The factor
-is derived from queued *milliseconds*, not queued items: with real holds, forty words can be
-three seconds of fast speech or fifteen of slow, and only the latter should speed up. Steady
-state is a slight accelerando into each segment easing back toward 1× as the queue empties, then
-a gap before the next arrives — which is the between-segment silence, preserved. `CHAR_MS`,
-`RATE_MS` and `MAX_HOLD_MS` are the tuning knobs; they are set by eye against live audio, and a
-venue with a slow speaker wants different ones.
+What each tick *waits* is where `Event.Words` earns its place, and it is two spans, not one. A
+word's `d` is the time the speaker spent saying it; the silence after it is the next word's onset
+minus this word's *end*. They are kept apart because only one of them may be capped — `MAX_HOLD_MS`
+bounds the silence, since one outlier onset could otherwise stall the display, while a word's own
+duration is bounded by the segment that carried it and needs no ceiling. What is unknowable falls
+back to a character-count estimate rather than a guess: the last word of a segment has no silence
+to measure (the next segment's onsets restart at 0 on their own clock), and every word of an
+`stt.Untimed` segment has neither onset nor duration, so it lands in one go.
+
+Played back at 1× this costs exactly as much wall time as the speech it describes, which means a
+1× display can never recover the recognizer's latency — it can only add to it, since every row
+glide floors a tick at `GLIDE_MS` and every `setTimeout` lands a few milliseconds late. Left
+alone that drifts without bound: replayed against ~20 minutes of unbroken speech, latency climbs
+from 4.4s to 8.9s and keeps going.
+
+So every wait is divided by a backlog factor, `1 + queued_ms / RATE_MS`, which compresses the
+speaker's prosody instead of discarding it. Proportional, not a threshold: pacing normally until
+some cliff and then dumping the backlog flat is jarring in exactly the moment the reader is
+already behind. It is also self-limiting — falling further behind speeds the display up, which is
+what stops it falling further behind. The factor is derived from queued *milliseconds*, not
+queued items: with real holds, forty words can be three seconds of fast speech or fifteen of
+slow, and only the latter should hurry. Steady state is a slight accelerando into each segment
+easing back toward 1× as the queue empties, then a gap before the next arrives — which is the
+between-segment silence, preserved. On the same 20-minute replay latency instead *falls*, 3.4s to
+2.2s, and holds there. `CHAR_MS`, `RATE_MS` and `MAX_HOLD_MS` are the tuning knobs; they are set
+by eye against live audio, and a venue with a slow speaker wants different ones.
 
 `computeMetrics()` calibrates canvas measurement against a hidden probe row's real rendered width,
 because canvas resolves a font stack independently of layout and an under-measure would clip a
