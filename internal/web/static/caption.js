@@ -70,13 +70,78 @@
     // row before the words meant to land in it actually have.
     var pending = [];
     var drainTimer = null;
-    var WORD_MS = 75;   // fixed inter-word pacing delay
+    var CHAR_MS = 35;   // per-character reveal delay (the roll's base speed)
+    var MIN_WORD_MS = 20; // floor so one-letter words don't flicker past; kept
+                          // below one word's roll time so it never adds a stall
+    var CHAR_MS_FLOOR = 5; // fastest the backlog scaling is allowed to push it
     var GLIDE_MS = 130; // MUST equal both the transition set in freezeAndGlide and
                         // the `transition: opacity` on .row in index.html —
                          // the serialization guarantee (never two glides in flight)
                          // depends on the scheduler waiting exactly as long as the
                          // glide animation takes.
     var BREAK = {};
+
+    // ---- per-character reveal ----
+    //
+    // A word is measured, placed, and pushed to the ledger whole — layout is
+    // decided before a single glyph is visible. The roll is purely cosmetic:
+    // the span goes in empty and fills one character at a time. Because a row
+    // only ever grows rightward from its last word, a partially filled span
+    // shifts nothing that's already on screen.
+    //
+    // curCharMs is recomputed once per drain tick (not per character) so the
+    // reveal and the queue's inter-word delay always agree on the current
+    // speed; letting them each sample the backlog independently would let the
+    // reveal outrun or lag the word that follows it.
+    var curCharMs = CHAR_MS;
+    var revealTimer = null;
+    var revealSpan = null;
+    var revealText = "";
+    var revealAt = 0;
+
+    // Backlog-adaptive speed: this is the real anti-chop knob. A steady stream
+    // rolls at CHAR_MS; a burst of segments types faster instead of drifting
+    // further and further behind the audio.
+    // ponytail: linear scaling, tuned by eye against live audio — swap for a
+    // real latency target (queue length in seconds, not items) if it drifts.
+    function charMs() {
+      return Math.max(CHAR_MS_FLOOR, CHAR_MS / (1 + pending.length / 40));
+    }
+
+    function reducedMotion() {
+      return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    }
+
+    // Finish whatever is mid-roll immediately. Called before starting the next
+    // reveal (the queue's pacing should already guarantee the previous one
+    // finished, but a glide's GLIDE_MS floor is the only thing enforcing it)
+    // and on every path that tears the stack down.
+    function flushReveal() {
+      if (revealTimer !== null) {
+        clearTimeout(revealTimer);
+        revealTimer = null;
+      }
+      if (revealSpan) revealSpan.textContent = revealText;
+      revealSpan = null;
+    }
+
+    function revealStep() {
+      revealTimer = null;
+      revealAt++;
+      revealSpan.textContent = revealText.slice(0, revealAt);
+      if (revealAt < revealText.length) revealTimer = setTimeout(revealStep, curCharMs);
+      else revealSpan = null;
+    }
+
+    function startReveal(span, text) {
+      flushReveal();
+      if (reducedMotion() || text.length < 2) return; // nothing to roll
+      revealSpan = span;
+      revealText = text;
+      revealAt = 0;
+      span.textContent = "";
+      revealTimer = setTimeout(revealStep, curCharMs);
+    }
 
     // currentSpeaker is the 1-based speaker id (0 = unknown) pushWord stamps
     // onto every ledger entry it creates. It's set from the paced queue by a
@@ -112,13 +177,17 @@
       return parts.join(" ");
     }
 
-    function placeInRow(row, entry) {
+    // animate === true rolls the word out one character at a time; every other
+    // caller (rebuild, snapshot replay, hardSplit) paints it whole and
+    // instantly — replay must never trickle.
+    function placeInRow(row, entry, animate) {
       var isFirst = row.words.length === 0;
       if (row.words.length) row.el.appendChild(document.createTextNode(" "));
       var span = document.createElement("span");
       span.className = "w";
       span.textContent = entry.text;
       row.el.appendChild(span);
+      if (animate) startReveal(span, entry.text);
       entry.span = span;
       row.words.push(entry);
       // Badge decision happens exactly once per row, right here, so the live
@@ -231,7 +300,7 @@
       if (measureWidth(cand) <= usableWidth) {
         var entry = { text: text, frozen: false, span: null, speaker: currentSpeaker };
         ledger.push(entry);
-        placeInRow(row, entry);
+        placeInRow(row, entry, animate);
       } else {
         freezeAndGlide(animate); // doesn't-fit trigger
         row = activeRow();
@@ -251,7 +320,7 @@
             if (chunks.length === 1) {
               var wide = { text: chunks[0], frozen: false, span: null, speaker: currentSpeaker };
               ledger.push(wide);
-              placeInRow(activeRow(), wide);
+              placeInRow(activeRow(), wide, animate);
               trimLedger();
               return;
             }
@@ -263,7 +332,7 @@
         } else {
           var e2 = { text: text, frozen: false, span: null, speaker: currentSpeaker };
           ledger.push(e2);
-          placeInRow(row, e2);
+          placeInRow(row, e2, animate);
         }
       }
       trimLedger();
@@ -417,6 +486,7 @@
         pending = [];
         clearTimeout(drainTimer);
         drainTimer = null;
+        flushReveal();
         currentSpeaker = spk;
         for (var i = 0; i < words.length; i++) pushWord(words[i], false);
         return;
@@ -432,13 +502,15 @@
 
     // scheduleDrain()/drain() pace the queue one item per tick. Because
     // drain() only ever schedules its own next call after the current
-    // item has fully finished — and waits GLIDE_MS, not WORD_MS, whenever
+    // item has fully finished — and waits GLIDE_MS, not the word's roll time, whenever
     // that item caused a glide — at most one freezeAndGlide can ever be in
     // flight at a time. That invariant is the entire point of this queue.
     function scheduleDrain() {
       if (drainTimer !== null) return;
       if (pending.length === 0) return;
-      drainTimer = setTimeout(drain, WORD_MS);
+      // Near-immediate: the first word after a silence should not sit in the
+      // queue waiting out a pacing tick nothing is pacing against.
+      drainTimer = setTimeout(drain, 0);
     }
 
     function drain() {
@@ -447,7 +519,7 @@
       var item = pending.shift();
       if (item !== BREAK && typeof item === "object") {
         // Speaker marker: unlike BREAK or a word, it paints nothing, so it
-        // must not burn a WORD_MS tick — consume it and drain whatever's
+        // must not burn a pacing tick — consume it and drain whatever's
         // next immediately.
         currentSpeaker = item.speaker;
         drain();
@@ -458,9 +530,15 @@
         freezeAndGlide(true);
         delay = GLIDE_MS;
       } else {
+        // Sampled once here, before the word is placed, so startReveal and the
+        // delay below roll and wait at exactly the same speed.
+        curCharMs = charMs();
         var before = rows.length;
         pushWord(item, true);
-        delay = (rows.length > before) ? Math.max(WORD_MS, GLIDE_MS) : WORD_MS;
+        // The word's own roll time (+1 for the space that follows it), floored
+        // so short words still read as words rather than a flicker.
+        var wordMs = Math.max(MIN_WORD_MS, (item.length + 1) * curCharMs);
+        delay = (rows.length > before) ? Math.max(wordMs, GLIDE_MS) : wordMs;
       }
       if (pending.length > 0) drainTimer = setTimeout(drain, delay);
     }
@@ -492,6 +570,7 @@
       pending = [];
       clearTimeout(drainTimer);
       drainTimer = null;
+      flushReveal();
       ledger = [];
       rebuild();
     }
