@@ -71,7 +71,8 @@
     var pending = [];
     var drainTimer = null;
     var WORD_MS = 75;   // fixed inter-word pacing delay
-    var GLIDE_MS = 130; // MUST equal the CSS transition duration in freezeAndGlide —
+    var GLIDE_MS = 130; // MUST equal both the transition set in freezeAndGlide and
+                        // the `transition: opacity` on .row in index.html —
                          // the serialization guarantee (never two glides in flight)
                          // depends on the scheduler waiting exactly as long as the
                          // glide animation takes.
@@ -144,14 +145,17 @@
     }
 
     // Row opacity by age is the only recency cue left once word color stops
-    // carrying state (there is no more state to carry).
+    // carrying state (there is no more state to carry). This ladder is the
+    // single definition — nothing in the CSS sets .row opacity, so there is
+    // no second place for it to disagree with. Index is age: 0 is the live
+    // row, 5 is the row on its way off the top (trimRows keeps maxRows + 1),
+    // which is why the last step is 0 rather than something still visible.
     function applyRowOpacities() {
       var n = rows.length;
-      var levels = [1, 0.85, 0.7];
+      var levels = [1, 0.3, 0.3, 0.3, 0.05, 0];
       for (var i = 0; i < n; i++) {
         var age = n - 1 - i;
-        var op = age < levels.length ? levels[age] : 0.55;
-        rows[i].el.style.opacity = String(op);
+        rows[i].el.style.opacity = String(age < levels.length ? levels[age] : 0);
       }
     }
 
