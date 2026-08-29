@@ -12,6 +12,9 @@
     --warn: #f5a623;
     --bad: #ef4444;
     --ok: #22c55e;
+    /* Benign non-streaming states (silence, music): blue reads as "nothing is
+       wrong, just not captioning" where grey read as dead. */
+    --info: #38bdf8;
     --size: 4vw;
     --row-h: 1.6em;
     /* Reserved unconditionally, never toggled: a gutter that appeared the
@@ -38,6 +41,7 @@
     --fg: #0c0f14;
     --dim: #6b7280;
     --ok: #16a34a;
+    --info: #0284c7;
     /* Every swatch here clears 4.9:1 against the near-white numeral. */
     --spk-1: #0369a1;
     --spk-2: #b45309;
@@ -182,7 +186,12 @@
     display: flex;
     align-items: center;
     gap: 0.6rem;
+    /* Spans the viewport with the status pinned left and the logo right, so
+       the pill growing a label expands into empty space instead of shoving
+       the logo sideways. */
+    justify-content: space-between;
     top: max(0.9rem, env(safe-area-inset-top, 0px));
+    left: max(0.9rem, env(safe-area-inset-left, 0px));
     right: max(0.9rem, env(safe-area-inset-right, 0px));
     pointer-events: none;
   }
@@ -229,19 +238,19 @@
   #status.bad .label { display: inline; color: var(--bad); }
   /* Auto-pause: the recognizer link closed itself after a stretch of
      silence, which is expected, money-saving behaviour, not a fault — so
-     this tier borrows --dim rather than --warn/--bad and must never read
+     this tier borrows --info rather than --warn/--bad and must never read
      as an error. */
-  #status.idle { background: color-mix(in srgb, var(--dim) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.idle .dot { background: var(--dim); box-shadow: none; }
-  #status.idle .label { display: inline; color: var(--dim); }
+  #status.idle { background: color-mix(in srgb, var(--info) 22%, transparent); padding: 0.3em 0.7em; }
+  #status.idle .dot { background: var(--info); box-shadow: none; }
+  #status.idle .label { display: inline; color: var(--info); }
   /* Music: the recognizer is hearing singing, captions are suppressed so a
      frozen row doesn't look broken. Own tier rather than reusing warn/bad —
      this is expected, not a fault — and it wins over connection state below,
      since the reason the screen is frozen matters more than the link health
      that isn't the cause of it. */
-  #status.music { background: color-mix(in srgb, var(--dim) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.music .dot { background: var(--dim); box-shadow: none; }
-  #status.music .label { display: inline; color: var(--dim); }
+  #status.music { background: color-mix(in srgb, var(--info) 22%, transparent); padding: 0.3em 0.7em; }
+  #status.music .dot { background: var(--info); box-shadow: none; }
+  #status.music .label { display: inline; color: var(--info); }
 
   /* Backend B's silent looping video. Both engines gate the screen-on
      grant on the element's geometry or its tracks, not on playback alone,
@@ -298,8 +307,8 @@
 </head>
 <body>
   <div id="topbar">
-    <img id="logo" alt="" hidden>
     <div id="status" class="connecting" role="status" aria-live="polite"><span class="dot"></span><span class="label"></span></div>
+    <img id="logo" alt="" hidden>
   </div>
   <div id="page"><div id="viewport"><div id="stack"></div></div></div>
   <!-- Long enough that the canvas-vs-layout width calibration in
@@ -518,10 +527,11 @@
       text = "closed";
     } else if (hubState === "paused") {
       // Auto-pause: the room went quiet and the recognizer link closed
-      // itself to stop billing. Correct, expected behaviour — "no audio"
-      // rather than an alarming word, and the dim dot carries the rest.
+      // itself to stop billing. Correct, expected behaviour — "silence",
+      // matching the *silence* caption marker, rather than an alarming or
+      // technical word; the blue dot carries the rest.
       tier = "idle";
-      text = "no audio";
+      text = "silence";
     }
     statusEl.classList.toggle("connecting", tier === "connecting");
     statusEl.classList.toggle("warn", tier === "warn");
