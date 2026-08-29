@@ -186,9 +186,9 @@
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    /* Spans the viewport with the status pinned left and the logo right, so
-       the pill growing a label expands into empty space instead of shoving
-       the logo sideways. */
+    /* Spans the viewport with the logo pinned left and the status right, so
+       the pill growing a label expands leftward into empty space instead of
+       shoving the logo sideways. */
     justify-content: space-between;
     top: max(0.9rem, env(safe-area-inset-top, 0px));
     left: max(0.9rem, env(safe-area-inset-left, 0px));
@@ -206,6 +206,9 @@
   #status {
     display: flex;
     align-items: center;
+    /* Dot last so it sits at the right edge and never moves; the label grows
+       leftward from it. */
+    flex-direction: row-reverse;
     gap: 0.5em;
     padding: 0.45em 0.45em;
     border-radius: 999px;
@@ -307,8 +310,8 @@
 </head>
 <body>
   <div id="topbar">
-    <div id="status" class="connecting" role="status" aria-live="polite"><span class="dot"></span><span class="label"></span></div>
     <img id="logo" alt="" hidden>
+    <div id="status" class="connecting" role="status" aria-live="polite"><span class="dot"></span><span class="label"></span></div>
   </div>
   <div id="page"><div id="viewport"><div id="stack"></div></div></div>
   <!-- Long enough that the canvas-vs-layout width calibration in
