@@ -108,6 +108,12 @@ type Config struct {
 	Pause    PauseConfig
 	// Diarize asks the provider to attribute segments to speakers.
 	Diarize bool
+	// MusicDetect asks the provider for music audio-events (Speechmatics
+	// only; Deepgram has no equivalent and ignores this).
+	MusicDetect bool
+	// OnMusic is called on each music start/end edge the provider reports.
+	// Nil-safe at every call site — only Speechmatics ever calls it.
+	OnMusic func(active bool)
 }
 
 // CapKeyterms trims a keyterm list to what the provider will accept. Deepgram

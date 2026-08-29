@@ -256,6 +256,10 @@
   #lt-status.warn .dot { background: var(--warn); }
   #lt-status.crit { background: var(--crit-soft); color: var(--crit); }
   #lt-status.crit .dot { background: var(--crit); }
+  /* Music suppression — same calm tier as idle; this is the page an operator
+     watches to judge whether --music-detect is over-triggering. */
+  #lt-status.music { background: var(--muted-soft); color: var(--muted); }
+  #lt-status.music .dot { background: var(--muted); }
 
   /* caption.js sizes #lt-viewport itself (maxRows * measured row height), but
      it derives maxRows FROM #lt-page's clientHeight — so #lt-page needs a
@@ -878,13 +882,18 @@
 
   var sseOpen = null;
   var hubState = null;
+  var musicOn = false;
 
   function applyIndicator() {
     var tier = "idle", text = "connecting";
     if (sseOpen === false) {
       tier = "crit"; text = "disconnected";
     } else if (sseOpen === true) {
-      if (hubState === "reconnecting" || hubState === "connecting") {
+      if (musicOn) {
+        // Wins over connection state, same as the viewer: it explains a
+        // frozen row on an otherwise-healthy link.
+        tier = "music"; text = "♪ music";
+      } else if (hubState === "reconnecting" || hubState === "connecting") {
         tier = "warn"; text = hubState;
       } else if (hubState === "closed") {
         tier = "crit"; text = "closed";
@@ -938,6 +947,7 @@
       // First event on every connection carries the server's last-known
       // state — same as the viewer, which this must render identically to.
       case "status":  hubState = ev.state || null; applyIndicator(); return;
+      case "music":   musicOn = ev.state === "on"; applyIndicator(); return;
       default: return;
     }
     applyIndicator();

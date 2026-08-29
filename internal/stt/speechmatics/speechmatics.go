@@ -132,10 +132,16 @@ func (e *Engine) dial(ctx context.Context) (*websocket.Conn, stt.Session, error)
 	}
 	conn.SetReadLimit(readLimit)
 
-	s := &session{conn: conn, log: slog.Default()}
+	s := &session{conn: conn, log: slog.Default(), onMusic: e.cfg.OnMusic}
 	if err := s.handshake(ctx, e.startMessage()); err != nil {
 		conn.CloseNow()
 		return nil, nil, err
+	}
+	// A connection that drops mid-song must not leave the suppression gate
+	// stuck closed forever: every fresh handshake starts from "not music",
+	// regardless of what the last connection last reported.
+	if s.onMusic != nil {
+		s.onMusic(false)
 	}
 	return conn, s, nil
 }
@@ -154,8 +160,17 @@ func (e *Engine) startMessage() startRecognition {
 	if e.cfg.Diarize {
 		diarization = "speaker"
 	}
+	// Only "music" is requested — "speech" adds a second event stream this
+	// engine has nothing to do with. Left nil (rather than an empty Types
+	// list) when the flag is off, so the field is omitted from the wire
+	// entirely, same style as the diarization empty-string omission below.
+	var events *audioEventsConfig
+	if e.cfg.MusicDetect {
+		events = &audioEventsConfig{Types: []string{"music"}}
+	}
 	return startRecognition{
-		Message: "StartRecognition",
+		Message:     "StartRecognition",
+		AudioEvents: events,
 		AudioFormat: audioFormat{
 			Type: "raw",
 			// The pipeline is fixed at 16-bit signed little-endian samples end
@@ -189,6 +204,10 @@ type session struct {
 	// touched by SendAudio (the driver's single writer goroutine) and then by
 	// Finish, which the driver calls only after that goroutine has returned.
 	seqNo int
+
+	// onMusic is e.cfg.OnMusic, nil unless MusicDetect was requested. Called
+	// from Decode on each AudioEventStarted/AudioEventEnded for "music".
+	onMusic func(active bool)
 }
 
 // handshake sends StartRecognition and reads until the server acknowledges it.
@@ -271,11 +290,37 @@ func (s *session) Decode(data []byte) ([]stt.Transcript, error) {
 		s.log.Warn("speechmatics: "+msg.Type, "reason", msg.Reason)
 		return nil, nil
 
+	case "AudioEventStarted":
+		s.handleAudioEvent(msg, true)
+		return nil, nil
+
+	case "AudioEventEnded":
+		s.handleAudioEvent(msg, false)
+		return nil, nil
+
 	default:
-		// AudioAdded, Info, RecognitionStarted, audio events, anything new:
-		// nothing to publish.
+		// AudioAdded, Info, RecognitionStarted, anything new: nothing to
+		// publish.
 		return nil, nil
 	}
+}
+
+// handleAudioEvent drives the music gate off a music AudioEventStarted /
+// AudioEventEnded pair. Other event types (there are none requested today,
+// see startMessage) are ignored rather than rejected, so the code stays
+// correct if the request ever asks for more.
+//
+// Logged at Info — type, start_time, confidence — because Speechmatics warns
+// this detector can be over-sensitive, and that is the data for judging it
+// in a real service.
+func (s *session) handleAudioEvent(msg serverMessage, active bool) {
+	if msg.Event.Type != "music" || s.onMusic == nil {
+		return
+	}
+	s.log.Info("speechmatics: music event",
+		"active", active, "start_time", msg.Event.StartTime,
+		"end_time", msg.Event.EndTime, "confidence", msg.Event.Confidence)
+	s.onMusic(active)
 }
 
 func (s *session) writeJSON(ctx context.Context, v any) error {
@@ -289,9 +334,18 @@ func (s *session) writeJSON(ctx context.Context, v any) error {
 // --- wire types ---
 
 type startRecognition struct {
-	Message     string              `json:"message"`
+	Message string `json:"message"`
+	// AudioEvents is a top-level field, not part of Config — Speechmatics
+	// scopes audio-event detection outside transcription_config.
+	AudioEvents *audioEventsConfig  `json:"audio_events_config,omitempty"`
 	AudioFormat audioFormat         `json:"audio_format"`
 	Config      transcriptionConfig `json:"transcription_config"`
+}
+
+// audioEventsConfig requests non-speech audio events. Only "music" is ever
+// sent — see startMessage.
+type audioEventsConfig struct {
+	Types []string `json:"types"`
 }
 
 type audioFormat struct {
@@ -351,6 +405,16 @@ type serverMessage struct {
 			Speaker string `json:"speaker"`
 		} `json:"alternatives"`
 	} `json:"results"`
+
+	// Event carries AudioEventStarted/AudioEventEnded detail — only music
+	// is ever requested (see startMessage), but Type is still checked before
+	// acting on it in case that changes.
+	Event struct {
+		Type       string  `json:"type"`
+		StartTime  float64 `json:"start_time"`
+		EndTime    float64 `json:"end_time"`
+		Confidence float64 `json:"confidence"`
+	} `json:"event"`
 }
 
 // asError turns an Error message into a Go error, marking the ones that mean

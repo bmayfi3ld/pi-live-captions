@@ -87,7 +87,9 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 			Enabled: o.stt.AutoPause,
 			Hold:    o.stt.SilenceHold,
 		},
-		Diarize: o.stt.Diarize,
+		Diarize:     o.stt.Diarize,
+		MusicDetect: o.stt.MusicDetect,
+		OnMusic:     hub.SetMusic,
 	})
 	if err != nil {
 		return nil, err

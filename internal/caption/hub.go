@@ -17,6 +17,7 @@ type Kind string
 const (
 	KindCaption Kind = "caption" // one settled segment, append-only
 	KindStatus  Kind = "status"  // connection state changed
+	KindMusic   Kind = "music"   // music suppression toggled, carried on State as "on"/"off"
 )
 
 // Event is what goes over SSE. One JSON object per message.
@@ -46,7 +47,7 @@ type Event struct {
 	// unset time would serialize as "0001-01-01T00:00:00Z".
 	At time.Time `json:"at,omitzero"`
 
-	// Status events only.
+	// Status/music events only. On a music event, "on" or "off".
 	State string `json:"state,omitempty"`
 }
 
@@ -138,6 +139,14 @@ type Hub struct {
 	// immediately, instead of waiting for a change that may never come. This
 	// is now the only thing a subscriber is told about the past.
 	lastState string
+	// music is whether the recognizer currently reports singing. While set,
+	// Publish is a no-op: sung lyrics come back as garble, and freezing the
+	// screen (with the viewer told why via KindMusic) beats painting it.
+	music bool
+	// lastMusic mirrors music for Subscribe, the same way lastState mirrors
+	// PublishStatus — a client joining mid-song needs to know the screen is
+	// frozen on purpose.
+	lastMusic bool
 
 	subs    map[chan Event]struct{}
 	metrics *metrics.Metrics
@@ -164,6 +173,14 @@ func (h *Hub) Publish(t stt.Transcript) {
 	}
 
 	h.mu.Lock()
+	// While music is playing, the recognizer's output is garble and gets
+	// dropped whole — before any state mutation, so prevEnd/lastSpeaker stay
+	// exactly as they were when the song started and the first segment after
+	// it reads as a clean break rather than continuing a stale utterance.
+	if h.music {
+		h.mu.Unlock()
+		return
+	}
 	// The break must be evaluated, and the line it closes flushed, BEFORE
 	// this segment is appended — otherwise a pause lands inside the new
 	// utterance instead of separating it from the old one. A speaker change
@@ -292,6 +309,45 @@ func endsSentence(s string) bool {
 	}
 }
 
+// SetMusic toggles caption suppression on a music start/end edge from the
+// recognizer. On true, the in-progress transcript line is closed through the
+// same OnFinal path Flush uses, so the sentence spoken right before the song
+// lands in transcript.txt instead of being glued to whatever follows the
+// music.
+func (h *Hub) SetMusic(active bool) {
+	h.mu.Lock()
+	if h.music == active {
+		// The engine can only send edges, but this is cheap insurance
+		// against a redundant one being treated as a fresh state change.
+		h.mu.Unlock()
+		return
+	}
+	h.music = active
+	h.lastMusic = active
+
+	var line Line
+	var closed bool
+	if active {
+		line, closed = h.closeLocked(true)
+	}
+	ev := h.newEventLocked(KindMusic)
+	if active {
+		ev.State = "on"
+	} else {
+		ev.State = "off"
+	}
+	onFinal := h.OnFinal
+	h.mu.Unlock()
+
+	h.broadcast(ev)
+	if closed {
+		h.metrics.STTLine()
+		if onFinal != nil {
+			onFinal(line)
+		}
+	}
+}
+
 // PublishStatus broadcasts a connection state change.
 func (h *Hub) PublishStatus(state string) {
 	h.mu.Lock()
@@ -344,10 +400,21 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	h.mu.Lock()
 	ev := h.newEventLocked(KindStatus)
 	ev.State = h.lastState
+	var musicEv Event
+	if h.lastMusic {
+		musicEv = h.newEventLocked(KindMusic)
+		musicEv.State = "on"
+	}
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 
 	ch <- ev // buffered and empty, cannot block
+	// A viewer joining mid-song needs to know why the screen is frozen —
+	// pushed after the status event it already replays, same buffered
+	// channel, so it also cannot block.
+	if h.lastMusic {
+		ch <- musicEv
+	}
 	h.metrics.SSEConnect()
 
 	var once sync.Once

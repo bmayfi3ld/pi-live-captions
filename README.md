@@ -130,6 +130,23 @@ Speaker labels are cluster indices, not identities: they are stable within a con
 renumbered after a reconnect. Turn it off with `--no-diarize` if a venue sees the extra
 recognition delay it can cost.
 
+### Music
+
+Speechmatics can flag music in the feed (its audio-events detector); Deepgram has no
+equivalent, so the flag does nothing there. While music is playing captions are suppressed —
+sung lyrics come back as garble — and the status indicator reads `♪ music` so a frozen screen
+reads as deliberate rather than broken. The open transcript line is closed at the first note,
+so the sentence spoken before the song isn't glued to whatever follows it.
+
+| flag | default | effect |
+|---|---|---|
+| `--music-detect` / `--no-music-detect` | on | suppress captions while the recognizer reports music |
+
+Speechmatics warns the detector can be over-sensitive — congregational singing is exactly what
+it is for, but a loud room or an instrument under speech can trip it. Each event is logged at
+info level with its time and confidence; if it is swallowing speech in your venue, run with
+`--no-music-detect`.
+
 ## Transcripts
 
 On by default — every session writes to `./transcripts/<YYYY-MM-DDTHH-MM-SS>/`, both

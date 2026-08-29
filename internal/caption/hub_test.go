@@ -518,6 +518,67 @@ func TestEventCarriesSpeaker(t *testing.T) {
 	}
 }
 
+// TestMusicSuppressesPublish covers the suppression gate: while music is on,
+// Publish broadcasts nothing and calls no OnFinal, and normal publishing
+// resumes once it goes off.
+func TestMusicSuppressesPublish(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub) // discard the initial status
+
+	h.SetMusic(true)
+	drain(sub) // discard the music-on event
+
+	h.Publish(stt.Transcript{Words: stt.Untimed("garbled singing"), Start: time.Second})
+	if len(finals) != 0 {
+		t.Fatalf("expected no line closed while music is on, got %d: %+v", len(finals), finals)
+	}
+	if events := drain(sub); len(events) != 0 {
+		t.Fatalf("expected no broadcast while music is on, got %+v", events)
+	}
+
+	h.SetMusic(false)
+	drain(sub) // discard the music-off event
+
+	h.Publish(stt.Transcript{Words: stt.Untimed("captions resume"), Start: 10 * time.Second})
+	events := drain(sub)
+	var found bool
+	for _, ev := range events {
+		if ev.Kind == KindCaption {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected captions to resume once music is off")
+	}
+}
+
+// TestSetMusicFlushesOpenLine pins the transcript-continuity rule: turning
+// music on closes whatever line was in progress through OnFinal, so the
+// sentence spoken right before the song lands in transcript.txt instead of
+// being glued to whatever follows.
+func TestSetMusicFlushesOpenLine(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+
+	h.Publish(stt.Transcript{Words: stt.Untimed("about to sing"), Start: 0})
+	if len(finals) != 0 {
+		t.Fatalf("expected the line still open, got %d finals", len(finals))
+	}
+
+	h.SetMusic(true)
+	if len(finals) != 1 {
+		t.Fatalf("expected SetMusic(true) to flush the open line, got %d finals", len(finals))
+	}
+	if finals[0].Text != "about to sing" {
+		t.Errorf("flushed text = %q, want %q", finals[0].Text, "about to sing")
+	}
+}
+
 // TestSpeakerChangeDoesNotSetBreak pins Break as pause-only: a speaker change
 // with no pause must not set it, even though it does close the transcript
 // line — those are two separate signals now, and Break conflating them would

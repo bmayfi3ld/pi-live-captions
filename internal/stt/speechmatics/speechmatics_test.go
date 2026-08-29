@@ -195,6 +195,44 @@ func TestStartMessage_CapsAdditionalVocab(t *testing.T) {
 	}
 }
 
+// TestStartMessage_MusicDetect pins audio_events_config to exactly what
+// startMessage promises: present with types ["music"] when requested, and
+// the key omitted entirely (not an empty list) when not, so a Speechmatics
+// change to its own "no events requested" default can't silently start
+// asking for audio events this engine never wanted.
+func TestStartMessage_MusicDetect(t *testing.T) {
+	e := testEngine("")
+	e.cfg.MusicDetect = true
+	b, err := json.Marshal(e.startMessage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	aec, ok := raw["audio_events_config"].(map[string]any)
+	if !ok {
+		t.Fatalf("audio_events_config missing from %s", b)
+	}
+	if types, _ := aec["types"].([]any); len(types) != 1 || types[0] != "music" {
+		t.Errorf("audio_events_config.types = %v, want [\"music\"]", aec["types"])
+	}
+
+	e.cfg.MusicDetect = false
+	b, err = json.Marshal(e.startMessage())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = nil // json.Unmarshal into a map only adds keys, never clears stale ones
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["audio_events_config"]; ok {
+		t.Errorf("audio_events_config should be omitted when MusicDetect is false, got %s", b)
+	}
+}
+
 // --- decoding ---
 
 func TestDecode(t *testing.T) {
@@ -268,6 +306,35 @@ func TestDecode(t *testing.T) {
 			t.Errorf("Decode = %v, want errEndOfTranscript", err)
 		}
 	})
+}
+
+// TestDecode_MusicEvents pins AudioEventStarted/AudioEventEnded driving
+// OnMusic on true/false edges for "music" events, and confirms an event of
+// another type (there is none requested today, but Decode must stay correct
+// if that changes) is silently ignored rather than flipping the gate.
+func TestDecode_MusicEvents(t *testing.T) {
+	var calls []bool
+	s := &session{log: slog.Default(), onMusic: func(active bool) { calls = append(calls, active) }}
+
+	start := []byte(`{"message":"AudioEventStarted","event":{"type":"music","start_time":1.2,"confidence":0.8}}`)
+	if ts, err := s.Decode(start); len(ts) != 0 || err != nil {
+		t.Errorf("Decode(AudioEventStarted) = (%v, %v), want nothing published", ts, err)
+	}
+	end := []byte(`{"message":"AudioEventEnded","event":{"type":"music","end_time":4.5}}`)
+	if ts, err := s.Decode(end); len(ts) != 0 || err != nil {
+		t.Errorf("Decode(AudioEventEnded) = (%v, %v), want nothing published", ts, err)
+	}
+	if want := []bool{true, false}; !slices.Equal(calls, want) {
+		t.Errorf("onMusic calls = %v, want %v", calls, want)
+	}
+
+	other := []byte(`{"message":"AudioEventStarted","event":{"type":"speech"}}`)
+	if _, err := s.Decode(other); err != nil {
+		t.Errorf("Decode(other event type) = %v, want no error", err)
+	}
+	if want := []bool{true, false}; !slices.Equal(calls, want) {
+		t.Errorf("a non-music event must not drive onMusic; calls = %v, want %v", calls, want)
+	}
 }
 
 // TestDecode_TranscriptInMetadata covers the other place Speechmatics has

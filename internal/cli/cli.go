@@ -55,6 +55,7 @@ type STTFlags struct {
 	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`
 	SilenceHold time.Duration `name:"silence-hold" default:"60s" group:"Speech-to-text" help:"How long the audio must stay silent before the connection is paused."`
 	Diarize     bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Attribute segments to speakers, where the selected engine supports it."`
+	MusicDetect bool          `name:"music-detect" default:"true" negatable:"" group:"Speech-to-text" help:"Suppress captions while the recognizer reports music (Speechmatics only). Use --no-music-detect if it triggers on speech."`
 }
 
 // Validate rejects a silence hold that can't work.

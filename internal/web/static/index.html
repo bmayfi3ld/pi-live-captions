@@ -230,6 +230,14 @@
   #status.idle { background: color-mix(in srgb, var(--dim) 22%, transparent); padding: 0.3em 0.7em; }
   #status.idle .dot { background: var(--dim); box-shadow: none; }
   #status.idle .label { display: inline; color: var(--dim); }
+  /* Music: the recognizer is hearing singing, captions are suppressed so a
+     frozen row doesn't look broken. Own tier rather than reusing warn/bad —
+     this is expected, not a fault — and it wins over connection state below,
+     since the reason the screen is frozen matters more than the link health
+     that isn't the cause of it. */
+  #status.music { background: color-mix(in srgb, var(--dim) 22%, transparent); padding: 0.3em 0.7em; }
+  #status.music .dot { background: var(--dim); box-shadow: none; }
+  #status.music .label { display: inline; color: var(--dim); }
 
   /* Backend B's silent looping video. Both engines gate the screen-on
      grant on the element's geometry or its tracks, not on playback alone,
@@ -483,6 +491,7 @@
   // dot cannot flash green before onopen actually fires.
   var sseOpen = null;
   var hubState = null;
+  var musicOn = false;
 
   function applyIndicator() {
     var tier = "ok", text = "";
@@ -491,6 +500,12 @@
     } else if (!sseOpen) {
       tier = "bad";
       text = "disconnected";
+    } else if (musicOn) {
+      // Wins over connection state: it explains a frozen screen on an
+      // otherwise-healthy link, which matters more than that link's own
+      // state while it's the reason nothing is moving.
+      tier = "music";
+      text = "♪ music";
     } else if (hubState === "reconnecting" || hubState === "connecting") {
       tier = "warn";
       text = hubState === "connecting" ? "connecting" : "reconnecting";
@@ -508,6 +523,7 @@
     statusEl.classList.toggle("warn", tier === "warn");
     statusEl.classList.toggle("bad", tier === "bad");
     statusEl.classList.toggle("idle", tier === "idle");
+    statusEl.classList.toggle("music", tier === "music");
     statusLabel.textContent = text;
   }
 
@@ -563,6 +579,13 @@
       // late joiner starts from the next caption.
       case "status":
         hubState = ev.state || null;
+        applyIndicator();
+        return;
+      // Music suppression: the server has stopped publishing captions, so
+      // the last row simply stops growing — nothing to do to captionStack
+      // itself, only the indicator explains why.
+      case "music":
+        musicOn = ev.state === "on";
         applyIndicator();
         return;
       default:
