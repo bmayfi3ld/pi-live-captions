@@ -231,26 +231,6 @@
   #status.idle .dot { background: var(--dim); box-shadow: none; }
   #status.idle .label { display: inline; color: var(--dim); }
 
-  #debug {
-    position: fixed;
-    top: max(0.9rem, env(safe-area-inset-top, 0px));
-    left: max(0.9rem, env(safe-area-inset-left, 0px));
-    font: 500 0.78rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums;
-    color: var(--fg);
-    background: color-mix(in srgb, var(--bg) 70%, transparent);
-    border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
-    border-radius: 0.4rem;
-    padding: 0.5em 0.75em;
-    display: none;
-    max-width: 46vw;
-  }
-  #debug.on { display: block; }
-  /* Named .drow, not .row: .row is the caption typesetter's class and must
-     stay unambiguous so nothing outside the typesetter can affect its metrics. */
-  #debug .drow { display: flex; justify-content: space-between; gap: 1.5em; white-space: nowrap; }
-  #debug .k { color: var(--dim); }
-
   /* Backend B's silent looping video. Both engines gate the screen-on
      grant on the element's geometry or its tracks, not on playback alone,
      so this rule is load-bearing:
@@ -309,7 +289,6 @@
     <img id="logo" alt="" hidden>
     <div id="status" class="connecting" role="status" aria-live="polite"><span class="dot"></span><span class="label"></span></div>
   </div>
-  <div id="debug"></div>
   <div id="page"><div id="viewport"><div id="stack"></div></div></div>
   <!-- Long enough that the canvas-vs-layout width calibration in
        computeMetrics() is not dominated by per-glyph rounding. -->
@@ -363,7 +342,6 @@
   var DEFAULT_LINES = 5;
   var linesParamNum = parseInt(params.get("lines"), 10);
   var requestedLines = (!isNaN(linesParamNum) && linesParamNum > 0) ? linesParamNum : DEFAULT_LINES;
-  var debugOn = params.get("debug") === "1";
   var wakeDisabled = params.get("wake") === "0";
 
   var page = document.getElementById("page");
@@ -373,7 +351,6 @@
   var logoEl = document.getElementById("logo");
   var statusEl = document.getElementById("status");
   var statusLabel = statusEl.querySelector(".label");
-  var debugEl = document.getElementById("debug");
 
   // ---- clock offset estimation ----
   // ev.at is the server's own wall clock; comparing it against this page's
@@ -412,7 +389,6 @@
   // POSTed back to the server so /admin can show the one leg of the pipeline
   // the server has no visibility into. Telemetry only — a failure here must
   // never affect caption rendering, so every step below swallows its errors.
-  var lastViewerPaintMs = NaN; // most recent measurement, shown in the debug overlay regardless of the report throttle below
   var lastViewerReportAt = 0;
   var VIEWER_REPORT_MIN_INTERVAL_MS = 1000;
 
@@ -432,18 +408,17 @@
     } catch (err) { /* telemetry must never break caption rendering */ }
   }
 
-  // Called for "caption" SSE events only — a status event paints nothing, so
-  // a paint measurement against it would be measuring nothing real.
-  function schedulePaintReport(ev) {
-    if (!ev || !ev.at) return; // no timestamp to compare against; skip silently
-    var publishedAt = Date.parse(ev.at);
-    if (isNaN(publishedAt)) return;
-    // rAF fires for the first frame after the DOM write appendSegment just
-    // made, which is what "paint" means here — not the microtask/macrotask
-    // the SSE handler itself runs in.
+  // Called by the typesetter (opts.onPainted) at the moment a segment's first
+  // word actually reaches the DOM — NOT when the SSE event arrives. Those are
+  // the same instant only when the paced queue is empty; with a backlog they
+  // are seconds apart, and the gap is precisely the lag a reader complains
+  // about. Measuring at arrival is what used to pin this figure at ~1ms while
+  // the display ran visibly behind.
+  function reportPaint(publishedAt) {
+    // rAF fires for the first frame after the DOM write pushWord just made,
+    // which is what "paint" means here — not the drain() tick it ran in.
     requestAnimationFrame(function () {
       var paintMs = (Date.now() + clockOffsetMs) - publishedAt;
-      lastViewerPaintMs = paintMs;
       // Don't report until an offset has actually been measured. Until then
       // clockOffsetMs is 0, which silently means "assume this phone's clock
       // agrees with the server's" — and a device running a couple of seconds
@@ -470,7 +445,8 @@
     viewport: viewport,
     page: page,
     probe: probe,
-    requestedLines: requestedLines
+    requestedLines: requestedLines,
+    onPainted: reportPaint
   });
 
   var retypesetTimer = null;
@@ -548,8 +524,10 @@
     switch (ev.kind) {
       case "caption":
         if (ev.break) captionStack.breakRow();
-        captionStack.appendSegment(ev.words, ev.speaker);
-        schedulePaintReport(ev);
+        // ev.at is the server's publish time. An absent or unparseable one
+        // parses to NaN, which appendSegment's `> 0` guard drops, so such a
+        // segment simply reports no latency.
+        captionStack.appendSegment(ev.words, ev.speaker, Date.parse(ev.at));
         break;
       // The first event on every connection is a status carrying the server's
       // last-known state, so a client that (re)connects mid-pause shows the
@@ -596,13 +574,6 @@
   var wakeVid = document.getElementById("wakevid");
   var wakeGate = document.getElementById("gate");
   var wakeGateBtn = document.getElementById("gatebtn");
-
-  function wakeDebugText() {
-    if (wakeBackend === "off") return "off";
-    if (wakeBackend === "api") return "api · " + (wakeHeld ? "held" : "released");
-    if (wakeAwaitingTap) return "video · awaiting tap";
-    return "video · " + (wakeHeld ? "held" : "released");
-  }
 
   function acquireAPI() {
     if (wakeInFlight || wakeHeld) return;
@@ -652,8 +623,8 @@
     wakeVid.muted = !wakeNeedsAudible;
     var p = wakeVid.play();
     wakeHeld = true;
-    // A rejected play() means the screen is not actually being held, and the
-    // debug row is the only way to see that from a phone — don't let it lie.
+    // A rejected play() means the screen is not actually being held, so
+    // wakeHeld must go back to false or syncWake will never retry.
     if (p && p.catch) p.catch(function () { wakeHeld = false; });
   }
 
@@ -711,33 +682,6 @@
   }
 
   document.addEventListener("visibilitychange", syncWake);
-
-  // ---- debug overlay: STT state + measured latency, polled from /api/stats ----
-  if (debugOn) {
-    debugEl.classList.add("on");
-    var fmtMs = function (v) {
-      return (typeof v === "number" && !isNaN(v)) ? Math.round(v) + " ms" : "—";
-    };
-    var pollDebug = function () {
-      fetch("/api/stats").then(function (r) {
-        if (!r.ok) throw new Error("http " + r.status);
-        return r.json();
-      }).then(function (s) {
-        var stt = s.stt || {};
-        debugEl.innerHTML =
-          '<div class="drow"><span class="k">stt state</span><span>' + (stt.state || "—") + '</span></div>' +
-          '<div class="drow"><span class="k">latency last</span><span>' + fmtMs(stt.latency_last_ms) + '</span></div>' +
-          '<div class="drow"><span class="k">latency p50</span><span>' + fmtMs(stt.latency_p50_ms) + '</span></div>' +
-          '<div class="drow"><span class="k">viewer paint</span><span>' + fmtMs(lastViewerPaintMs) + '</span></div>' +
-          '<div class="drow"><span class="k">clock offset</span><span>' + fmtMs(clockOffsetKnown ? clockOffsetMs : NaN) + '</span></div>' +
-          '<div class="drow"><span class="k">wake</span><span>' + wakeDebugText() + '</span></div>';
-      }).catch(function () {
-        debugEl.innerHTML = '<div class="drow"><span class="k">debug</span><span>stats unavailable</span></div>';
-      });
-    };
-    pollDebug();
-    setInterval(pollDebug, 1000);
-  }
 })();
 </script>
 </body>

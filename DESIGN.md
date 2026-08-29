@@ -755,7 +755,12 @@ voluntarily: `GET /api/time` lets the page estimate its clock offset against the
 uncorrected phone clock is routinely seconds off and would otherwise leak straight into the
 figure as fake latency), and `POST /api/viewer-latency` accepts the viewer's own
 `requestAnimationFrame`-measured publish→paint span, throttled to 1/sec and withheld until an
-offset has actually been measured. It's the first POST route in the codebase, and unauthenticated
+offset has actually been measured. The span ends at the *paint*, not at the SSE arrival: the
+segment's publish time rides its first word through the typesetter's paced emission queue and is
+reported back via `CaptionStack`'s `onPainted` callback when that word actually reaches the DOM,
+so the figure carries the cadence backlog. Measuring it at arrival — as this did before the paced
+queue existed — pins it at the LAN round trip (~1 ms) no matter how far behind the display runs,
+which is exactly the leg the server cannot see. It's the first POST route in the codebase, and unauthenticated
 on the LAN by design, so it carries its own guards: a bounded request body, a finite-and-in-range
 check on the value, and a rate limit shared across all clients rather than per-client. Landed as
 `web.viewer_latency_*_ms` and `web.viewer_reports_total`.

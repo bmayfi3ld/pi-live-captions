@@ -130,36 +130,29 @@
   }
   #offline.show { display: flex; }
 
-  /* ---- latency hero ---- */
-  #latency {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr)) minmax(10rem, 1.6fr);
-    gap: 1.5rem; align-items: end;
+  /* ---- major segment cards: the two phases that dominate the waterfall,
+     each with its own full stat set and a 5-minute trend graph. ---- */
+  #segments {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(21rem, 1fr));
+    gap: 1rem; margin-bottom: 1.25rem;
+  }
+  .seg-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem;
-    padding: 1.1rem 1.4rem; margin-bottom: 1.25rem;
+    padding: 1rem 1.2rem 1.1rem; min-width: 0;
   }
-  .lat-stat .k { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-  .lat-stat .v { font-size: 1.7rem; font-weight: 700; line-height: 1.15; }
-  .lat-stat.hero .v { font-size: 2.3rem; color: var(--accent); }
-  #spark-wrap { min-width: 0; }
-  #spark-wrap .k { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.35rem; }
-  #spark { width: 100%; height: 3.2rem; display: block; }
-
-  /* ---- latency hero, row 2: secondary series alongside the final-caption
-     figure above. Two peer stat groups, not two more cells crammed into the
-     first row's grid (that row's last column is pinned to the sparkline). */
-  #latency-secondary {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
-    gap: 1.5rem;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 0.75rem;
-    padding: 1rem 1.4rem; margin-bottom: 1.25rem;
+  .seg-label {
+    font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+    margin-bottom: 0.6rem;
   }
-  .lat-group { display: flex; flex-direction: column; gap: 0.35rem; }
-  .lat-group .lg-label {
-    font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
-  }
-  .lat-group .lg-vals { display: flex; gap: 1.5rem; }
-  .lat-group .lg-vals .lg-stat .k { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-  .lat-group .lg-vals .lg-stat .v { font-size: 1.3rem; font-weight: 700; line-height: 1.15; }
+  .seg-label .seg-sub { text-transform: none; letter-spacing: 0; opacity: 0.7; }
+  .seg-vals { display: flex; gap: 1.6rem; flex-wrap: wrap; }
+  .seg-stat .k { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .seg-stat .v { font-size: 1.05rem; font-weight: 700; line-height: 1.15; }
+  .seg-stat.hero .v { font-size: 1.35rem; color: var(--accent); }
+  .trend { width: 100%; height: 140px; display: block; margin-top: 0.7rem; }
+  .trend .tr-axis { fill: var(--muted); font-size: 10px; }
+  .trend .tr-rule { stroke: var(--border); stroke-width: 1; }
+  .seg-empty { font-size: 0.78rem; color: var(--muted); padding: 0.9rem 0 0.3rem; }
 
   /* ---- latency waterfall ---- */
   #waterfall-card {
@@ -346,27 +339,6 @@
 
 <div id="offline"><span>&#9888;</span><span id="offline-text">stats unavailable — server may have exited</span></div>
 
-<div id="latency">
-  <div class="lat-stat hero"><div class="k">Latency (last)</div><div class="v num" id="lat-last">—</div></div>
-  <div class="lat-stat"><div class="k">p50</div><div class="v num" id="lat-p50">—</div></div>
-  <div class="lat-stat"><div class="k">p95</div><div class="v num" id="lat-p95">—</div></div>
-  <div class="lat-stat"><div class="k">max</div><div class="v num" id="lat-max">—</div></div>
-  <div id="spark-wrap">
-    <div class="k">Trend (last / polled 1&#8203;s)</div>
-    <svg id="spark" viewBox="0 0 300 48" preserveAspectRatio="none"></svg>
-  </div>
-</div>
-
-<div id="latency-secondary">
-  <div class="lat-group">
-    <div class="lg-label">Viewer (publish&#8594;paint)</div>
-    <div class="lg-vals">
-      <div class="lg-stat"><div class="k">p50</div><div class="v num" id="lat-viewer-p50">—</div></div>
-      <div class="lg-stat"><div class="k">p95</div><div class="v num" id="lat-viewer-p95">—</div></div>
-    </div>
-  </div>
-</div>
-
 <div id="waterfall-card">
   <h2><span class="eyebrow">Latency waterfall</span></h2>
   <div class="wf-sub">Where the time goes, p50 per phase. The capture segment is not measured (see below); the viewer segment is a separately-sampled population, set off by a gap.</div>
@@ -375,6 +347,31 @@
     <div id="wf-bar"></div>
   </div>
   <div id="wf-legend"></div>
+</div>
+
+<div id="segments">
+  <div class="seg-card">
+    <div class="seg-label">Recognition <span class="seg-sub">released &#8594; result</span></div>
+    <div class="seg-vals">
+      <div class="seg-stat hero"><div class="k">last</div><div class="v num" id="seg-rec-last">—</div></div>
+      <div class="seg-stat"><div class="k">p50</div><div class="v num" id="seg-rec-p50">—</div></div>
+      <div class="seg-stat"><div class="k">p95</div><div class="v num" id="seg-rec-p95">—</div></div>
+      <div class="seg-stat"><div class="k">max</div><div class="v num" id="seg-rec-max">—</div></div>
+    </div>
+    <svg class="trend" id="trend-rec" viewBox="0 0 320 96"></svg>
+    <div class="seg-empty" id="trend-rec-empty">collecting&hellip;</div>
+  </div>
+  <div class="seg-card">
+    <div class="seg-label">Viewer paint <span class="seg-sub">publish &#8594; painted</span></div>
+    <div class="seg-vals">
+      <div class="seg-stat hero"><div class="k">last</div><div class="v num" id="seg-view-last">—</div></div>
+      <div class="seg-stat"><div class="k">p50</div><div class="v num" id="seg-view-p50">—</div></div>
+      <div class="seg-stat"><div class="k">p95</div><div class="v num" id="seg-view-p95">—</div></div>
+      <div class="seg-stat"><div class="k">max</div><div class="v num" id="seg-view-max">—</div></div>
+    </div>
+    <svg class="trend" id="trend-view" viewBox="0 0 320 96"></svg>
+    <div class="seg-empty" id="trend-view-empty">collecting&hellip;</div>
+  </div>
 </div>
 
 <div id="grid">
@@ -524,35 +521,77 @@
     }
   }
 
-  // ---- latency sparkline: client-accumulated from polled latency_last_ms ----
-  var SPARK_CAP = 90;
-  var sparkHistory = [];
-  var sparkEl = document.getElementById("spark");
+  // ---- segment trend graphs -------------------------------------------
+  // Client-accumulated from the 1 s poll, so TREND_CAP samples == the same
+  // 5-minute window the server's own p50/p95/max use (metrics.go
+  // latencyWindow) — the stats beside the graph describe exactly the span the
+  // graph draws. The x-axis is a fixed TREND_CAP-wide window: a short history
+  // draws only the right-hand part instead of stretching to fill, so the time
+  // labels stay honest while the page is still warming up.
+  var TREND_CAP = 300;
+  var trendHistory = { rec: [], view: [] };
 
-  function drawSpark() {
-    if (sparkHistory.length < 2) {
-      sparkEl.innerHTML = "";
+  function pushTrend(key, v) {
+    if (typeof v !== "number") return;
+    var h = trendHistory[key];
+    h.push(v);
+    if (h.length > TREND_CAP) h.shift();
+  }
+
+  function drawTrend(key, svgId, emptyId, color) {
+    var hist = trendHistory[key];
+    var el = document.getElementById(svgId);
+    var empty = document.getElementById(emptyId);
+    if (hist.length < 2) {
+      el.innerHTML = "";
+      el.style.display = "none";
+      empty.style.display = "block";
       return;
     }
-    var w = 300, h = 48, pad = 4;
-    var max = Math.max.apply(null, sparkHistory);
-    var min = Math.min.apply(null, sparkHistory);
+    el.style.display = "";
+    empty.style.display = "none";
+
+    // viewBox tracks the element's real pixel width so 1 unit == 1 px: text and
+    // stroke widths then render at their stated size instead of being scaled up
+    // with the card.
+    var w = Math.round(el.clientWidth) || 320, h = 140;
+    el.setAttribute("viewBox", "0 0 " + w + " " + h);
+    var padL = 38, padR = 6, padT = 8, padB = 16;
+    var plotW = w - padL - padR, plotH = h - padT - padB;
+
+    var max = Math.max.apply(null, hist);
+    var min = Math.min.apply(null, hist);
     if (max === min) { max = max + 1; min = Math.max(0, min - 1); }
-    var n = sparkHistory.length;
-    var pts = sparkHistory.map(function (v, i) {
-      var x = pad + (i / (n - 1)) * (w - pad * 2);
-      var y = h - pad - ((v - min) / (max - min)) * (h - pad * 2);
+
+    var n = hist.length;
+    var pts = hist.map(function (v, i) {
+      var slot = i + (TREND_CAP - n); // right-align into the fixed window
+      var x = padL + (slot / (TREND_CAP - 1)) * plotW;
+      var y = padT + plotH - ((v - min) / (max - min)) * plotH;
       return [x, y];
     });
     var line = pts.map(function (p, i) { return (i === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1); }).join(" ");
-    var area = line + " L" + pts[pts.length - 1][0].toFixed(1) + "," + (h - pad) +
-               " L" + pts[0][0].toFixed(1) + "," + (h - pad) + " Z";
-    var last = pts[pts.length - 1];
-    var accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
-    sparkEl.innerHTML =
-      '<path d="' + area + '" fill="' + accent + '" fill-opacity="0.14" stroke="none"></path>' +
-      '<path d="' + line + '" fill="none" stroke="' + accent + '" stroke-width="1.75" stroke-linejoin="round" stroke-linecap="round"></path>' +
-      '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2.6" fill="' + accent + '"></circle>';
+    var area = line + " L" + pts[n - 1][0].toFixed(1) + "," + (padT + plotH) +
+               " L" + pts[0][0].toFixed(1) + "," + (padT + plotH) + " Z";
+    var last = pts[n - 1];
+
+    var svg = "";
+    // min/max rules + labels: the graph's own scale, stated rather than implied.
+    svg += '<line class="tr-rule" x1="' + padL + '" y1="' + padT + '" x2="' + (w - padR) + '" y2="' + padT + '"></line>';
+    svg += '<line class="tr-rule" x1="' + padL + '" y1="' + (padT + plotH) + '" x2="' + (w - padR) + '" y2="' + (padT + plotH) + '"></line>';
+    svg += '<text class="tr-axis" x="' + (padL - 5) + '" y="' + (padT + 3) + '" text-anchor="end">' + fmtMs(max) + '</text>';
+    svg += '<text class="tr-axis" x="' + (padL - 5) + '" y="' + (padT + plotH + 3) + '" text-anchor="end">' + fmtMs(min) + '</text>';
+    // x-axis: one tick per minute across the 5-minute window.
+    for (var m = 5; m >= 0; m--) {
+      var tx = padL + ((TREND_CAP - 1 - m * 60) / (TREND_CAP - 1)) * plotW;
+      var label = m === 0 ? "now" : "-" + m + "m";
+      var anchor = m === 5 ? "start" : (m === 0 ? "end" : "middle");
+      svg += '<text class="tr-axis" x="' + tx.toFixed(1) + '" y="' + (h - 4) + '" text-anchor="' + anchor + '">' + label + '</text>';
+    }
+    svg += '<path d="' + area + '" fill="' + color + '" fill-opacity="0.14" stroke="none"></path>';
+    svg += '<path d="' + line + '" fill="none" stroke="' + color + '" stroke-width="1.25" stroke-linejoin="round" stroke-linecap="round"></path>';
+    svg += '<circle cx="' + last[0].toFixed(1) + '" cy="' + last[1].toFixed(1) + '" r="2" fill="' + color + '"></circle>';
+    el.innerHTML = svg;
   }
 
   // ---- latency waterfall ----
@@ -677,30 +716,27 @@
     setText("m-version", s.version || "—");
     setText("m-updated", "just now");
 
-    // ---- latency hero + sparkline ----
+    // ---- latency waterfall (the summary) ----
     var stt = s.stt || {};
-    setText("lat-last", fmtMs(stt.latency_last_ms));
-    setText("lat-p50", fmtMs(stt.latency_p50_ms));
-    setText("lat-p95", fmtMs(stt.latency_p95_ms));
-    setText("lat-max", fmtMs(stt.latency_max_ms));
-    if (typeof stt.latency_last_ms === "number") {
-      sparkHistory.push(stt.latency_last_ms);
-      if (sparkHistory.length > SPARK_CAP) sparkHistory.shift();
-    }
-    drawSpark();
-
-    // ---- latency hero, row 2: viewer paint ----
-    // A second group used to stand here alongside a revisable hypothesis's
-    // own timing. Now that the pipeline only ever paints committed, final
-    // text, the headline latency figure above already IS time-to-first-
-    // pixels, so a second figure next to it would just restate the same
-    // number.
     var web0 = s.web || {};
-    setText("lat-viewer-p50", fmtMs(web0.viewer_latency_p50_ms));
-    setText("lat-viewer-p95", fmtMs(web0.viewer_latency_p95_ms));
-
-    // ---- latency waterfall ----
     drawWaterfall(s);
+
+    // ---- major segments: recognition and viewer paint ----
+    setText("seg-rec-last", fmtMs(stt.recognize_latency_last_ms));
+    setText("seg-rec-p50", fmtMs(stt.recognize_latency_p50_ms));
+    setText("seg-rec-p95", fmtMs(stt.recognize_latency_p95_ms));
+    setText("seg-rec-max", fmtMs(stt.recognize_latency_max_ms));
+    setText("seg-view-last", fmtMs(web0.viewer_latency_last_ms));
+    setText("seg-view-p50", fmtMs(web0.viewer_latency_p50_ms));
+    setText("seg-view-p95", fmtMs(web0.viewer_latency_p95_ms));
+    setText("seg-view-max", fmtMs(web0.viewer_latency_max_ms));
+
+    pushTrend("rec", stt.recognize_latency_last_ms);
+    if ((web0.viewer_latency_samples || 0) > 0) pushTrend("view", web0.viewer_latency_last_ms);
+
+    var css = getComputedStyle(document.documentElement);
+    drawTrend("rec", "trend-rec", "trend-rec-empty", css.getPropertyValue("--accent").trim());
+    drawTrend("view", "trend-view", "trend-view-empty", css.getPropertyValue("--warn").trim());
 
     // ---- source ----
     var src = s.source || {};

@@ -149,7 +149,6 @@ beside the connection dot. Query parameters:
 | `?lines=N` | number of caption rows shown (default 6) |
 | `?size=N` | base font size in `vw` |
 | `?theme=light` | light theme (default is dark) |
-| `?debug=1` | overlays measured latency, plus this viewer's own measured publish→paint time and its estimated clock offset from the server |
 | `?logo=0` | hides the logo (e.g. for OBS, where branding is composited downstream) |
 | `?wake=0` | disables the screen wake lock entirely, gate included (OBS browser sources, wall-mounted displays — nobody there to tap it) |
 
@@ -164,7 +163,9 @@ STT reconnects, buffer drops, auto-pause count and total paused time, SSE client
 latency: caption-segment percentiles over a trailing 5-minute window headline the page — since
 every segment reaching the display is already settled text, that figure *is* time-to-first-pixels,
 with no separate interim reading to reconcile it against — alongside a second row for
-viewer-reported publish→paint latency, plus a waterfall breaking a segment's latency into upload /
+viewer-reported publish→paint latency, which a viewer measures at the moment the word leaves its
+paced display queue for the screen and therefore includes the cadence backlog, not just the wire
+hop. Plus a waterfall breaking a segment's latency into upload /
 recognize / assemble phases (with the unmeasured capture leg drawn as a labelled hatched segment)
 and the separately-sampled viewer leg set off by a gap. A `Segments / lines` stat shows
 `segments_total` against `lines_total` — the fragmentation readout: roughly

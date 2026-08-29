@@ -86,6 +86,10 @@
   //                   time by both callers. It is a ceiling, not a promise —
   //                   adjustMaxRows lowers it to whatever actually fits the
   //                   page height.
+  //   onPainted       optional function(publishedAt), called the moment a
+  //                   segment's first word actually reaches the screen — see
+  //                   appendSegment's third argument. Omitted by /admin, which
+  //                   measures nothing.
   //
   // Returns { appendSegment, breakRow, retypeset } — see below.
   window.CaptionStack = function (opts) {
@@ -93,6 +97,7 @@
     var viewport = opts.viewport;
     var page = opts.page;
     var probe = opts.probe;
+    var onPainted = opts.onPainted || null;
 
     var requestedLines = (typeof opts.requestedLines === "number" && opts.requestedLines > 0)
       ? opts.requestedLines : 3;
@@ -358,6 +363,11 @@
             trimLedger();
             return;
           }
+          // This branch paints nothing — it re-queues. Move any publish stamp
+          // onto the first chunk so drain() reports when text actually lands,
+          // and clear it here so drain() doesn't report for this pass.
+          chunks[0].pub = item.pub;
+          item.pub = null;
           Array.prototype.unshift.apply(pending, chunks);
           trimLedger();
           return;
@@ -478,8 +488,19 @@
     // segment straight off the wire — a delta, never the accumulated
     // utterance — so there is nothing to diff against what's already painted:
     // normalize and queue.
-    function appendSegment(seg, speaker) {
+    //
+    // publishedAt is optional: the server's publish time for this segment, in
+    // epoch ms. It rides the queue on the segment's FIRST word and comes back
+    // out through onPainted when that word is painted, which is the only
+    // honest end point for a publish->reader measurement — appendSegment
+    // itself paints nothing, and the queue below can hold a word for seconds.
+    // First word rather than last: the last would fold in however long the
+    // speaker spent saying the segment, which is speech, not lag.
+    function appendSegment(seg, speaker, publishedAt) {
       var words = paceWords(seg);
+      // `> 0` rather than a typeof check: the caller's Date.parse yields NaN
+      // for a missing or unparseable timestamp, and NaN is a number.
+      if (publishedAt > 0 && words.length) words[0].pub = publishedAt;
       // A speaker marker rides the same queue as the words it precedes, in
       // order — exactly like BREAK, it must never jump ahead of whatever's
       // already queued, or it would re-attribute words still waiting to be
@@ -535,6 +556,9 @@
         var hold = (say + gap) / (1 + backlogMs() / RATE_MS);
         var before = rows.length;
         pushWord(item);
+        // pushWord clears item.pub if it re-queued the text instead of
+        // painting it (the oversize split), so this only fires on a real paint.
+        if (item.pub && onPainted) onPainted(item.pub);
         delay = (rows.length > before) ? Math.max(hold, GLIDE_MS) : hold;
       }
       if (pending.length > 0) drainTimer = setTimeout(drain, delay);
