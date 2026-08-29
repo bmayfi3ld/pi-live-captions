@@ -736,3 +736,143 @@ func nextSSEData(t *testing.T, r *bufio.Reader) string {
 		}
 	}
 }
+
+// TestClearRequiresAdminAuth is the whole security model of the control API:
+// a stranger who stumbles onto the admin page during an event must not be
+// able to blank the screen, and with no password configured the control is
+// refused outright rather than left open.
+func TestClearRequiresAdminAuth(t *testing.T) {
+	post := func(t *testing.T, base string, auth bool, user, pass string) int {
+		t.Helper()
+		req, err := http.NewRequest("POST", base+"/api/clear", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auth {
+			req.SetBasicAuth(user, pass)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	t.Run("no password configured", func(t *testing.T) {
+		base, _, _ := startTestServer(t, newTestConfig())
+		if got := post(t, base, false, "", ""); got != http.StatusServiceUnavailable {
+			t.Errorf("status = %d, want 503", got)
+		}
+		// Not even a guessed credential opens it: there is nothing to match.
+		if got := post(t, base, true, "admin", "anything"); got != http.StatusServiceUnavailable {
+			t.Errorf("status with credentials = %d, want 503", got)
+		}
+		// The page itself stays readable — it is metrics only.
+		resp, err := http.Get(base + "/admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("/admin status = %d, want 200", resp.StatusCode)
+		}
+	})
+
+	t.Run("password configured", func(t *testing.T) {
+		cfg := newTestConfig()
+		cfg.AdminPassword = "hunter2"
+		base, hub, _ := startTestServer(t, cfg)
+
+		ch, unsub := hub.Subscribe()
+		defer unsub()
+
+		if got := post(t, base, false, "", ""); got != http.StatusUnauthorized {
+			t.Errorf("anonymous status = %d, want 401", got)
+		}
+		if got := post(t, base, true, "admin", "wrong"); got != http.StatusUnauthorized {
+			t.Errorf("wrong password status = %d, want 401", got)
+		}
+		if got := post(t, base, true, "root", "hunter2"); got != http.StatusUnauthorized {
+			t.Errorf("wrong user status = %d, want 401", got)
+		}
+		if got := post(t, base, true, "admin", "hunter2"); got != http.StatusNoContent {
+			t.Errorf("authorized status = %d, want 204", got)
+		}
+		// The page is guarded too once a password exists.
+		resp, err := http.Get(base + "/admin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("/admin status = %d, want 401", resp.StatusCode)
+		}
+
+		// Exactly one clear reached the wire, from the one authorized call.
+		// Drained without waiting: Clear broadcasts synchronously before the
+		// 204 above returned, so anything owed is already in the channel.
+		var clears int
+		for drained := false; !drained; {
+			select {
+			case ev := <-ch:
+				if ev.Kind == caption.KindClear {
+					clears++
+				}
+			default:
+				drained = true
+			}
+		}
+		if clears != 1 {
+			t.Errorf("clear events = %d, want 1", clears)
+		}
+	})
+}
+
+// TestAdminPageEnablesClearOnlyWithPassword pins the marker substitution: the
+// clear button must be inert markup with no password set, and the two halves
+// (the placeholder in admin.html, the constant here) must not drift apart.
+func TestAdminPageEnablesClearOnlyWithPassword(t *testing.T) {
+	fetchAdmin := func(t *testing.T, base, pass string) string {
+		t.Helper()
+		req, err := http.NewRequest("GET", base+"/admin", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pass != "" {
+			req.SetBasicAuth("admin", pass)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("/admin status = %d, want 200", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+
+	base, _, _ := startTestServer(t, newTestConfig())
+	page := fetchAdmin(t, base, "")
+	if !strings.Contains(page, adminControlsMarker) {
+		t.Error("unguarded page should still carry the untouched marker")
+	}
+	// The assignment, not the identifier: the page's own script reads
+	// window.ADMIN_CONTROLS either way, and only the injected script sets it.
+	if strings.Contains(page, "window.ADMIN_CONTROLS = true") {
+		t.Error("clear control enabled with no password configured")
+	}
+
+	cfg := newTestConfig()
+	cfg.AdminPassword = "hunter2"
+	base, _, _ = startTestServer(t, cfg)
+	page = fetchAdmin(t, base, "hunter2")
+	if !strings.Contains(page, "window.ADMIN_CONTROLS = true") {
+		t.Error("clear control not enabled despite a configured password (marker drifted?)")
+	}
+}

@@ -604,6 +604,12 @@
         if (musicOn && !wasMusic) captionStack.pushEvent("♪ music ♪");
         applyIndicator();
         return;
+      // The operator pressed clear on the admin page. No marker and no
+      // indicator change: the screen going blank is the whole message, and
+      // anything left behind would defeat the point of removing the text.
+      case "clear":
+        captionStack.clear();
+        return;
       default:
         return;
     }

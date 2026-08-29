@@ -302,6 +302,37 @@ func TestFlushClosesPendingUtterance(t *testing.T) {
 	}
 }
 
+// TestClearBroadcastsAndClosesLine covers both halves of Clear: subscribers
+// are told to wipe the screen, and the text that was on it still reaches the
+// transcript instead of being glued to whatever is said next.
+func TestClearBroadcastsAndClosesLine(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+
+	ch, unsub := h.Subscribe()
+	defer unsub()
+	drain(ch) // the replayed status event
+
+	h.Publish(stt.Transcript{Words: stt.Untimed("something regrettable"), Start: 0})
+	drain(ch)
+	h.Clear()
+
+	evs := drain(ch)
+	if len(evs) != 1 || evs[0].Kind != KindClear {
+		t.Fatalf("expected one clear event, got %+v", evs)
+	}
+	if len(finals) != 1 || finals[0].Text != "something regrettable" {
+		t.Fatalf("Clear should close the open line, got %+v", finals)
+	}
+
+	// The next segment starts a fresh utterance, not a continuation.
+	h.Publish(stt.Transcript{Words: stt.Untimed("and now something else."), Start: 0})
+	if len(finals) != 2 || finals[1].Text != "and now something else." {
+		t.Fatalf("line after clear = %+v", finals)
+	}
+}
+
 // TestSlowSubscriberIsDropped is the rule that keeps the audio pipeline safe:
 // a browser that cannot keep up loses events rather than applying backpressure
 // all the way back to capture.

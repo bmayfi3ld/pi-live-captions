@@ -68,7 +68,10 @@ func (f *STTFlags) Validate() error {
 
 // ServerFlags configure the caption web server.
 type ServerFlags struct {
-	Addr     string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages."`
+	// The admin password has no flag of its own on purpose (see Parse's
+	// description); it is named here so it appears in the help of the
+	// subcommands people actually run, not just the bare root help.
+	Addr     string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages. Set $ADMIN_PASSWORD to enable the admin clear-screen control and require basic auth (user: admin) for /admin."`
 	Logo     string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
 	MDNSName string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
 }
@@ -107,7 +110,16 @@ func Parse(args []string) (*kong.Context, *CLI, error) {
 	var cli CLI
 	parser, err := kong.New(&cli,
 		kong.Name("livecaption"),
-		kong.Description("Live captions: stream audio to a speech-to-text service and serve the text to a webpage."),
+		// The env-only settings are listed here because kong can only document
+		// what has a flag, and these deliberately have none: an API key or an
+		// admin password passed as a flag lands in every ps listing and shell
+		// history on the machine.
+		kong.Description("Live captions: stream audio to a speech-to-text service and serve the text to a webpage.\n\n"+
+			"Environment (no flag equivalent):\n"+
+			"  DEEPGRAM_API_KEY / SPEECHMATICS_API_KEY  key for the selected --engine\n"+
+			"  ADMIN_PASSWORD                           enables the /admin clear-screen control and\n"+
+			"                                           guards /admin with basic auth (user: admin);\n"+
+			"                                           unset leaves the control disabled"),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true, FlagsLast: true}),
 		kong.Vars{"version": Version},

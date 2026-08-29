@@ -119,12 +119,16 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 		}
 	}
 
+	// Env var rather than a flag: it is a secret, and a flag would put it in
+	// every ps listing and shell history on the machine.
+	adminPassword := os.Getenv("ADMIN_PASSWORD")
 	srv, err := web.NewServer(web.Config{
-		Addr:    o.server.Addr,
-		Logo:    o.server.Logo,
-		Hub:     hub,
-		Metrics: met,
-		Log:     log,
+		Addr:          o.server.Addr,
+		Logo:          o.server.Logo,
+		AdminPassword: adminPassword,
+		Hub:           hub,
+		Metrics:       met,
+		Log:           log,
 	})
 	if err != nil {
 		return nil, err
@@ -155,9 +159,13 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 		fields = append(fields, ui.BannerField{Label: "logo", Value: o.server.Logo})
 	}
 	base := browserURL(o.server.Addr)
+	adminNote := "clear-screen disabled: set ADMIN_PASSWORD"
+	if adminPassword != "" {
+		adminNote = "password required (user: admin)"
+	}
 	fields = append(fields,
 		ui.BannerField{Label: "viewer", Value: base},
-		ui.BannerField{Label: "admin", Value: base + "/admin"},
+		ui.BannerField{Label: "admin", Value: base + "/admin", Note: adminNote},
 	)
 	if o.server.MDNSName != "" {
 		fields = append(fields, ui.BannerField{Label: "mdns", Value: o.server.MDNSName + ".local"})

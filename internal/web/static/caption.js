@@ -666,6 +666,25 @@
       scheduleDrain();
     }
 
+    // clear() wipes the screen on the operator's say-so: something is up there
+    // that shouldn't be. All three stores have to go, and in this order:
+    //
+    //   - pending, or words already queued would repaint a second later;
+    //   - ledger, or the next resize would let rebuild() resurrect the text
+    //     the operator just removed;
+    //   - the rows themselves, which rebuild() does for free — it already
+    //     replaces the DOM, kills any in-flight glide transform and reapplies
+    //     the opacity ladder.
+    //
+    // idleTimer is deliberately left running: a decay tick landing on an empty
+    // stack finds no words and only clears an already-empty ledger.
+    function clear() {
+      pending = [];
+      if (drainTimer !== null) { clearTimeout(drainTimer); drainTimer = null; }
+      ledger = [];
+      rebuild();
+    }
+
     // retypeset() is the ONLY path that reflows already-painted text. It
     // runs on resize and rotation, never mid-stream: nothing in appendSegment
     // or breakRow calls it.
@@ -681,6 +700,7 @@
       appendSegment: appendSegment,
       breakRow: breakRow,
       pushEvent: pushEvent,
+      clear: clear,
       retypeset: retypeset
     };
   };

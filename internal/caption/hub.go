@@ -18,6 +18,7 @@ const (
 	KindCaption Kind = "caption" // one settled segment, append-only
 	KindStatus  Kind = "status"  // connection state changed
 	KindMusic   Kind = "music"   // music suppression toggled, carried on State as "on"/"off"
+	KindClear   Kind = "clear"   // operator wiped the screen; drop everything painted
 )
 
 // Event is what goes over SSE. One JSON object per message.
@@ -356,6 +357,32 @@ func (h *Hub) PublishStatus(state string) {
 	h.lastState = state
 	h.mu.Unlock()
 	h.broadcast(ev)
+}
+
+// Clear tells every viewer to wipe what it has painted — the operator saw
+// something on screen that shouldn't stay there.
+//
+// The in-progress transcript line is closed the way Flush does it, for two
+// reasons: what was on screen still belongs in transcript.txt, and the next
+// segment must start a fresh utterance rather than being glued onto text the
+// viewers no longer show.
+//
+// Not replayed in Subscribe: a clear is an edge, not a state. A viewer that
+// connects afterwards has nothing painted to wipe.
+func (h *Hub) Clear() {
+	h.mu.Lock()
+	line, closed := h.closeLocked(true)
+	ev := h.newEventLocked(KindClear)
+	onFinal := h.OnFinal
+	h.mu.Unlock()
+
+	h.broadcast(ev)
+	if closed {
+		h.metrics.STTLine()
+		if onFinal != nil {
+			onFinal(line)
+		}
+	}
 }
 
 // Flush closes any in-progress utterance. Called at shutdown so the tail of a

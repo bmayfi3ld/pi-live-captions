@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>livecaption — admin</title>
+<!-- The server replaces this marker with a script setting window.ADMIN_CONTROLS
+     when, and only when, ADMIN_PASSWORD is configured. Left as a comment
+     otherwise, so the clear button below stays permanently disabled. -->
+<!--ADMIN_CONTROLS-->
 <style>
   :root {
     --bg: #f3f4f6;
@@ -118,6 +122,23 @@
   #health.warn .dot { background: var(--warn); }
   #health.crit { background: var(--crit-soft); color: var(--crit); }
   #health.crit .dot { background: var(--crit); }
+  /* Deliberately NOT shaped like #health: everything else in the topbar is a
+     read-only pill or stat, and the one control that changes what the room
+     sees must not read as another status. So: a square-cornered solid button
+     in sentence case, the opposite of the uppercase rounded badge beside it. */
+  #clear-btn {
+    font: inherit; font-weight: 600; font-size: 0.85rem;
+    padding: 0.45em 1em; border-radius: 0.375rem; cursor: pointer;
+    background: var(--crit); color: var(--bg);
+    border: 1px solid var(--crit);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
+  }
+  #clear-btn:hover:enabled { background: color-mix(in srgb, var(--crit) 80%, black); }
+  #clear-btn:active:enabled { transform: translateY(1px); box-shadow: none; }
+  #clear-btn:disabled {
+    cursor: not-allowed; box-shadow: none;
+    background: transparent; color: var(--muted); border-color: var(--border);
+  }
   .meta-group { display: flex; gap: 1.25rem; flex-wrap: wrap; margin-left: auto; }
   .meta { display: flex; flex-direction: column; gap: 0.1rem; }
   .meta .k { font-size: 0.68rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
@@ -333,6 +354,14 @@
 <div id="topbar">
   <h1>livecaption <span style="color:var(--muted); font-weight:400;">— admin</span></h1>
   <div id="health" class="ok"><span class="dot"></span><span id="health-label">loading</span></div>
+  <!-- Ships disabled and stays that way unless the server injects the
+       ADMIN_CONTROLS flag below. The title lives on the wrapper, not the
+       button: a disabled button swallows its own pointer events in several
+       browsers, and the tooltip explaining WHY it is disabled is exactly the
+       one that must still show. -->
+  <span id="clear-wrap" title="Disabled: set ADMIN_PASSWORD and restart to enable operator controls">
+    <button id="clear-btn" type="button" disabled>Clear screen</button>
+  </span>
   <div class="meta-group">
     <div class="meta"><span class="k">Uptime</span><span class="v num" id="m-uptime">—</span></div>
     <div class="meta"><span class="k">Session</span><span class="v num" id="m-session">—</span></div>
@@ -839,6 +868,47 @@
 
   tick();
   setInterval(tick, 1000);
+
+  // ---- clear screen ----
+  //
+  // No confirmation dialog on purpose: this gets pressed because something is
+  // on screen right now that shouldn't be, and a second click costs the room
+  // another second of reading it. Clearing is also cheap to undo by doing
+  // nothing — the next thing said repaints the screen.
+  //
+  // Basic-auth credentials ride along automatically: the browser was already
+  // challenged fetching /admin itself whenever a password is configured.
+  //
+  // The button ships disabled in the markup and is enabled only by
+  // window.ADMIN_CONTROLS, a flag the SERVER injects into this page and only
+  // when a password is configured. Deliberately not a fetch: an async check
+  // means a window where the control looks live before the answer lands, and
+  // a page whose enabling depends on a request that can fail or be delayed is
+  // exactly the confusion this replaces. No flag, no listener, permanently
+  // disabled — nothing about the button changes for the rest of the session.
+  var clearBtn = document.getElementById("clear-btn");
+  if (!window.ADMIN_CONTROLS) return;
+  clearBtn.disabled = false;
+  // Retitled, not just enabled: the wrapper's explanation of why it was
+  // disabled must not linger on a button that now works.
+  document.getElementById("clear-wrap").title = "Blank every connected viewer immediately";
+
+  clearBtn.addEventListener("click", function () {
+    clearBtn.disabled = true;
+    var label = clearBtn.textContent;
+    function flash(text) {
+      clearBtn.textContent = text;
+      setTimeout(function () {
+        clearBtn.textContent = label;
+        clearBtn.disabled = false;
+      }, 2000);
+    }
+    fetch("/api/clear", { method: "POST" }).then(function (r) {
+      if (r.ok) flash("Cleared");
+      else if (r.status === 401) flash("Denied");
+      else flash("Failed");
+    }).catch(function () { flash("Failed"); });
+  });
 })();
 </script>
 

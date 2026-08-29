@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
@@ -34,11 +35,15 @@ const maxLogoBytes = 2 << 20
 
 // Config configures the caption server.
 type Config struct {
-	Addr    string
-	Logo    string // path to an image shown in the viewer's top-right corner
-	Hub     *caption.Hub
-	Metrics *metrics.Metrics
-	Log     *slog.Logger
+	Addr string
+	Logo string // path to an image shown in the viewer's top-right corner
+	// AdminPassword guards the admin page and the control API (user "admin").
+	// Empty disables the control API outright rather than leaving it open —
+	// the page itself stays reachable, since it is read-only.
+	AdminPassword string
+	Hub           *caption.Hub
+	Metrics       *metrics.Metrics
+	Log           *slog.Logger
 }
 
 // Server owns the HTTP surface.
@@ -70,10 +75,30 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/config", s.handleConfig)
 	mux.HandleFunc("GET /api/time", s.handleTime)
 	mux.HandleFunc("POST /api/viewer-latency", s.handleViewerLatency)
+	mux.Handle("POST /api/clear", s.requireAdmin(http.HandlerFunc(s.handleClear)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
-	mux.Handle("GET /admin", pageHandler(static, "admin.html"))
+	adminPage, err := fs.ReadFile(static, "admin.html")
+	if err != nil {
+		return nil, fmt.Errorf("read admin.html: %w", err)
+	}
+	// The clear control is enabled by the server, once, at startup — not by
+	// the page asking. With no password the marker stays a comment and the
+	// button in the shipped markup is permanently disabled, with no request
+	// that could fail, lag, or race it into looking live.
+	if cfg.AdminPassword != "" {
+		adminPage = bytes.Replace(adminPage, []byte(adminControlsMarker),
+			[]byte(`<script>window.ADMIN_CONTROLS = true;</script>`), 1)
+	}
+	admin := blobHandler(adminPage, "text/html; charset=utf-8", "no-cache")
+	// Only guarded once a password exists: with none set the page is still
+	// worth reading (it is metrics only), and requireAdmin's no-password
+	// branch would otherwise 503 the whole page instead of just the control.
+	if cfg.AdminPassword != "" {
+		admin = s.requireAdmin(admin)
+	}
+	mux.Handle("GET /admin", admin)
 	// "/{$}" is an exact match, not a prefix: an unknown path falls through to
 	// the mux's own 404 instead of silently rendering the viewer.
 	mux.Handle("GET /{$}", pageHandler(static, "index.html"))
@@ -256,6 +281,49 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// requireAdmin gates the operator controls behind HTTP basic auth.
+//
+// The threat model is one person stumbling onto the admin page during an
+// event on the same LAN, not a determined attacker — basic auth over a local
+// network covers exactly that and nothing more. With no password configured
+// the control is refused rather than left open: an unauthenticated stranger
+// blanking the screen mid-event is the failure this exists to prevent.
+func (s *Server) requireAdmin(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.AdminPassword == "" {
+			http.Error(w, "admin controls disabled: set ADMIN_PASSWORD", http.StatusServiceUnavailable)
+			return
+		}
+		user, pass, ok := r.BasicAuth()
+		// Both halves compared in constant time, and both always compared:
+		// returning early on a wrong username would leak which half failed.
+		userOK := subtle.ConstantTimeCompare([]byte(user), []byte(adminUser)) == 1
+		passOK := subtle.ConstantTimeCompare([]byte(pass), []byte(s.cfg.AdminPassword)) == 1
+		if !ok || !userOK || !passOK {
+			w.Header().Set("WWW-Authenticate", `Basic realm="livecaption"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
+// adminControlsMarker is the placeholder in admin.html that NewServer swaps
+// for the enabling script. It must stay in sync with the comment in that file.
+const adminControlsMarker = "<!--ADMIN_CONTROLS-->"
+
+// adminUser is fixed: one operator, one password, and a configurable username
+// would be a second env var that adds nothing to the threat model above.
+const adminUser = "admin"
+
+// handleClear wipes every connected viewer's screen. No body, no parameters —
+// the operator saw something that shouldn't be up there and wants it gone.
+func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
+	s.cfg.Hub.Clear()
+	s.log.Info("screen cleared by admin", "remote", r.RemoteAddr)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleStats returns the metrics snapshot the admin page polls.

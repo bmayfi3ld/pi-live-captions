@@ -175,7 +175,17 @@ needs one tap to unlock playback, so the page shows a one-time "Tap to start" ga
 become visible; captions are already streaming in behind it, so tapping reveals current state
 rather than an empty page. `?wake=0` skips this entirely.
 
-`/admin` is a metrics dashboard (no auth) polling `/api/stats` once a second — restarts, xruns,
+`/admin` also carries one operator control: **Clear screen**, which blanks every connected viewer
+immediately (for when something lands on screen that shouldn't stay there). It POSTs to
+`/api/clear`, and the server closes the in-progress transcript line as it goes, so the cleared
+text still reaches `transcript.txt`. That control is the reason for `ADMIN_PASSWORD`: set it and
+both `/admin` and `/api/clear` require HTTP basic auth with user `admin`; leave it unset and the
+page stays open but the clear button renders greyed out, explaining on hover that `ADMIN_PASSWORD`
+is unset (the API refuses it with 503 regardless). Basic auth over the LAN is the whole
+threat model — it exists so a stranger who stumbles onto the page mid-event can't blank the
+screen, not to withstand a determined attacker.
+
+`/admin` is otherwise a metrics dashboard polling `/api/stats` once a second — restarts, xruns,
 STT reconnects, buffer drops, auto-pause count and total paused time, SSE client counts, and
 latency: caption-segment percentiles over a trailing 5-minute window headline the page — since
 every segment reaching the display is already settled text, that figure *is* time-to-first-pixels,
