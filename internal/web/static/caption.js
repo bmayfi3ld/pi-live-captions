@@ -91,7 +91,7 @@
   //                   appendSegment's third argument. Omitted by /admin, which
   //                   measures nothing.
   //
-  // Returns { appendSegment, breakRow, retypeset } — see below.
+  // Returns { appendSegment, breakRow, pushEvent, retypeset } — see below.
   window.CaptionStack = function (opts) {
     var stack = opts.stack;
     var viewport = opts.viewport;
@@ -161,12 +161,18 @@
     // not queued items: forty words can be three seconds of fast speech or
     // fifteen of slow, and only the latter should hurry.
     var RATE_MS = 3000;
-    var GLIDE_MS = 130; // MUST equal both the transition set in freezeAndGlide and
+    var GLIDE_MS = 100; // MUST equal both the transition set in freezeAndGlide and
                         // the `transition: opacity` on .row in index.html —
                         // the serialization guarantee (never two glides in flight)
                         // depends on the scheduler waiting exactly as long as the
                         // glide animation takes.
     var BREAK = {};
+    // EVENT_SPEAKER stamps a non-speech marker (*music*, *silence*) with a
+    // speaker id no diarizer ever emits, so the existing turn-break rule —
+    // in pushWord AND, identically, in rebuild() — isolates the marker onto
+    // its own row for free, live and after a resize reflow. No second break
+    // mechanism, and applyBadge's speaker > 0 guard keeps it unbadged.
+    var EVENT_SPEAKER = -1;
 
     // How much unplayed speech the queue is holding, in ms. Summed on each tick
     // rather than tracked as a running total: the queue is small (the rate
@@ -221,7 +227,7 @@
       var isFirst = row.words.length === 0;
       if (row.words.length) row.el.appendChild(document.createTextNode(" "));
       var span = document.createElement("span");
-      span.className = "w";
+      span.className = entry.evt ? "w evt" : "w";
       span.textContent = entry.text;
       row.el.appendChild(span);
       row.words.push(entry);
@@ -233,16 +239,32 @@
 
     // A row's first word decides whether its badge shows. Both callers
     // (pushWord and rebuild()'s placement loop) always call placeInRow with
-    // the currently-active row, i.e. the last element of `rows` — so the
-    // element just before it is unambiguously "the previous row".
+    // the currently-active row, i.e. the last element of `rows`, so the rows
+    // before it are unambiguously the earlier ones.
+    //
+    // Scanned backwards past event rows rather than reading rows[len-2]
+    // directly: a marker row (*music*, *silence*) carries EVENT_SPEAKER, and
+    // taking it as "the previous speaker" would swallow the badge of a real
+    // speaker change that happened across the marker. The previous SPEAKER is
+    // the previous person who talked, not the previous line of the display.
     function applyBadge(row, speaker) {
-      var prev = rows.length > 1 ? rows[rows.length - 2] : null;
-      var prevSpeaker = (prev && prev.words.length) ? prev.words[0].speaker : 0;
+      // Only marker rows are skipped — an empty or unknown-speaker row still
+      // terminates the scan with prevSpeaker 0, exactly as before, so
+      // diarization dropping out keeps suppressing the badge.
+      var prevSpeaker = 0;
+      for (var i = rows.length - 2; i >= 0; i--) {
+        var w = rows[i].words[0];
+        if (w && w.evt) continue;
+        prevSpeaker = w ? w.speaker : 0;
+        break;
+      }
       // Non-zero speaker, non-zero previous speaker, and they differ: this
       // is deliberately false for a session's first row (no previous row)
       // and for an all-one-speaker session (prevSpeaker never differs) —
       // both cases should carry no badge at all.
-      if (speaker && prevSpeaker && speaker !== prevSpeaker) {
+      // > 0 rather than truthy: EVENT_SPEAKER is negative and must never
+      // paint a speaker glyph or colour.
+      if (speaker > 0 && prevSpeaker > 0 && speaker !== prevSpeaker) {
         row.el.dataset.speaker = String(speaker);       // true number: the glyph
         row.el.dataset.spk = String(((speaker - 1) % 6) + 1); // cycled 1-6: the color
       }
@@ -331,7 +353,7 @@
       }
       var cand = row.words.length ? rowText(row) + " " + text : text;
       if (measureWidth(cand) <= usableWidth) {
-        var entry = { text: text, speaker: currentSpeaker };
+        var entry = { text: text, speaker: currentSpeaker, evt: item.evt };
         ledger.push(entry);
         placeInRow(row, entry);
       } else {
@@ -350,14 +372,14 @@
           // words. Both fields, not just ms: drain() reads dur too, and an
           // item missing it would make its hold NaN and stall the queue.
           var chunks = splitToChunks(text).map(function (c) {
-            return { text: c, dur: null, ms: null };
+            return { text: c, dur: null, ms: null, evt: item.evt };
           });
           // A single glyph wider than the whole row splits to itself
           // (splitToChunks' end<=i progress guard). Re-queueing that would
           // land back here next tick and loop forever, gliding each time —
           // so place it and let overflow:hidden clip it.
           if (chunks.length === 1) {
-            var wide = { text: chunks[0].text, speaker: currentSpeaker };
+            var wide = { text: chunks[0].text, speaker: currentSpeaker, evt: item.evt };
             ledger.push(wide);
             placeInRow(activeRow(), wide);
             trimLedger();
@@ -372,7 +394,7 @@
           trimLedger();
           return;
         }
-        var e2 = { text: text, speaker: currentSpeaker };
+        var e2 = { text: text, speaker: currentSpeaker, evt: item.evt };
         ledger.push(e2);
         placeInRow(row, e2);
       }
@@ -578,6 +600,22 @@
       scheduleDrain();
     }
 
+    // pushEvent puts a non-speech marker — "♪ music ♪", "— silence —" — into
+    // the stream, the way broadcast captions do. It rides the same paced queue
+    // as words and speaker markers so it can never jump ahead of text still
+    // waiting to be typeset, and the EVENT_SPEAKER stamp is what gives it its
+    // own row (see EVENT_SPEAKER). No trailing speaker marker is needed: the
+    // next appendSegment pushes its own, which breaks the row again.
+    //
+    // dur/ms 0 rather than null: a marker is not speech, so it should land
+    // immediately rather than get the character-count estimate an untimed word
+    // falls back to.
+    function pushEvent(text) {
+      pending.push({ speaker: EVENT_SPEAKER });
+      pending.push({ text: text, dur: 0, ms: 0, evt: true });
+      scheduleDrain();
+    }
+
     // retypeset() is the ONLY path that reflows already-painted text. It
     // runs on resize and rotation, never mid-stream: nothing in appendSegment
     // or breakRow calls it.
@@ -592,6 +630,7 @@
     return {
       appendSegment: appendSegment,
       breakRow: breakRow,
+      pushEvent: pushEvent,
       retypeset: retypeset
     };
   };

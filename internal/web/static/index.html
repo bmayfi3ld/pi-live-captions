@@ -158,6 +158,10 @@
      so the only thing color transitions here is the row-glide's opacity fade
      brushing past a word during its 200ms animation — not a state change. */
   .w { transition: color 180ms linear; color: var(--fg); }
+  /* Non-speech marker (*music*, *silence*). Italic only: opacity belongs to
+     applyRowOpacities in caption.js, and a per-span value multiplies against
+     the row's, so the marker would never reach full opacity even while live. */
+  .w.evt { font-style: italic; }
 
   /* Off-screen probe used only to read computed font metrics; never painted. */
   .row-probe {
@@ -578,14 +582,26 @@
       // during a pause, may be never. Nothing is replayed but the state: a
       // late joiner starts from the next caption.
       case "status":
+        var prevState = hubState;
         hubState = ev.state || null;
+        // Auto-pause is the room actually going quiet (--silence-hold), so it
+        // gets an in-stream marker as well as the indicator. Only on a real
+        // transition from a known previous state: Subscribe replays the
+        // current state as the first event on every connection, and a
+        // reconnect mid-pause must not inject a second marker.
+        if (hubState === "paused" && prevState !== null && prevState !== "paused") {
+          captionStack.pushEvent("— silence —");
+        }
         applyIndicator();
         return;
       // Music suppression: the server has stopped publishing captions, so
-      // the last row simply stops growing — nothing to do to captionStack
-      // itself, only the indicator explains why.
+      // the last row simply stops growing — the marker (and the indicator)
+      // is the only thing that explains why. Leading edge only; the next
+      // caption ends it implicitly.
       case "music":
+        var wasMusic = musicOn;
         musicOn = ev.state === "on";
+        if (musicOn && !wasMusic) captionStack.pushEvent("♪ music ♪");
         applyIndicator();
         return;
       default:
