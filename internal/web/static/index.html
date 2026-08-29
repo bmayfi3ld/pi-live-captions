@@ -512,13 +512,39 @@
   }
 
   // SSE rather than WebSocket because the traffic is strictly one-way.
-  var es = new EventSource("/events");
-  es.onopen = function () { sseOpen = true; applyIndicator(); };
-  es.onerror = function () {
+  // EventSource only honours the server's `retry:` directive while it is in
+  // CONNECTING. A hard failure — server process gone, connection refused —
+  // parks it in CLOSED, where it never retries again, and a backgrounded tab
+  // (Firefox throttles hidden-tab timers hardest) is the likeliest way to get
+  // there. So reconnection is ours: rebuild the object on CLOSED.
+  var es = null;
+  var retryTimer = null;
+
+  function connect() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (es) es.close();  // never leave two streams open
+    es = new EventSource("/events");
+    es.onopen = onOpen;
+    es.onerror = onError;
+    es.onmessage = onMessage;
+  }
+
+  function onOpen() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    sseOpen = true;
+    applyIndicator();
+  }
+
+  function onError() {
     sseOpen = false;
     applyIndicator();
-  };
-  es.onmessage = function (e) {
+    // CONNECTING means the browser is still retrying on its own; leave it be.
+    if (es.readyState === EventSource.CLOSED && !retryTimer) {
+      retryTimer = setTimeout(function () { retryTimer = null; connect(); }, 3000);
+    }
+  }
+
+  function onMessage(e) {
     var ev;
     try { ev = JSON.parse(e.data); } catch (err) { return; }
     switch (ev.kind) {
@@ -543,7 +569,9 @@
         return;
     }
     applyIndicator();
-  };
+  }
+
+  connect();
 
   // ---- screen wake lock: a phone sleeping mid-event is the most likely
   // real-world failure of this interface. The Wake Lock API is secure-
@@ -681,7 +709,15 @@
     wakeGate.hidden = false;
   }
 
-  document.addEventListener("visibilitychange", syncWake);
+  document.addEventListener("visibilitychange", function () {
+    syncWake();
+    // Coming back to a tab whose stream died: reconnect now rather than wait
+    // out a retry timer the browser may have been throttling while hidden.
+    if (document.visibilityState === "visible" &&
+        (!es || es.readyState === EventSource.CLOSED)) {
+      connect();
+    }
+  });
 })();
 </script>
 </body>

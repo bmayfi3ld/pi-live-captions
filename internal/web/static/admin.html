@@ -899,10 +899,35 @@
     card.classList.toggle("dim", tier === "crit" && sseOpen === false);
   }
 
-  var es = new EventSource("/events");
-  es.onopen = function () { sseOpen = true; applyIndicator(); };
-  es.onerror = function () { sseOpen = false; applyIndicator(); };
-  es.onmessage = function (e) {
+  // EventSource stops retrying for good once it lands in CLOSED (server gone,
+  // connection refused), so reconnection is ours — same as the viewer.
+  var es = null;
+  var retryTimer = null;
+
+  function connect() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (es) es.close();
+    es = new EventSource("/events");
+    es.onopen = onOpen;
+    es.onerror = onError;
+    es.onmessage = onMessage;
+  }
+
+  function onOpen() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    sseOpen = true;
+    applyIndicator();
+  }
+
+  function onError() {
+    sseOpen = false;
+    applyIndicator();
+    if (es.readyState === EventSource.CLOSED && !retryTimer) {
+      retryTimer = setTimeout(function () { retryTimer = null; connect(); }, 3000);
+    }
+  }
+
+  function onMessage(e) {
     var ev;
     try { ev = JSON.parse(e.data); } catch (err) { return; }
     switch (ev.kind) {
@@ -916,7 +941,16 @@
       default: return;
     }
     applyIndicator();
-  };
+  }
+
+  connect();
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible" &&
+        (!es || es.readyState === EventSource.CLOSED)) {
+      connect();
+    }
+  });
 })();
 </script>
 </body>
