@@ -171,9 +171,12 @@
     var BREAK = {};
     // EVENT_SPEAKER stamps a non-speech marker (*music*, *silence*) with a
     // speaker id no diarizer ever emits, so the existing turn-break rule —
-    // in pushWord AND, identically, in rebuild() — isolates the marker onto
-    // its own row for free, live and after a resize reflow. No second break
-    // mechanism, and applyBadge's speaker > 0 guard keeps it unbadged.
+    // in pushWord AND, identically, in rebuild() — isolates the SPEECH around
+    // it onto separate rows for free, live and after a resize reflow. That
+    // rule alone can't separate two markers from each other (both carry
+    // EVENT_SPEAKER), so both break sites carry a second term on .evt: a
+    // marker always starts its own row. applyBadge's speaker > 0 guard keeps
+    // it unbadged.
     var EVENT_SPEAKER = -1;
 
     // How much unplayed speech the queue is holding, in ms. Summed on each tick
@@ -393,7 +396,11 @@
       // placement loop applies the identical condition — that's what lets a
       // resize reproduce every turn break without the server ever sending
       // an explicit break flag for a speaker change.
-      if (row.words.length && row.words[0].speaker !== currentSpeaker) {
+      // item.evt is the second trigger: a marker always starts its own row.
+      // The speaker check alone can't do it — two markers in a row both carry
+      // EVENT_SPEAKER, so they'd share a line whenever nothing between them
+      // moved currentSpeaker (a speech segment that yielded no words).
+      if (row.words.length && (item.evt || row.words[0].speaker !== currentSpeaker)) {
         freezeAndGlide();
         row = activeRow();
       }
@@ -533,7 +540,7 @@
         // Same turn-break condition as pushWord, replayed from the entry's
         // own stored speaker rather than a per-event break flag — that's
         // what makes a resize able to reproduce every turn break at all.
-        var turnBreak = row.words.length > 0 && row.words[0].speaker !== entry.speaker;
+        var turnBreak = row.words.length > 0 && (entry.evt || row.words[0].speaker !== entry.speaker);
         var cand = row.words.length ? rowText(row) + " " + entry.text : entry.text;
         var fits = row.words.length === 0 || (!turnBreak && measureWidth(cand) <= usableWidth);
         if (!fits) {
@@ -656,9 +663,10 @@
     // pushEvent puts a non-speech marker — "♪ music ♪", "— silence —" — into
     // the stream, the way broadcast captions do. It rides the same paced queue
     // as words and speaker markers so it can never jump ahead of text still
-    // waiting to be typeset, and the EVENT_SPEAKER stamp is what gives it its
-    // own row (see EVENT_SPEAKER). No trailing speaker marker is needed: the
-    // next appendSegment pushes its own, which breaks the row again.
+    // waiting to be typeset, and the .evt break term is what gives it its own
+    // row (see EVENT_SPEAKER). No trailing speaker marker is needed: the next
+    // appendSegment pushes its own, and even when that segment yields no words
+    // at all, the next marker still breaks on .evt rather than sharing a line.
     //
     // dur/ms 0 rather than null: a marker is not speech, so it should land
     // immediately rather than get the character-count estimate an untimed word
