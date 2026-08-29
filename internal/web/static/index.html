@@ -375,6 +375,7 @@
   var logoEl = document.getElementById("logo");
   var statusEl = document.getElementById("status");
   var statusLabel = statusEl.querySelector(".label");
+  var statusDot = statusEl.querySelector(".dot");
 
   // ---- clock offset estimation ----
   // ev.at is the server's own wall clock; comparing it against this page's
@@ -508,6 +509,28 @@
   var sseOpen = null;
   var hubState = null;
   var musicOn = false;
+  var lastTier = null, lastText = null;
+  var reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var ROLL = { duration: 160, easing: "ease-in" };
+
+  // Rolls the old word up and out, then the new one up from below. Cheap
+  // WAAPI rather than CSS keyframe classes so a rapid tier change just
+  // cancels the in-flight animation instead of fighting a class toggle.
+  function rollLabel(text) {
+    if (reduceMotion) { statusLabel.textContent = text; return; }
+    function rollIn() {
+      statusLabel.textContent = text;
+      if (!text) return;
+      statusLabel.animate(
+        [{ opacity: 0, transform: "translateY(0.4em)" }, { opacity: 1, transform: "translateY(0)" }],
+        { duration: 200, easing: "ease-out" });
+    }
+    if (!lastText) { rollIn(); return; }
+    var out = statusLabel.animate(
+      [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(-0.4em)" }],
+      ROLL);
+    out.onfinish = rollIn;
+  }
 
   function applyIndicator() {
     var tier = "ok", text = "";
@@ -536,12 +559,20 @@
       tier = "idle";
       text = "silence";
     }
+    if (tier === lastTier && text === lastText) return;
     statusEl.classList.toggle("connecting", tier === "connecting");
     statusEl.classList.toggle("warn", tier === "warn");
     statusEl.classList.toggle("bad", tier === "bad");
     statusEl.classList.toggle("idle", tier === "idle");
     statusEl.classList.toggle("music", tier === "music");
-    statusLabel.textContent = text;
+    if (tier !== lastTier && !reduceMotion) {
+      statusDot.animate(
+        [{ transform: "scale(1)" }, { transform: "scale(1.35)" }, { transform: "scale(1)" }],
+        { duration: 300, easing: "ease-out" });
+    }
+    rollLabel(text);
+    lastTier = tier;
+    lastText = text;
   }
 
   // SSE rather than WebSocket because the traffic is strictly one-way.
