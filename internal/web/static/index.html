@@ -212,14 +212,22 @@
     /* Keeps the pill right-aligned when the logo is absent and
        space-between has nothing to push against. */
     margin-left: auto;
-    gap: 0.5em;
-    padding: 0.45em 0.45em;
+    /* No gap: the label carries its own margin so it can animate to zero
+       along with its width (see rollLabel). */
+    /* Fixed box: height and padding never change between tiers, so gaining a
+       label recolours the pill without moving the dot or resizing the
+       bubble. The height is set in em (not derived from the content) because
+       the label's line box is taller than the dot and would otherwise grow
+       the pill as it appears. */
+    height: 1.6em;
+    box-sizing: border-box;
+    padding: 0 0.7em;
     border-radius: 999px;
     font-size: 1.6rem;
     font-weight: 600;
     color: var(--fg);
     background: transparent;
-    transition: background-color 0.25s, padding 0.25s;
+    transition: background-color 0.25s;
     line-height: 1;
     max-width: 50vw;
   }
@@ -232,31 +240,35 @@
     box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--ok) 22%, transparent);
     transition: background-color 0.25s, box-shadow 0.25s;
   }
-  #status .label { display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status .label { display: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 0.5em; }
   /* Initial tier, before EventSource.onopen has fired: a page must never
      flash green before it actually knows it is connected. */
-  #status.connecting .dot { background: var(--dim); box-shadow: none; }
-  #status.warn { background: color-mix(in srgb, var(--warn) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.warn .dot { background: var(--warn); box-shadow: none; }
-  #status.warn .label { display: inline; color: var(--warn); }
-  #status.bad { background: color-mix(in srgb, var(--bad) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.bad .dot { background: var(--bad); box-shadow: none; }
-  #status.bad .label { display: inline; color: var(--bad); }
+  #status.connecting .dot { background: var(--dim); box-shadow: 0 0 0 0 transparent; }
+  #status.warn { background: color-mix(in srgb, var(--warn) 22%, transparent); }
+  #status.warn .dot { background: var(--warn); box-shadow: 0 0 0 0 transparent; }
+  #status.warn .label { display: inline-block; color: var(--warn); }
+  #status.bad { background: color-mix(in srgb, var(--bad) 22%, transparent); }
+  #status.bad .dot { background: var(--bad); box-shadow: 0 0 0 0 transparent; }
+  #status.bad .label { display: inline-block; color: var(--bad); }
   /* Auto-pause: the recognizer link closed itself after a stretch of
      silence, which is expected, money-saving behaviour, not a fault — so
      this tier borrows --info rather than --warn/--bad and must never read
      as an error. */
-  #status.idle { background: color-mix(in srgb, var(--info) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.idle .dot { background: var(--info); box-shadow: none; }
-  #status.idle .label { display: inline; color: var(--info); }
+  #status.idle { background: color-mix(in srgb, var(--info) 22%, transparent); }
+  #status.idle .dot { background: var(--info); box-shadow: 0 0 0 0 transparent; }
+  #status.idle .label { display: inline-block; color: var(--info); }
   /* Music: the recognizer is hearing singing, captions are suppressed so a
      frozen row doesn't look broken. Own tier rather than reusing warn/bad —
      this is expected, not a fault — and it wins over connection state below,
      since the reason the screen is frozen matters more than the link health
      that isn't the cause of it. */
-  #status.music { background: color-mix(in srgb, var(--info) 22%, transparent); padding: 0.3em 0.7em; }
-  #status.music .dot { background: var(--info); box-shadow: none; }
-  #status.music .label { display: inline; color: var(--info); }
+  #status.music { background: color-mix(in srgb, var(--info) 22%, transparent); }
+  #status.music .dot { background: var(--info); box-shadow: 0 0 0 0 transparent; }
+  #status.music .label { display: inline-block; color: var(--info); }
+  /* Held for the duration of the out-wipe: the tier class has already flipped
+     to one whose label is display:none, and without this the word would
+     vanish instantly instead of closing against the dot. */
+  #status .label.rolling { display: inline-block; }
 
   /* Backend B's silent looping video. Both engines gate the screen-on
      grant on the element's geometry or its tracks, not on playback alone,
@@ -513,27 +525,57 @@
   var hubState = null;
   var musicOn = false;
   var lastTier = null, lastText = null;
+  var rollAnim = null; // in-flight out-roll; see rollLabel
   var reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   var ROLL = { duration: 160, easing: "ease-in" };
 
-  // Rolls the old word up and out, then the new one up from below. Cheap
+  // Wipes the old word shut against the dot, then opens the new one out from
+  // it. Animating the label's WIDTH (not a transform) is what makes the pill
+  // body itself grow: the pill is right-anchored by margin-left:auto, so the
+  // background extends leftward as the label widens. Cheap
   // WAAPI rather than CSS keyframe classes so a rapid tier change just
   // cancels the in-flight animation instead of fighting a class toggle.
   function rollLabel(text) {
     if (reduceMotion) { statusLabel.textContent = text; return; }
+    // An out-roll's onfinish writes the text it was STARTED with. Two tier
+    // changes inside one 160ms roll — reconnect ("") immediately followed by
+    // a music event — would let the older roll land last and blank a label
+    // the newer call had already painted, leaving a labelless coloured pill
+    // still wearing its padding. cancel() fires oncancel, never onfinish, so
+    // the stale rollIn can't run.
+    if (rollAnim) { rollAnim.cancel(); rollAnim = null; }
     function rollIn() {
       statusLabel.textContent = text;
       if (!text) return;
+      // Measured after the text is in and the tier class has been toggled,
+      // so the element is already inline-block and has a real width.
+      var w = statusLabel.scrollWidth;
       statusLabel.animate(
-        [{ opacity: 0, transform: "translateY(0.4em)" }, { opacity: 1, transform: "translateY(0)" }],
+        [{ opacity: 0, width: "0px", marginRight: "0px" },
+         { opacity: 1, width: w + "px", marginRight: "0.5em" }],
         { duration: 200, easing: "ease-out" });
     }
     if (!lastText) { rollIn(); return; }
-    var out = statusLabel.animate(
-      [{ opacity: 1, transform: "translateY(0)" }, { opacity: 0, transform: "translateY(-0.4em)" }],
+    // Before the width is read: on a return to the label-less ok tier the
+    // class has already flipped to display:none, which measures as zero.
+    statusLabel.classList.add("rolling");
+    rollAnim = statusLabel.animate(
+      [{ opacity: 1, width: statusLabel.scrollWidth + "px", marginRight: "0.5em" },
+       { opacity: 0, width: "0px", marginRight: "0px" }],
       ROLL);
-    out.onfinish = rollIn;
+    rollAnim.onfinish = function () {
+      rollAnim = null;
+      statusLabel.classList.remove("rolling");
+      rollIn();
+    };
+    rollAnim.oncancel = function () { statusLabel.classList.remove("rolling"); };
   }
+
+  // Tier -> the colour variable its dot wears; see the ping below.
+  var TIER_VAR = {
+    ok: "--ok", connecting: "--dim", warn: "--warn",
+    bad: "--bad", idle: "--info", music: "--info"
+  };
 
   function applyIndicator() {
     var tier = "ok", text = "";
@@ -569,9 +611,24 @@
     statusEl.classList.toggle("idle", tier === "idle");
     statusEl.classList.toggle("music", tier === "music");
     if (tier !== lastTier && !reduceMotion) {
+      // Ring ping rather than a scale pop: the dot stays put and a halo
+      // expands out of it, so the emphasis doesn't jitter against the pill's
+      // own padding/background transition. The colour comes from the tier's
+      // variable, NOT from the dot's computed background — the dot is still
+      // mid-transition at this point, so reading it back gives the OLD tier's
+      // colour and the ping would ping green on the way to blue.
+      var c = getComputedStyle(document.documentElement)
+        .getPropertyValue(TIER_VAR[tier]).trim();
+      // The ping must LAND on the tier's resting shadow, not on transparent:
+      // ok wears a permanent mini halo, and ending the animation anywhere
+      // else snaps that halo into existence the moment the ping stops. Hex
+      // suffixes are the alpha byte — 38 = 22%, matching the CSS rule.
+      var rest = tier === "ok" ? "0 0 0 0.18rem " + c + "38" : "0 0 0 0 " + c + "00";
       statusDot.animate(
-        [{ transform: "scale(1)" }, { transform: "scale(1.35)" }, { transform: "scale(1)" }],
-        { duration: 300, easing: "ease-out" });
+        [{ boxShadow: "0 0 0 0 " + c },
+         { boxShadow: "0 0 0 0.9rem " + c + "00", offset: 0.75 },
+         { boxShadow: rest }],
+        { duration: 550, easing: "ease-out" });
     }
     rollLabel(text);
     lastTier = tier;
