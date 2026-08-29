@@ -209,6 +209,9 @@
     /* Dot last so it sits at the right edge and never moves; the label grows
        leftward from it. */
     flex-direction: row-reverse;
+    /* Keeps the pill right-aligned when the logo is absent and
+       space-between has nothing to push against. */
+    margin-left: auto;
     gap: 0.5em;
     padding: 0.45em 0.45em;
     border-radius: 999px;
