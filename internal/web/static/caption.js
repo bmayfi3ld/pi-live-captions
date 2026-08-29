@@ -249,24 +249,28 @@
     // taking it as "the previous speaker" would swallow the badge of a real
     // speaker change that happened across the marker. The previous SPEAKER is
     // the previous person who talked, not the previous line of the display.
+    // Crossing a marker also FORCES a badge: the event row breaks the visual
+    // thread of who is talking, so the first speech row after it re-asserts
+    // the speaker even when it's the same person resuming.
     function applyBadge(row, speaker) {
       // Only marker rows are skipped — an empty or unknown-speaker row still
       // terminates the scan with prevSpeaker 0, exactly as before, so
       // diarization dropping out keeps suppressing the badge.
       var prevSpeaker = 0;
+      var sawEvent = false;
       for (var i = rows.length - 2; i >= 0; i--) {
         var w = rows[i].words[0];
-        if (w && w.evt) continue;
+        if (w && w.evt) { sawEvent = true; continue; }
         prevSpeaker = w ? w.speaker : 0;
         break;
       }
-      // Non-zero speaker, non-zero previous speaker, and they differ: this
-      // is deliberately false for a session's first row (no previous row)
-      // and for an all-one-speaker session (prevSpeaker never differs) —
-      // both cases should carry no badge at all.
+      // Either an event row was crossed, or the speaker genuinely changed.
+      // Absent an event this is deliberately false for a session's first row
+      // (no previous row) and for an all-one-speaker session (prevSpeaker
+      // never differs) — both cases should carry no badge at all.
       // > 0 rather than truthy: EVENT_SPEAKER is negative and must never
       // paint a speaker glyph or colour.
-      if (speaker > 0 && prevSpeaker > 0 && speaker !== prevSpeaker) {
+      if (speaker > 0 && (sawEvent || (prevSpeaker > 0 && speaker !== prevSpeaker))) {
         row.el.dataset.speaker = String(speaker);       // true number: the glyph
         row.el.dataset.spk = String(((speaker - 1) % 6) + 1); // cycled 1-6: the color
       }
