@@ -137,6 +137,8 @@
     // motion at the cost of legibility. See drain().
     var pending = [];
     var drainTimer = null;
+    var lastGlideAt = 0; // when the last glide started, so scheduleDrain never
+                         // fires a second one on top of a decay glide
     var CHAR_MS = 1;   // stands in for a word's spoken length when the provider
                        // measured none, so an untimed segment lands in one go
     var MAX_HOLD_MS = 900; // ceiling on the SILENCE after one word, so an outlier
@@ -312,6 +314,14 @@
     function freezeAndGlide() {
       var row = activeRow();
       if (!row || row.words.length === 0) return;
+      glide();
+    }
+
+    // glide is freezeAndGlide without the empty-row guard: one row of upward
+    // motion, unconditionally. Only decayTick calls it directly — an idle
+    // display has nothing left to freeze, and pushing blank rows is exactly
+    // how the old text leaves the screen.
+    function glide() {
       // Also trimmed here, not only from the transitionend handler below: a
       // tab that is backgrounded mid-glide may never deliver transitionend,
       // and rows would pile up in the DOM for as long as it stayed hidden.
@@ -327,6 +337,38 @@
       void stack.offsetHeight; // force reflow before the transition kicks in
       stack.style.transition = "transform " + GLIDE_MS + "ms cubic-bezier(.22,.61,.36,1)";
       stack.style.transform = "translateY(0)";
+      lastGlideAt = Date.now();
+    }
+
+    // ---- idle decay ----
+    //
+    // Left alone, the last thing said sits frozen on screen forever. Every
+    // IDLE_MS with nothing arriving, decayTick pushes one blank row, and the
+    // existing opacity ladder fades each row out as it ages off the top. One
+    // row per idle window, not a rapid clear: the text a reader may still be
+    // reading should drift off at reading pace. No new visual mechanism — a
+    // decay tick is the same glide a row break is, just with nothing to freeze.
+    var IDLE_MS = 10000;
+    var idleTimer = null;
+
+    function armIdle() {
+      if (idleTimer !== null) clearTimeout(idleTimer);
+      idleTimer = setTimeout(decayTick, IDLE_MS);
+    }
+
+    function decayTick() {
+      idleTimer = null;
+      for (var i = 0; i < rows.length; i++) {
+        if (rows[i].words.length) {
+          glide();
+          armIdle();
+          return;
+        }
+      }
+      // Fully decayed. The ledger has to go with it: rebuild() replays it on
+      // resize, so leaving it would let a rotation resurrect text the reader
+      // just watched leave.
+      ledger = [];
     }
 
     stack.addEventListener("transitionend", function (e) {
@@ -529,6 +571,7 @@
       // painted from an earlier segment.
       pending.push({ speaker: speaker || 0 }); // absent/0 both mean "unknown"
       for (var j = 0; j < words.length; j++) pending.push(words[j]);
+      armIdle(); // anything arriving cancels a decay in progress
       scheduleDrain();
     }
 
@@ -541,8 +584,10 @@
       if (drainTimer !== null) return;
       if (pending.length === 0) return;
       // Near-immediate: the first word after a silence should not sit in the
-      // queue waiting out a pacing tick nothing is pacing against.
-      drainTimer = setTimeout(drain, 0);
+      // queue waiting out a pacing tick nothing is pacing against. The one
+      // thing it does wait for is a decay glide still in flight — two glides
+      // at once is the exact failure this queue exists to prevent.
+      drainTimer = setTimeout(drain, Math.max(0, GLIDE_MS - (Date.now() - lastGlideAt)));
     }
 
     function drain() {
@@ -584,6 +629,9 @@
         delay = (rows.length > before) ? Math.max(hold, GLIDE_MS) : hold;
       }
       if (pending.length > 0) drainTimer = setTimeout(drain, delay);
+      else armIdle(); // queue fully drained: the idle countdown starts here,
+                      // not when the segment arrived, since a long segment can
+                      // take seconds to typeset
     }
 
     // breakRow is freezeAndGlide exposed under a name that says why it's
@@ -597,6 +645,7 @@
     // ahead of it, so the row it freezes actually contains them.
     function breakRow() {
       pending.push(BREAK);
+      armIdle(); // anything arriving cancels a decay in progress
       scheduleDrain();
     }
 
@@ -613,6 +662,7 @@
     function pushEvent(text) {
       pending.push({ speaker: EVENT_SPEAKER });
       pending.push({ text: text, dur: 0, ms: 0, evt: true });
+      armIdle(); // anything arriving cancels a decay in progress
       scheduleDrain();
     }
 
