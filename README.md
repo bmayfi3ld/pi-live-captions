@@ -8,7 +8,8 @@ captioning. See [DESIGN.md](DESIGN.md) for the architecture and the reasoning be
 
 - Go 1.26+
 - `ffmpeg` and `ffprobe` on `PATH` (used for capture, decode, resample, and playback)
-- An API key for one of the recognizers, set via `--api-key` or its env var:
+- An API key for one of the recognizers, set via its env var (there is no flag; a key on the
+  command line lands in `ps` and shell history):
   [Deepgram](https://deepgram.com) (`DEEPGRAM_API_KEY`, the default engine) or
   [Speechmatics](https://speechmatics.com) (`SPEECHMATICS_API_KEY`, `--engine speechmatics`)
 
@@ -234,7 +235,7 @@ written to `transcripts/<session>/transcript.txt`.
 ## Troubleshooting
 
 - **401 on first connect** — check the env var for your engine, `DEEPGRAM_API_KEY` or
-  `SPEECHMATICS_API_KEY` (or `--api-key`). The run stops immediately rather than retrying, and so
+  `SPEECHMATICS_API_KEY`. The run stops immediately rather than retrying, and so
   does a rejected `--model` / `--language`, which each engine names its own way.
 - **`unknown stt engine`** — only `deepgram`, `speechmatics` and `mock` exist; check `--engine`.
 - **First connect is slow with a big `--keyterm-file`** — Speechmatics builds the dictionary before

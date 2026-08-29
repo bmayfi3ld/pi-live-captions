@@ -34,12 +34,14 @@ type Globals struct {
 
 // STTFlags configure the speech-to-text backend.
 type STTFlags struct {
-	Engine string `default:"deepgram" enum:"deepgram,mock,speechmatics" group:"Speech-to-text" help:"Recognizer to use. 'mock' runs offline with no API cost."`
-	// No env tag: kong would take the first variable that happens to be set,
-	// which silently hands a Deepgram key to Speechmatics for anyone with both
-	// in their environment (or a .env). resolveSTTDefaults reads the one
-	// belonging to the engine actually selected.
-	APIKey string `group:"Speech-to-text" help:"API key for the selected engine ($DEEPGRAM_API_KEY / $SPEECHMATICS_API_KEY)."`
+	Engine string `default:"deepgram" enum:"deepgram,mock,speechmatics" group:"Speech-to-text" help:"Recognizer to use. Key comes from $DEEPGRAM_API_KEY or $SPEECHMATICS_API_KEY; 'mock' runs offline with no API cost."`
+	// No flag: a key on the command line lands in every ps listing and shell
+	// history on the machine. No env tag either, because kong would take the
+	// first variable that happens to be set, which silently hands a Deepgram
+	// key to Speechmatics for anyone with both in their environment (or a
+	// .env). resolveSTTDefaults reads the one belonging to the engine actually
+	// selected.
+	APIKey string `kong:"-"`
 	// Model and Language deliberately have no default tag: the right value
 	// depends on the engine (nova-3/en-US for Deepgram, enhanced/en for
 	// Speechmatics). resolveSTTDefaults fills the blank once --engine is

@@ -348,9 +348,9 @@ var engineDefaults = map[string]struct{ model, language string }{
 	"speechmatics": {"enhanced", "en"},
 }
 
-// resolveSTTDefaults fills in whichever of --model, --language and --api-key
-// the user left blank, from the selected engine's own defaults and env var. An
-// explicit flag always wins; mock needs none of them. It also folds
+// resolveSTTDefaults fills in whichever of --model and --language the user
+// left blank from the selected engine's own defaults, and reads the API key
+// from that engine's env var. mock needs none of them. It also folds
 // --keyterm-file into --keyterm, so everything downstream sees one list.
 //
 // Must run before requireAPIKey and before the banner, both of which read
@@ -408,7 +408,7 @@ func readKeytermFile(path string) ([]string, error) {
 	return terms, nil
 }
 
-// apiKeyEnv names the environment variable that feeds --api-key for an engine,
+// apiKeyEnv names the environment variable that carries the key for an engine,
 // so the "you forgot the key" error points at the right one.
 var apiKeyEnv = map[string]string{
 	"deepgram":     "DEEPGRAM_API_KEY",
@@ -423,8 +423,8 @@ func requireAPIKey(engine, key string) error {
 	}
 	env, ok := apiKeyEnv[engine]
 	if !ok {
-		return fmt.Errorf("no API key for engine %q: pass --api-key", engine)
+		return fmt.Errorf("no API key for engine %q", engine)
 	}
-	return fmt.Errorf("no API key for %s: set %s or pass --api-key "+
+	return fmt.Errorf("no API key for %s: set %s "+
 		"(or use --engine mock to run offline)", engine, env)
 }

@@ -91,13 +91,6 @@ func TestAPIKeyIsPerEngine(t *testing.T) {
 	if err := requireAPIKey(f.Engine, f.APIKey); err == nil {
 		t.Error("a missing SPEECHMATICS_API_KEY should fail before any audio flows")
 	}
-
-	// An explicit --api-key is never overwritten by the environment.
-	f = STTFlags{Engine: "deepgram", APIKey: "explicit"}
-	resolveSTTDefaults(&f)
-	if f.APIKey != "explicit" {
-		t.Errorf("APIKey = %q, want the explicit flag to win", f.APIKey)
-	}
 }
 
 // TestKeytermFileIsFoldedIn covers the whole point of the flag: a list too long
