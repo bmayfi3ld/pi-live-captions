@@ -141,8 +141,12 @@ func (e *Engine) dial(ctx context.Context) (*websocket.Conn, stt.Session, error)
 	// A connection that drops mid-song must not leave the suppression gate
 	// stuck closed forever: every fresh handshake starts from "not music",
 	// regardless of what the last connection last reported.
+	//
+	// Media time 0 says this is the new connection's clock starting, not a
+	// music event that ended at a real offset — anything the consumer was
+	// holding from the old clock has offsets that no longer mean anything.
 	if s.onMusic != nil {
-		s.onMusic(false)
+		s.onMusic(false, 0)
 	}
 	return conn, s, nil
 }
@@ -208,7 +212,7 @@ type session struct {
 
 	// onMusic is e.cfg.OnMusic, nil unless MusicDetect was requested. Called
 	// from Decode on each AudioEventStarted/AudioEventEnded for "music".
-	onMusic func(active bool)
+	onMusic func(active bool, at time.Duration)
 }
 
 // handshake sends StartRecognition and reads until the server acknowledges it.
@@ -321,7 +325,15 @@ func (s *session) handleAudioEvent(msg serverMessage, active bool) {
 	s.log.Info("speechmatics: music event",
 		"active", active, "start_time", msg.Event.StartTime,
 		"end_time", msg.Event.EndTime, "confidence", msg.Event.Confidence)
-	s.onMusic(active)
+	// Each edge carries its own end of the interval: start_time opens it,
+	// end_time closes it. The end is the one that matters — it is what tells
+	// the hub which of the words it held back were the song and which were the
+	// speech that followed it.
+	at := msg.Event.StartTime
+	if !active {
+		at = msg.Event.EndTime
+	}
+	s.onMusic(active, stt.SecondsToDuration(at))
 }
 
 func (s *session) writeJSON(ctx context.Context, v any) error {

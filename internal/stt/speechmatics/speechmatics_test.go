@@ -320,9 +320,19 @@ func TestDecode(t *testing.T) {
 // OnMusic on true/false edges for "music" events, and confirms an event of
 // another type (there is none requested today, but Decode must stay correct
 // if that changes) is silently ignored rather than flipping the gate.
+//
+// The media time each edge carries is pinned too: the end edge's is what the
+// hub sorts held segments on, so an edge that reported the wrong one (or the
+// start_time on both) would silently bring the dropped-first-word bug back.
 func TestDecode_MusicEvents(t *testing.T) {
-	var calls []bool
-	s := &session{log: slog.Default(), onMusic: func(active bool) { calls = append(calls, active) }}
+	type call struct {
+		active bool
+		at     time.Duration
+	}
+	var calls []call
+	s := &session{log: slog.Default(), onMusic: func(active bool, at time.Duration) {
+		calls = append(calls, call{active, at})
+	}}
 
 	start := []byte(`{"message":"AudioEventStarted","event":{"type":"music","start_time":1.2,"confidence":0.8}}`)
 	if ts, err := s.Decode(start); len(ts) != 0 || err != nil {
@@ -332,7 +342,8 @@ func TestDecode_MusicEvents(t *testing.T) {
 	if ts, err := s.Decode(end); len(ts) != 0 || err != nil {
 		t.Errorf("Decode(AudioEventEnded) = (%v, %v), want nothing published", ts, err)
 	}
-	if want := []bool{true, false}; !slices.Equal(calls, want) {
+	want := []call{{true, 1200 * time.Millisecond}, {false, 4500 * time.Millisecond}}
+	if !slices.Equal(calls, want) {
 		t.Errorf("onMusic calls = %v, want %v", calls, want)
 	}
 
@@ -340,7 +351,7 @@ func TestDecode_MusicEvents(t *testing.T) {
 	if _, err := s.Decode(other); err != nil {
 		t.Errorf("Decode(other event type) = %v, want no error", err)
 	}
-	if want := []bool{true, false}; !slices.Equal(calls, want) {
+	if !slices.Equal(calls, want) {
 		t.Errorf("a non-music event must not drive onMusic; calls = %v, want %v", calls, want)
 	}
 }

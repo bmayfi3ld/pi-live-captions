@@ -113,7 +113,13 @@ type Config struct {
 	MusicDetect bool
 	// OnMusic is called on each music start/end edge the provider reports.
 	// Nil-safe at every call site — only Speechmatics ever calls it.
-	OnMusic func(active bool)
+	//
+	// at is the edge's media time: the event's start_time on a start, its
+	// end_time on an end. Without it a consumer can only suppress by the order
+	// messages happened to arrive in, and a provider whose music detector needs
+	// trailing context reports the end AFTER the finals covering the first
+	// words of returning speech — which is how the first word went missing.
+	OnMusic func(active bool, at time.Duration)
 }
 
 // CapKeyterms trims a keyterm list to what the provider will accept. Deepgram

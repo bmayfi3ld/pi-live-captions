@@ -560,7 +560,7 @@ func TestMusicSuppressesPublish(t *testing.T) {
 	defer unsub()
 	drain(sub) // discard the initial status
 
-	h.SetMusic(true)
+	h.SetMusic(true, 0)
 	drain(sub) // discard the music-on event
 
 	h.Publish(stt.Transcript{Words: stt.Untimed("garbled singing"), Start: time.Second})
@@ -571,8 +571,12 @@ func TestMusicSuppressesPublish(t *testing.T) {
 		t.Fatalf("expected no broadcast while music is on, got %+v", events)
 	}
 
-	h.SetMusic(false)
-	drain(sub) // discard the music-off event
+	// The song ended at 5s, after the garble above — which is therefore song,
+	// and must not come back out of the hold.
+	h.SetMusic(false, 5*time.Second)
+	if events := drain(sub); len(events) != 1 || events[0].Kind != KindMusic {
+		t.Fatalf("expected only the music-off event, got %+v", events)
+	}
 
 	h.Publish(stt.Transcript{Words: stt.Untimed("captions resume"), Start: 10 * time.Second})
 	events := drain(sub)
@@ -584,6 +588,127 @@ func TestMusicSuppressesPublish(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected captions to resume once music is off")
+	}
+}
+
+// TestMusicOffReleasesSpeechAfterEndTime is the regression for the dropped
+// first word. The provider's music-end edge lags the transcript, so the final
+// carrying the first words of returning speech arrives while music is still
+// on. Suppressing on arrival order lost them; suppressing on the media time
+// the edge reports keeps them.
+func TestMusicOffReleasesSpeechAfterEndTime(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub)
+
+	h.SetMusic(true, 5*time.Second)
+	drain(sub)
+
+	// Pure song, entirely before the music ends.
+	h.Publish(stt.Transcript{
+		Words: []stt.Word{{Text: "ooh", Start: 8 * time.Second, End: 9 * time.Second}},
+		Start: 8 * time.Second, Duration: time.Second,
+	})
+	// The straddling window: the tail of the song, then the first real word.
+	// This is the one that used to vanish whole.
+	h.Publish(stt.Transcript{
+		Words: []stt.Word{
+			{Text: "yeah", Start: 13200 * time.Millisecond, End: 13350 * time.Millisecond},
+			{Text: "please", Start: 13600 * time.Millisecond, End: 14 * time.Second},
+		},
+		Start: 13200 * time.Millisecond, Duration: 800 * time.Millisecond,
+		Speaker: 1,
+	})
+
+	// Only now does the provider report where the music actually stopped.
+	h.SetMusic(false, 13400*time.Millisecond)
+
+	var captions []Event
+	for _, ev := range drain(sub) {
+		if ev.Kind == KindCaption {
+			captions = append(captions, ev)
+		}
+	}
+	if len(captions) != 1 {
+		t.Fatalf("expected exactly one released caption, got %d: %+v", len(captions), captions)
+	}
+	if len(captions[0].Words) != 1 || captions[0].Words[0].Text != "please" {
+		t.Errorf("released words = %+v, want just \"please\"", captions[0].Words)
+	}
+	// Start was re-derived from the surviving word, so its offset is 0 rather
+	// than carrying a phantom lead-in from the song that was cut.
+	if captions[0].Words[0].OffsetMS != 0 {
+		t.Errorf("released word offset = %dms, want 0", captions[0].Words[0].OffsetMS)
+	}
+	if captions[0].Speaker != 1 {
+		t.Errorf("released speaker = %d, want 1", captions[0].Speaker)
+	}
+	for _, l := range finals {
+		if strings.Contains(l.Text, "ooh") || strings.Contains(l.Text, "yeah") {
+			t.Errorf("song leaked into the transcript: %q", l.Text)
+		}
+	}
+}
+
+// TestMusicResetDropsHeld covers the dialer's gate reset: a fresh connection
+// reports music off at media time 0, on a clock that just restarted. Nothing
+// held from the old clock has a comparable offset, so none of it is released.
+func TestMusicResetDropsHeld(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub)
+
+	h.SetMusic(true, 5*time.Second)
+	h.Publish(stt.Transcript{
+		Words: []stt.Word{{Text: "ooh", Start: 30 * time.Second, End: 31 * time.Second}},
+		Start: 30 * time.Second, Duration: time.Second,
+	})
+	drain(sub)
+
+	h.SetMusic(false, 0)
+
+	for _, ev := range drain(sub) {
+		if ev.Kind == KindCaption {
+			t.Errorf("reset released held audio from the old clock: %+v", ev.Words)
+		}
+	}
+	if len(finals) != 0 {
+		t.Errorf("reset closed a line from held audio: %+v", finals)
+	}
+}
+
+// TestHeldSegmentsAreBounded pins the cap on the hold: a song long enough to
+// outrun maxHeldSegments must not grow it without limit, and what survives is
+// the tail nearest the boundary — the part the music-end edge can still
+// release.
+func TestHeldSegmentsAreBounded(t *testing.T) {
+	h := newTestHub()
+	h.SetMusic(true, 0)
+	for i := range maxHeldSegments * 3 {
+		at := time.Duration(i) * time.Second
+		h.Publish(stt.Transcript{
+			Words: []stt.Word{{Text: "la", Start: at, End: at + time.Second}},
+			Start: at, Duration: time.Second,
+		})
+	}
+
+	h.mu.Lock()
+	got := len(h.held)
+	first := h.held[0].Start
+	h.mu.Unlock()
+
+	if got != maxHeldSegments {
+		t.Errorf("held = %d segments, want %d", got, maxHeldSegments)
+	}
+	want := time.Duration(maxHeldSegments*3-maxHeldSegments) * time.Second
+	if first != want {
+		t.Errorf("oldest held segment starts at %v, want %v (the tail, not the head)", first, want)
 	}
 }
 
@@ -601,7 +726,7 @@ func TestSetMusicFlushesOpenLine(t *testing.T) {
 		t.Fatalf("expected the line still open, got %d finals", len(finals))
 	}
 
-	h.SetMusic(true)
+	h.SetMusic(true, 0)
 	if len(finals) != 1 {
 		t.Fatalf("expected SetMusic(true) to flush the open line, got %d finals", len(finals))
 	}

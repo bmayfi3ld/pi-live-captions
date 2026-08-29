@@ -93,6 +93,14 @@ const subscriberBuffer = 16
 // unpunctuated ramble can't grow a single line without bound.
 const maxUtteranceChars = 1000
 
+// maxHeldSegments bounds Hub.held, so a set that runs for an hour cannot grow
+// it without limit. Only the tail either side of the music's end is ever
+// released, and at Speechmatics' 0.7s max_delay this is ~20s of it.
+//
+// ponytail: a fixed count, not a media-time window. Raise it if a provider
+// ever reports the end of music later than that.
+const maxHeldSegments = 32
+
 // breakGap is how long the audio must go quiet before it counts as the
 // speaker actually stopping, rather than drawing breath. It drives both the
 // viewer's row break and the transcript's fallback line break.
@@ -141,9 +149,17 @@ type Hub struct {
 	// is now the only thing a subscriber is told about the past.
 	lastState string
 	// music is whether the recognizer currently reports singing. While set,
-	// Publish is a no-op: sung lyrics come back as garble, and freezing the
+	// Publish paints nothing: sung lyrics come back as garble, and freezing the
 	// screen (with the viewer told why via KindMusic) beats painting it.
 	music bool
+	// held is what Publish took in while music was set. Kept rather than
+	// dropped because the provider's music-end edge lags the transcript: a
+	// music detector needs trailing non-music context before it will declare
+	// the song over, so the finals carrying the first words of returning
+	// speech arrive while music is still true. Suppressing on arrival order
+	// threw those words away for good — see SetMusic, which decides on media
+	// time instead, once it knows where the music actually stopped.
+	held []stt.Transcript
 	// lastMusic mirrors music for Subscribe, the same way lastState mirrors
 	// PublishStatus — a client joining mid-song needs to know the screen is
 	// frozen on purpose.
@@ -174,11 +190,20 @@ func (h *Hub) Publish(t stt.Transcript) {
 	}
 
 	h.mu.Lock()
-	// While music is playing, the recognizer's output is garble and gets
-	// dropped whole — before any state mutation, so prevEnd/lastSpeaker stay
+	// While music is playing, the recognizer's output is presumed garble and is
+	// set aside whole — before any state mutation, so prevEnd/lastSpeaker stay
 	// exactly as they were when the song started and the first segment after
 	// it reads as a clean break rather than continuing a stale utterance.
+	//
+	// Set aside, not discarded: which of these segments were really the song is
+	// not known until the provider says where the music ended, and by then the
+	// first words of speech have already come through here. SetMusic sorts them
+	// out on media time.
 	if h.music {
+		h.held = append(h.held, t)
+		if len(h.held) > maxHeldSegments {
+			h.held = h.held[len(h.held)-maxHeldSegments:]
+		}
 		h.mu.Unlock()
 		return
 	}
@@ -311,11 +336,25 @@ func endsSentence(s string) bool {
 }
 
 // SetMusic toggles caption suppression on a music start/end edge from the
-// recognizer. On true, the in-progress transcript line is closed through the
-// same OnFinal path Flush uses, so the sentence spoken right before the song
-// lands in transcript.txt instead of being glued to whatever follows the
-// music.
-func (h *Hub) SetMusic(active bool) {
+// recognizer, at the edge's media time. On true, the in-progress transcript
+// line is closed through the same OnFinal path Flush uses, so the sentence
+// spoken right before the song lands in transcript.txt instead of being glued
+// to whatever follows the music.
+//
+// On false, at is where the music actually stopped, and everything Publish held
+// back meanwhile is sorted on it: words before it were the song and are
+// dropped, words at or after it were speech and are published now. This is the
+// whole reason the edge carries a media time. The provider's detector needs
+// trailing context to call the song over, so its end edge lands after the
+// finals covering the first words of returning speech — deciding on arrival
+// order instead lost those words every single time.
+//
+// at <= 0 on a false edge is not a music event at all: it is a fresh
+// connection resetting the gate (see the Speechmatics dialer), on a media clock
+// that just restarted at zero. Nothing held from the old clock has a comparable
+// offset, so it is all dropped rather than released against a meaningless
+// boundary.
+func (h *Hub) SetMusic(active bool, at time.Duration) {
 	h.mu.Lock()
 	if h.music == active {
 		// The engine can only send edges, but this is cheap insurance
@@ -328,8 +367,14 @@ func (h *Hub) SetMusic(active bool) {
 
 	var line Line
 	var closed bool
+	var held []stt.Transcript
 	if active {
 		line, closed = h.closeLocked(true)
+	} else {
+		if at > 0 {
+			held = h.held
+		}
+		h.held = nil
 	}
 	ev := h.newEventLocked(KindMusic)
 	if active {
@@ -347,6 +392,42 @@ func (h *Hub) SetMusic(active bool) {
 			onFinal(line)
 		}
 	}
+	// Replayed through Publish rather than inlined here, so the released speech
+	// gets the same break detection, line closing and fan-out as any other
+	// segment. It has to happen after the unlock above — Publish takes h.mu —
+	// and after the "off" event, so a viewer is told the screen is live again
+	// before the text meant for it arrives.
+	for _, t := range held {
+		if t, ok := afterMusic(t, at); ok {
+			h.Publish(t)
+		}
+	}
+}
+
+// afterMusic strips the words the music covered from t, reporting false if
+// nothing is left. Start and Duration are re-derived from the words that
+// survive, so wireWords' segment-relative offsets stay honest rather than
+// carrying a phantom lead-in from audio that was cut.
+//
+// A segment with no per-word timing (the stt.Untimed fallback, one word with a
+// zero End) has nothing to cut on, so it is kept or dropped whole.
+func afterMusic(t stt.Transcript, at time.Duration) (stt.Transcript, bool) {
+	if len(t.Words) == 1 && t.Words[0].End == 0 {
+		return t, t.Start >= at
+	}
+	words := make([]stt.Word, 0, len(t.Words))
+	for _, w := range t.Words {
+		if w.Start >= at {
+			words = append(words, w)
+		}
+	}
+	if len(words) == 0 {
+		return stt.Transcript{}, false
+	}
+	t.Words = words
+	t.Start = words[0].Start
+	t.Duration = max(words[len(words)-1].End-t.Start, 0)
+	return t, true
 }
 
 // PublishStatus broadcasts a connection state change.
@@ -372,6 +453,10 @@ func (h *Hub) PublishStatus(state string) {
 func (h *Hub) Clear() {
 	h.mu.Lock()
 	line, closed := h.closeLocked(true)
+	// Anything held through a song the operator cleared during is older than
+	// the wipe: releasing it when the music ends would paint text back onto a
+	// screen they just emptied on purpose.
+	h.held = nil
 	ev := h.newEventLocked(KindClear)
 	onFinal := h.OnFinal
 	h.mu.Unlock()
