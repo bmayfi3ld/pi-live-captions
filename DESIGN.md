@@ -214,20 +214,32 @@ committed chunk would also read as a pause, which is exactly the ragged-rows bug
 Pinned to 1.0 s. It is the knob equivalent to Deepgram's `endpointing`: lower for sooner text in
 smaller pieces, higher if phrases fragment across rows, but never within reach of `breakGap`.
 
-Two gaps against the Deepgram engine, both deliberate:
+**Profanity is filtered on the word tag, not a word list.** Speechmatics marks profanities in
+`results[].alternatives[].tags` as standard — no config field turns it on, and the list is fixed
+and not user-alterable (en, es and it only). `transcripts()` drops any word carrying the
+`profanity` tag outright: no mask, no placeholder. This is why the tag route beat the alternative,
+`transcript_filtering_config.replacements` — that takes `from`/`to` pairs where `from` may be an
+ECMAScript regex, so `/^[sS][hH][iI][tT]$/` gets the case-insensitivity and the whole-word
+anchoring that stops "class" being masked for containing "ass" — but it needs us to author the word
+list, which is a judgement call rather than boilerplate: where the line falls is venue-specific, and
+several of the obvious candidates have innocuous senses that are ordinary vocabulary in the rooms
+this runs in. The provider's list sidesteps the question. What was never viable is substituting into the server's pre-assembled `transcript`
+string: no character offsets to join on, only text, and a plain `ReplaceAll` mangles innocent words.
 
-- **No profanity filter.** Deepgram takes `profanity_filter=true`; Speechmatics has no equivalent
-  one-line switch, so this engine currently does not filter. Not for lack of a mechanism — there
-  are two, and either would work server-side if it becomes necessary:
-  `transcript_filtering_config.replacements` takes `from`/`to` pairs where `from` may be an
-  ECMAScript regex in `/…/` delimiters, so `/^[sS][hH][iI][tT]$/` handles both the case-sensitivity
-  (replacement is case-sensitive) and the whole-word anchoring that stops "class" being masked for
-  containing "ass"; separately, `results` carries a `tags: ["profanity"]` marker on individual
-  words for en/es/it. What is *not* viable is substituting into the server's pre-assembled
-  `transcript` string — there are no character offsets to join on, only text, and a plain
-  `ReplaceAll` mangles innocent words. Either mechanism needs a word list, which for a church is a
-  judgement call rather than boilerplate: "hell" and "damn" are sermon vocabulary, and "ass",
-  "cock" and "prick" all have scriptural senses.
+The subtlety is that removing a word is not a no-op for the surrounding run. The skip sits *before*
+the run-opening bookkeeping in `transcripts()`, so a vanishing word cannot set the run's start to
+audio that isn't in the text (which would give every surviving word a phantom offset once
+`wireWords` subtracts `Transcript.Start`), cannot leave a run open with no words when a whole
+window is profanity, cannot stretch `Duration` past the last kept word, and cannot flush a run for
+a speaker whose only contribution was the removed word. Surviving words keep the timings they
+arrived with — nothing is reindexed or shifted, and the hole reads to the pacer as the pause it
+was. Punctuation is deliberately *kept*: a terminal `.` is what closes a caption line in the hub,
+and the cost is only a comma landing one word early. The one unreachable path is the flat-text
+fallback for a message with no `results` array, which carries no tags; it is marked in the code.
+
+Note this differs from Deepgram, which masks with asterisks rather than removing. One gap against
+the Deepgram engine remains, deliberately:
+
 - **Confidence is not decoded.** Both providers report it — Speechmatics per word, Deepgram per
   segment — and nothing downstream ever read the value: not the hub, not the transcript, not the
   admin page. It is dropped at the decoder rather than carried unused.

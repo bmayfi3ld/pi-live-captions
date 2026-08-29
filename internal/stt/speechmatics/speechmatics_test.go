@@ -130,6 +130,14 @@ func wordResult(content string, start, end, confidence float64, speaker string) 
 	}
 }
 
+// profanityResult is a word result carrying Speechmatics' own "profanity" tag,
+// which it sends as standard with no config field to enable it.
+func profanityResult(content string, start, end float64, speaker string) map[string]any {
+	r := wordResult(content, start, end, 1.0, speaker)
+	r["alternatives"].([]map[string]any)[0]["tags"] = []string{"profanity"}
+	return r
+}
+
 func punctuationResult(content string, at float64, speaker string) map[string]any {
 	return map[string]any{
 		"type":         "punctuation",
@@ -467,6 +475,96 @@ func TestTranscripts_LeadingPunctuationIsDropped(t *testing.T) {
 	ts, err := msg.transcripts()
 	if err != nil || len(ts) != 0 {
 		t.Errorf("transcripts = (%v, %v), want none (leading punctuation has nothing to attach to)", ts, err)
+	}
+}
+
+// TestTranscripts_ProfanityIsStripped pins the whole profanity path at once:
+// the tagged word vanishes, and — the part that is easy to get wrong — every
+// surviving word keeps the timing it arrived with. Removing a word from a run
+// touches the run's start, its end, its speaker splits and the punctuation glue,
+// so each is asserted here rather than trusted.
+func TestTranscripts_ProfanityIsStripped(t *testing.T) {
+	data, _ := json.Marshal(map[string]any{
+		"message": "AddTranscript",
+		"results": []map[string]any{
+			// A run that opens on a profanity: the run's Start must come from
+			// "well" at 0.4s, not from the removed word at 0.
+			profanityResult("damnit", 0, 0.4, "S1"),
+			wordResult("well", 0.4, 0.8, 0.95, "S1"),
+			// Mid-run profanity followed by a comma: the word goes, the comma
+			// stays and glues onto "well" instead.
+			profanityResult("shit", 0.8, 1.1, "S1"),
+			punctuationResult(",", 1.1, "S1"),
+			wordResult("anyway", 1.2, 1.6, 0.9, "S1"),
+			// A whole speaker run that is nothing but profanity: it must not
+			// open a run at all, so S1 above and S2 below stay two runs, not
+			// three with an empty one between them.
+			profanityResult("bollocks", 1.6, 1.9, "S2"),
+			wordResult("Amen", 2.0, 2.5, 0.99, "S3"),
+			punctuationResult(".", 2.5, "S3"),
+		},
+	})
+	var msg serverMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := msg.transcripts()
+	if err != nil {
+		t.Fatalf("transcripts: %v", err)
+	}
+	if len(ts) != 2 {
+		t.Fatalf("got %d transcripts, want 2 (the all-profanity S2 run must not open one): %+v", len(ts), ts)
+	}
+
+	if ts[0].Text() != "well, anyway" {
+		t.Errorf("run 0 Text = %q, want %q", ts[0].Text(), "well, anyway")
+	}
+	// The onsets are the ones Speechmatics sent, untouched: nothing is
+	// reindexed or shifted to close the hole the removed word left. The gap
+	// between "well," ending at 0.8s and "anyway" starting at 1.2s is what the
+	// viewer's pacer reads as a pause.
+	wantRun0 := []stt.Word{
+		{Text: "well,", Start: 400 * time.Millisecond, End: 800 * time.Millisecond},
+		{Text: "anyway", Start: 1200 * time.Millisecond, End: 1600 * time.Millisecond},
+	}
+	if !slices.Equal(ts[0].Words, wantRun0) {
+		t.Errorf("run 0 Words = %+v, want %+v", ts[0].Words, wantRun0)
+	}
+	if ts[0].Start != 400*time.Millisecond {
+		t.Errorf("run 0 Start = %v, want 400ms (the first kept word, not the removed one at 0)", ts[0].Start)
+	}
+	if ts[0].Duration != 1200*time.Millisecond {
+		t.Errorf("run 0 Duration = %v, want 1200ms (400ms..1600ms)", ts[0].Duration)
+	}
+
+	if ts[1].Speaker != 3 || ts[1].Text() != "Amen." {
+		t.Errorf("run 1 = speaker %d %q, want speaker 3 %q", ts[1].Speaker, ts[1].Text(), "Amen.")
+	}
+	if ts[1].Start != 2*time.Second || ts[1].Duration != 500*time.Millisecond {
+		t.Errorf("run 1 Start/Duration = %v/%v, want 2s/500ms", ts[1].Start, ts[1].Duration)
+	}
+}
+
+// TestTranscripts_AllProfanityYieldsNothing guards the empty-run edge: flush()
+// gates on `open`, not on len(words), so a window that is entirely profanity
+// must never open a run — otherwise it ships a Transcript with zero words for
+// the hub to drop on empty text.
+func TestTranscripts_AllProfanityYieldsNothing(t *testing.T) {
+	data, _ := json.Marshal(map[string]any{
+		"message": "AddTranscript",
+		"results": []map[string]any{
+			profanityResult("shit", 0, 0.4, "S1"),
+			profanityResult("shit", 0.4, 0.8, "S1"),
+			punctuationResult("!", 0.8, "S1"),
+		},
+	})
+	var msg serverMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := msg.transcripts()
+	if err != nil || len(ts) != 0 {
+		t.Errorf("transcripts = (%+v, %v), want none", ts, err)
 	}
 }
 

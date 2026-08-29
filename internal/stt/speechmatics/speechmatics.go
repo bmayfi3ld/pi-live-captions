@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -403,6 +404,11 @@ type serverMessage struct {
 			// identified speaker, or "UU" for unattributed audio. Empty when
 			// diarization was never requested.
 			Speaker string `json:"speaker"`
+			// Tags is Speechmatics' own per-word metadata, sent as standard
+			// with no config field to enable it. The list is fixed and not
+			// user-alterable: "profanity" (en, es and it only) and
+			// "disfluency". Only the former is acted on — see transcripts().
+			Tags []string `json:"tags"`
 		} `json:"alternatives"`
 	} `json:"results"`
 
@@ -447,6 +453,12 @@ func (m serverMessage) asError() error {
 // Transcript.Text() rebuilds the flat string on demand. Only "word" results
 // build text; "entity" and "punctuation" are handled separately below.
 func (m serverMessage) transcripts() ([]stt.Transcript, error) {
+	// ponytail: the flat-text fallback below is the one path profanity
+	// filtering cannot reach — tags live on Results[], and this branch is
+	// taken precisely when there are none. Harmless today (no results means
+	// no tagged words to strip), but if Speechmatics ever starts sending
+	// transcript text without results, filtering would have to move to a
+	// word-list match on the string.
 	if len(m.Results) == 0 {
 		text := m.Transcript
 		if text == "" {
@@ -505,6 +517,12 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		// own beat, and gluing it here is what keeps Transcript.Text() —
 		// which joins Words with single spaces — identical to the string
 		// this loop used to build.
+		//
+		// Punctuation is kept even when the word it followed was filtered as
+		// profanity: a terminal "." is what closes a caption line in the hub,
+		// so dropping it would merge sentences. The cost is a comma landing one
+		// word early ("you're a <profanity>, really" -> "you're a, really"),
+		// which is cheaper than losing the line break.
 		if r.Type == "punctuation" {
 			if open && len(words) > 0 {
 				words[len(words)-1].Text += alt.Content
@@ -519,6 +537,22 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		// punctuation type would silently double those words if that ever
 		// changed.
 		if r.Type != "word" {
+			continue
+		}
+		// Profanity is dropped outright — no mask, no placeholder. This has to
+		// happen before the run bookkeeping below, not after: opening a run on
+		// a word that is about to vanish would set the run's start to removed
+		// audio (giving every surviving word a phantom leading offset once
+		// hub.wireWords subtracts Transcript.Start), leave `open` true with no
+		// words when a whole window is filtered, and let a one-word
+		// interjection by another speaker flush the current run to build an
+		// empty one. Continuing here also leaves `end` on the last kept word,
+		// so Duration never stretches over audio that isn't in the text.
+		//
+		// The surviving words keep their own start_time/end_time untouched —
+		// nothing is reindexed or shifted. The hole simply reads as a pause to
+		// the pacer, which is what it was.
+		if slices.Contains(alt.Tags, "profanity") {
 			continue
 		}
 

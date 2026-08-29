@@ -148,6 +148,17 @@ it is for, but a loud room or an instrument under speech can trip it. Each event
 info level with its time and confidence; if it is swallowing speech in your venue, run with
 `--no-music-detect`.
 
+### Profanity
+
+Both engines filter profanity, always on, with no flag to turn it off. Speechmatics tags swearing
+in its results and those words are dropped from the caption entirely — nothing is shown where the
+word was, and the surrounding words keep their own timing so the line still paces normally.
+Deepgram masks with asterisks instead of removing.
+
+The word list belongs to the recognizer and cannot be edited from here. Speechmatics tags
+profanities for English, Spanish and Italian only; with `--language` set to anything else, nothing
+is filtered on that engine.
+
 ## Transcripts
 
 On by default — every session writes to `./transcripts/<YYYY-MM-DDTHH-MM-SS>/`, both
