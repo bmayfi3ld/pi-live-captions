@@ -29,8 +29,9 @@ type MonitorConfig struct {
 // so caption delay can be judged by ear.
 //
 // The tap point is deliberate: playing the original file with a separate
-// player would drift against our scheduler and ignore --speed. Teeing the
-// frames we already emit means what you hear is bit-identical to what the
+// player would drift against our scheduler, so what you heard would not line
+// up with what was sent. Teeing the frames we already emit means what you hear
+// is bit-identical to what the
 // recognizer receives, released by the same clock. It also means you hear the
 // 16 kHz mono downmix, which is the point — bad source audio becomes audible
 // instead of being inferred from bad transcripts.

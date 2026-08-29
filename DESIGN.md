@@ -474,12 +474,19 @@ reversal:
 |---|---|
 | `GET /` | Viewer page |
 | `GET /events` | SSE stream: `status` on connect, then incremental events |
-| `GET /admin` | Metrics dashboard (no auth) |
+| `GET /admin` | Metrics dashboard and live caption mirror. Basic auth (user `admin`) only when `ADMIN_PASSWORD` is set |
 | `GET /api/stats` | JSON metrics snapshot |
+| `GET /api/config` | `{version, logo}`, so the viewer knows whether a logo is registered |
 | `GET /api/time` | Server wall clock, for the viewer's own clock-offset estimation |
 | `POST /api/viewer-latency` | Viewer-reported publish→paint latency (unauthenticated, rate-limited — see §6) |
+| `POST /api/clear` | Operator screen wipe. Always behind `requireAdmin`; 503 when no password is set |
 | `GET /logo` | Logo image, registered only when `--logo` is set |
 | `GET /healthz` | Liveness |
+
+The server also advertises `<--mdns-name>.local` (default `livecaptions`) for its lifetime by
+holding an `avahi-publish` child open — see `internal/mdns`. It is optional infrastructure, not
+a dependency: a missing binary or daemon logs a warning and the server starts anyway. The point
+is that a room can be told a name rather than an IP that changes with the DHCP lease.
 
 SSE rather than WebSocket: traffic is strictly one-way, and `EventSource` gives automatic
 reconnection with no client-side logic to maintain. Headers set `no-cache` and `X-Accel-Buffering:
@@ -492,18 +499,23 @@ Event wire format:
 {"seq":42,"kind":"caption","words":[{"t":"a","o":0,"d":90},{"t":"few","o":110,"d":180},{"t":"announcements","o":340,"d":540},{"t":"before","o":900,"d":200},{"t":"the","o":1120,"d":90}],"speaker":1,"at":"2026-08-19T09:31:05.912Z"}
 {"seq":43,"kind":"caption","words":[{"t":"main","o":0,"d":240},{"t":"session.","o":260,"d":420}],"speaker":1,"at":"2026-08-19T09:31:06.301Z"}
 {"seq":44,"kind":"caption","words":[{"t":"Sorry,","o":0,"d":280},{"t":"can","o":300,"d":110},{"t":"you","o":420,"d":120},{"t":"repeat","o":560,"d":250},{"t":"that?","o":830,"d":300}],"break":true,"speaker":2,"at":"2026-08-19T09:31:08.912Z"}
-{"seq":45,"kind":"status","state":"reconnecting","detail":"stt websocket closed","at":"2026-08-19T09:31:10.442Z"}
-{"seq":46,"kind":"status","state":"paused","detail":"","at":"2026-08-19T09:31:40.000Z"}
+{"seq":45,"kind":"status","state":"reconnecting","at":"2026-08-19T09:31:10.442Z"}
+{"seq":46,"kind":"status","state":"paused","at":"2026-08-19T09:31:40.000Z"}
 {"seq":47,"kind":"status","state":"connected","at":"2026-08-19T09:31:41.000Z"}
+{"seq":48,"kind":"music","state":"on","at":"2026-08-19T09:33:02.118Z"}
+{"seq":49,"kind":"clear","at":"2026-08-19T09:41:17.004Z"}
 ```
+
+Four kinds: `caption`, `status`, `music` (suppression toggled, carried on `state` as `on`/`off`)
+and `clear` (the operator wiped the screen; drop everything painted).
 
 `kind: "final"` and `kind: "interim"` are gone; there is one text-carrying event kind now,
 `caption`. Its `words` are always the new segment only — never the accumulated utterance — so the
 client can append them blindly, and `break` asks the viewer to freeze the current row before
-appending: the speaker actually stopped (§4). `Event` dropped from ten fields to seven along with
-`id`, `offset_ms`, `lines` and `pending` (`speaker` and later `words` brought it back to nine): a
-`caption` event carries nothing about utterance structure any more, because there's no revision
-left to protect the client from.
+appending: the speaker actually stopped (§4). `Event` shed `id`, `offset_ms`, `lines`, `pending`
+and `detail` on the way to its current seven fields — `seq`, `kind`, `words`, `break`, `speaker`,
+`at`, `state`: a `caption` event carries nothing about utterance structure any more, because
+there's no revision left to protect the client from.
 
 `words` is where a segment's text lives on a `caption` event, one entry per word, each with its
 `o` — the onset the recognizer measured, in milliseconds from that segment's own start — and its
@@ -537,9 +549,9 @@ row of the reconnect — not worth a field on the wire to carry mid-sentence.
 there is no longer a "which kinds get a timestamp" question, since every event kind is
 latency-relevant to some viewer measurement.
 
-`detail` is deliberately left empty for `paused`: the server reports *that* the state changed, but
-the wording shown for it ("no audio" on the viewer, "paused (no audio)" on `/admin`) is a
-presentation decision that belongs to each page, not something baked into the wire event.
+There is no `detail` field: a `status` event reports *that* the state changed and nothing more.
+The wording shown for it ("silence" on the viewer, "paused (no audio)" on `/admin`) is a
+presentation decision belonging to each page, not something baked into the wire event.
 
 Pages are `//go:embed`-ed so the binary ships standalone; `go run` picks up edits while
 iterating.

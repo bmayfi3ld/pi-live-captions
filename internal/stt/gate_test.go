@@ -151,11 +151,11 @@ func TestGate_OffsetDrivenNotWallClock(t *testing.T) {
 	}
 }
 
-// TestGate_SourceRestartRebaselinesSilence covers replay --loop, which resets
-// its media clock to zero on every pass. A silence run open across that
-// boundary used to measure the hold against an offset from the previous pass,
-// so the difference went negative and the gate stopped pausing for the rest of
-// a soak run — exactly the long run where it matters most.
+// TestGate_SourceRestartRebaselinesSilence covers a source that restarts its
+// media clock, handing the gate an offset behind the open silence run. That
+// used to measure the hold against the stale offset, so the difference went
+// negative and the gate stopped pausing for the rest of a soak run — exactly
+// the long run where it matters most.
 func TestGate_SourceRestartRebaselinesSilence(t *testing.T) {
 	g := NewGate(testCfg())
 
@@ -165,7 +165,7 @@ func TestGate_SourceRestartRebaselinesSilence(t *testing.T) {
 		t.Fatal("gate should still be active before Hold elapses")
 	}
 
-	// The file loops: offsets restart at zero while the audio is still silent.
+	// The source restarts: offsets go back to zero while the audio is still silent.
 	g.ObserveLevel(-80, 0)
 	if !g.Active() {
 		t.Fatal("the restart itself must not trip the gate")

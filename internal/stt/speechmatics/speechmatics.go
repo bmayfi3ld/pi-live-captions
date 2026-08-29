@@ -44,7 +44,7 @@ const (
 	// that is far too slow here: caption.breakGap is 1.5s, and once the
 	// finalisation window reaches breakGap every committed chunk also reads as
 	// a speech pause, which puts the ragged-rows bug of an early draft back on
-	// screen. 1.0 keeps finals comfortably underneath it.
+	// screen. 0.7 keeps finals comfortably underneath it.
 	//
 	// This is the knob to reach for if captions feel late (lower: sooner, in
 	// smaller pieces) or if phrases fragment across rows (raise it, but never

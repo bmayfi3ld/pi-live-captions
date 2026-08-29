@@ -22,7 +22,8 @@ type PauseConfig struct {
 
 // Gate tracks whether the stream currently carries audio worth transcribing.
 // Transitions are driven by media time taken from frame offsets, never wall
-// clock, so replay at any --speed and tests behave identically.
+// clock, so a live feed and a test feeding synthetic offsets behave
+// identically — and a test can cover a minute of hold without waiting one.
 type Gate struct {
 	cfg PauseConfig
 
@@ -65,10 +66,11 @@ func (g *Gate) ObserveLevel(db float64, at time.Duration) bool {
 			changed = true
 		}
 	} else {
-		// A source that restarts its media clock sends offsets backwards —
-		// replay --loop resets to zero on every pass. Re-baseline instead of
-		// measuring the hold against an offset from the previous pass, which
-		// would not elapse again for the length of the whole file.
+		// ObserveLevel takes the media time from its caller, so a source that
+		// restarts its clock hands us an offset behind the one the current
+		// silence run began at. Re-baseline on that rather than measuring the
+		// hold against the stale offset: the difference would go negative and
+		// the gate would stop pausing for the rest of the run.
 		if !g.inSilence || at < g.silStart {
 			g.inSilence = true
 			g.silStart = at

@@ -1,32 +1,63 @@
 # livecaption
 
-Streams audio — from a soundboard's USB output or from an audio file — to a speech-to-text
-service and serves the resulting captions to a webpage in near real time, for live-event
-captioning. See [DESIGN.md](DESIGN.md) for the architecture and the reasoning behind it.
+**Live captions on every screen in the room, from the soundboard you already have.**
 
-## Prerequisites
+![The caption viewer: text arriving a word at a time in a bottom-anchored rolling window, with a coloured numbered dot in the left gutter marking a change of speaker](docs/viewer.gif)
 
-- Go 1.26+
-- `ffmpeg` and `ffprobe` on `PATH` (used for capture, decode, resample, and playback)
-- An API key for one of the recognizers, set via its env var (there is no flag; a key on the
-  command line lands in `ps` and shell history):
-  [Deepgram](https://deepgram.com) (`DEEPGRAM_API_KEY`, the default engine) or
-  [Speechmatics](https://speechmatics.com) (`SPEECHMATICS_API_KEY`, `--engine speechmatics`)
+Someone who can't follow the person at the front — hard of hearing, sitting at the back, in an
+overflow room, or just up against a bad PA — opens a web page on their phone and reads what's
+being said, a second or two behind. No receivers to hand out, no app to install, nothing to
+collect at the door.
 
-`--model` and `--language` default to whatever the selected engine expects (`nova-3` / `en-US` for
-Deepgram, `enhanced` / `en` for Speechmatics), so switching engines needs only `--engine`.
+livecaption takes a mono feed from your soundboard, streams it to a speech-to-text service, and
+pushes the words to every browser on the network. The same URL works on a phone, on a projector
+at the front of the room, and as an OBS browser source for a stream.
 
-`--engine mock` needs neither a key nor network access — it emits canned transcripts driven by
-media time, which is what makes the tool testable without hardware or API spend.
+It needs one Linux machine on the network, `ffmpeg`, and an API key from Deepgram or
+Speechmatics. Design and rationale are in [DESIGN.md](DESIGN.md).
 
-## Build
+## Project status
+
+Working, and used at real events — on an x86 Linux laptop.
+
+**It has never been run on a Raspberry Pi.** That is the intended deployment: a Pi wired into
+the soundboard's USB output, running headless, advertising `livecaptions.local` to the room.
+The whole design points at it, but none of it has been proven on the hardware.
+
+Nothing in the code is architecture-specific — it's pure Go plus `ffmpeg`, no CGO — so this is
+*untested*, not known-broken. What specifically has not been checked on a Pi:
+
+- USB audio capture through ALSA/PulseAudio on Pi hardware
+- CPU headroom for continuous `ffmpeg` resampling alongside a WebSocket upload
+- Long unattended runs: thermals, USB dropouts, wifi
+- avahi/mDNS under Raspberry Pi OS
+
+Also unverified anywhere: multi-hour sessions, and more than a handful of simultaneous viewers.
+
+## Try it in two minutes
+
+No API key, no audio hardware, no network. The `mock` engine emits canned transcripts driven by
+media time, which is what makes the whole tool testable without hardware or API spend:
 
 ```bash
-go build -o livecaption ./cmd/livecaption
-./livecaption --version
+just build
+./bin/livecaption replay some-recording.mp3 --engine mock --no-transcript
 ```
 
-Or run directly with `go run ./cmd/livecaption <command>`.
+Then open <http://localhost:8080/>. You'll see captions arriving exactly as they would live —
+`replay` releases the file at true wall-clock rate, so a half-hour recording takes half an hour.
+That is the point: it makes the dev loop predict the live run.
+
+`just` loads `.env`, so put your API keys there. Without `just`, `go run ./cmd/livecaption` and
+`go build -o ./bin ./cmd/livecaption` do the same thing with the environment you already have.
+
+## How it works
+
+`ffmpeg` captures the soundboard as 16 kHz mono and hands 100 ms chunks to the recognizer over a
+WebSocket. Settled text only — never interim guesses — so a word never changes once it's on
+screen. Finished segments go to a hub, which decides where caption rows break, and out to
+browsers over Server-Sent Events. Every stage has an offline equivalent, which is why the
+two-minute demo above needs nothing but a file.
 
 ## Commands
 
@@ -37,22 +68,14 @@ livecaption devices
 ```
 
 Lists capture inputs per backend (`pulse`, `alsa`) with the name to pass to `--device`.
-Enumeration is best-effort (it shells out to `ffmpeg -sources`); an empty list on your machine
-just means that backend didn't answer, not that you have no audio hardware.
+Enumeration shells out to `ffmpeg -sources` and is best-effort: an empty list means that backend
+didn't answer, not that you have no audio hardware.
 
 ### `replay` — the no-cost dev loop
 
 Streams an audio file through the real pipeline at wall-clock rate, so everything downstream
-behaves exactly as it will with the live feed:
-
-```bash
-livecaption replay recording.mp3 --engine mock --no-transcript
-```
-
-This is the primary development loop: no API key, no network, no recognizer spend, and output is
-reproducible run to run since the mock engine is driven by media time, not the wall clock. The
-file is released at true wall-clock rate, so a half-hour recording takes half an hour — that is
-the point, since it is what makes the dev loop predict the live run.
+behaves exactly as it will with the live feed. Reproducible run to run on `--engine mock`, since
+the mock is driven by media time rather than the wall clock.
 
 To judge caption delay by ear, add `--monitor`:
 
@@ -60,11 +83,10 @@ To judge caption delay by ear, add `--monitor`:
 livecaption replay recording.mp3 --monitor
 ```
 
-This tees the exact frames sent to the recognizer into a second ffmpeg writing to your speakers —
-what you hear is bit-identical to what the recognizer receives. It plays to the default pulse sink
-and adds a printed ~80 ms of playback buffer, so perceived delay slightly overstates true caption
-latency. Use it to tune `--keyterm` and to get a feel for lag
-*before* an event, not during one.
+This tees the exact frames sent to the recognizer into a second `ffmpeg` writing to your default
+speakers — what you hear is bit-identical to what the recognizer receives. It adds ~80 ms of
+playback buffer, so perceived delay slightly overstates the real thing. Use it to tune
+`--keyterm` and get a feel for lag *before* an event, not during one.
 
 ### `live` — the real thing
 
@@ -72,196 +94,226 @@ latency. Use it to tune `--keyterm` and to get a feel for lag
 livecaption live --device <name-from-devices> --keyterm "Anthropic" --keyterm "Claude"
 ```
 
-`--device` is validated against `livecaption devices` output before capture starts (best-effort;
-if enumeration fails outright for the chosen backend, validation is skipped with a logged warning
-rather than blocking the run), and then confirmed with a probe read before the session begins — so
-a typo is a clear startup error, not room noise captioned as your event.
+`--device` is checked against `livecaption devices` before capture starts, then confirmed with a
+probe read — so a typo is a clear startup error rather than room noise captioned as your event.
+If enumeration fails outright for the chosen backend, validation is skipped with a logged
+warning rather than blocking the run. Use `--backend alsa` if your machine has no PulseAudio or
+PipeWire; ALSA device names like `hw:0,0` and `default` are accepted even when enumeration comes
+back empty.
 
-### Auto-pause
+## Viewing the captions
 
-Both `live` and `replay` close the recognizer connection during silence and reopen it when audio
-returns, so a quiet room doesn't rack up recognizer charges (see DESIGN.md §3 for how it decides
-what counts as silence and why closing rather than idling the connection). It's on by default:
+The viewer is served at `--addr` — <http://localhost:8080/> by default. It's a bottom-anchored
+rolling caption window sized in `vw`, so the same URL works on a phone, a projector, or as an OBS
+browser source.
 
-| flag | default | effect |
-|---|---|---|
-| `--auto-pause` / `--no-auto-pause` | on | enable/disable the feature |
-| `--silence-hold` | `60s` | how long silence has to hold (in media time) before pausing |
+**On the network, the room can use a name instead of an IP.** The server advertises
+`livecaptions.local` over mDNS for as long as it runs, so viewers type that rather than hunting
+for an address. Set the name with `--mdns-name`, or pass an empty one to switch it off. This
+needs `avahi-publish` (`avahi-utils` on Debian/Ubuntu/Raspberry Pi OS); if it's missing the
+server logs a warning and carries on serving normally, just without the name.
 
-The silence threshold itself is fixed at -45 dBFS (`silenceThresholdDB` in `internal/stt/gate.go`);
-a materially hotter or colder feed needs that constant moved and a rebuild. Turn the feature off
-with `--no-auto-pause` for a venue where dead air should still keep the connection warm, or raise
-`--silence-hold` if pauses are firing during ordinary pauses for breath.
-`/admin` and the status line report `pauses_total` and `paused_sec` so a mistuned gate is visible
-rather than inferred from the recognizer bill.
+To drop the `:8080` entirely and serve `http://livecaptions.local`, grant the binary the
+privileged-port capability once and run with `--addr :80`:
 
-### Speech timing
+```bash
+sudo setcap 'cap_net_bind_service=+ep' ./bin/livecaption
+```
 
-A pause of at least 1.5s counts as the speaker actually stopping: it freezes the caption row where
-it is and closes a transcript line. That threshold is the `breakGap` constant in
-`internal/caption/hub.go` — venue-tuned, but not a flag (see DESIGN.md §4).
-
-Every engine publishes only settled results — Deepgram's `is_final`, Speechmatics' `AddTranscript`
-— so a word never changes once it's on screen. Cadence is therefore governed by the recognizer's
-own finalisation window: Deepgram's `endpointing`, left at the server default, or Speechmatics'
-`max_delay`, pinned to 1.0s so it stays clear of the 1.5s speech-pause threshold below. Watch
-`Segments / lines` on `/admin` to check fragmentation: roughly 1–3 segments per line is healthy,
-and a ratio climbing well past that means phrases are splitting on every hesitation.
-
-### Speakers
-
-Diarization is on by default. Both engines label the speaker for every word they return
-(Deepgram `diarize`, Speechmatics `diarization: speaker`), so a segment that spans a turn is
-split into one caption per speaker rather than being credited to whoever started it.
-
-| flag | default | effect |
-|---|---|---|
-| `--diarize` / `--no-diarize` | on | ask the recognizer who is speaking |
-
-A change of speaker always breaks the caption row — two people's words never share a line — and
-closes a transcript line. On screen the change is marked by a small coloured numbered dot in a
-left gutter, on the first row of the new turn only; continuation rows are unmarked, so a
-single-speaker session shows nothing at all. The gutter itself is always reserved — it sits in
-the page margin rather than in front of the text, and never appears or disappears mid-session,
-which would slide painted words sideways. The number is the speaker,
-the colour is a fast hint that the turn changed; six colours cycle, and the number stays
-authoritative past that. `transcript.txt` spells the same thing out as an `[S2]` prefix.
-
-Speaker labels are cluster indices, not identities: they are stable within a connection and
-renumbered after a reconnect. Turn it off with `--no-diarize` if a venue sees the extra
-recognition delay it can cost.
-
-### Music
-
-Speechmatics can flag music in the feed (its audio-events detector); Deepgram has no
-equivalent, so the flag does nothing there. While music is playing captions are suppressed —
-sung lyrics come back as garble — and the status indicator reads `♪ music` so a frozen screen
-reads as deliberate rather than broken. The open transcript line is closed at the first note,
-so the sentence spoken before the song isn't glued to whatever follows it.
-
-| flag | default | effect |
-|---|---|---|
-| `--music-detect` / `--no-music-detect` | on | suppress captions while the recognizer reports music |
-
-Speechmatics warns the detector can be over-sensitive — congregational singing is exactly what
-it is for, but a loud room or an instrument under speech can trip it. Each event is logged at
-info level with its time and confidence; if it is swallowing speech in your venue, run with
-`--no-music-detect`.
-
-### Profanity
-
-Both engines filter profanity, always on, with no flag to turn it off. Speechmatics tags swearing
-in its results and those words are dropped from the caption entirely — nothing is shown where the
-word was, and the surrounding words keep their own timing so the line still paces normally.
-Deepgram masks with asterisks instead of removing.
-
-The word list belongs to the recognizer and cannot be edited from here. Speechmatics tags
-profanities for English, Spanish and Italian only; with `--language` set to anything else, nothing
-is filtered on that engine.
-
-## Transcripts
-
-On by default — every session writes to `./transcripts/<YYYY-MM-DDTHH-MM-SS>/`, both
-`transcript.txt` (human-readable, timestamped, with a `[S2]` prefix when the speaker is known, for
-tooling). Change the location with `--transcript-dir` or `LIVECAPTION_TRANSCRIPT_DIR`; disable
-with `--no-transcript`.
-
-## Viewer and admin
-
-The viewer page is served at the `--addr` you configured (default `http://localhost:8080/`). It's
-a bottom-anchored rolling caption window sized in `vw`, so the same URL works on a phone, a
-projector, or as an OBS browser source. `--logo <file>` puts an image in the top-right corner
-beside the connection dot. Query parameters:
+Query parameters:
 
 | param | effect |
 |---|---|
-| `?lines=N` | number of caption rows shown (default 6) |
+| `?lines=N` | number of caption rows shown (default 5) |
 | `?size=N` | base font size in `vw` |
 | `?theme=light` | light theme (default is dark) |
-| `?logo=0` | hides the logo (e.g. for OBS, where branding is composited downstream) |
-| `?wake=0` | disables the screen wake lock entirely, gate included (OBS browser sources, wall-mounted displays — nobody there to tap it) |
+| `?logo=0` | hides the logo — for OBS, where branding is composited downstream |
+| `?wake=0` | disables the screen wake lock, gate included — for OBS sources and wall-mounted displays, where nobody is there to tap |
 
-Over plain HTTP — the standard LAN deployment — the browser's Wake Lock API is unavailable outside
-a secure context, so the viewer falls back to a silent looping video to keep the screen on. That
-needs one tap to unlock playback, so the page shows a one-time "Tap to start" gate before captions
-become visible; captions are already streaming in behind it, so tapping reveals current state
-rather than an empty page. `?wake=0` skips this entirely.
+Over plain HTTP — the standard LAN deployment — the browser's Wake Lock API is unavailable
+outside a secure context, so the viewer falls back to a silent looping video to keep the screen
+awake. That needs one tap to unlock playback, so the page shows a one-time "Tap to start" gate.
+Captions stream in behind it, so tapping reveals current state rather than an empty page.
 
-`/admin` also carries one operator control: **Clear screen**, which blanks every connected viewer
-immediately (for when something lands on screen that shouldn't stay there). It POSTs to
-`/api/clear`, and the server closes the in-progress transcript line as it goes, so the cleared
-text still reaches `transcript.txt`. That control is the reason for `ADMIN_PASSWORD`: set it and
-both `/admin` and `/api/clear` require HTTP basic auth with user `admin`; leave it unset and the
-page stays open but the clear button renders greyed out, explaining on hover that `ADMIN_PASSWORD`
-is unset (the API refuses it with 503 regardless). Basic auth over the LAN is the whole
-threat model — it exists so a stranger who stumbles onto the page mid-event can't blank the
-screen, not to withstand a determined attacker.
+Two things the screen does on its own that are worth knowing before you see them mid-event:
+after 10 seconds with nothing arriving the rows roll themselves empty one at a time rather than
+leaving stale text up, and when auto-pause trips the status reads `silence` with a `— silence —`
+marker in the caption stack.
 
-`/admin` is otherwise a metrics dashboard polling `/api/stats` once a second — restarts, xruns,
-STT reconnects, buffer drops, auto-pause count and total paused time, SSE client counts, and
-latency: caption-segment percentiles over a trailing 5-minute window headline the page — since
-every segment reaching the display is already settled text, that figure *is* time-to-first-pixels,
-with no separate interim reading to reconcile it against — alongside a second row for
-viewer-reported publish→paint latency, which a viewer measures at the moment the word leaves its
-paced display queue for the screen and therefore includes the cadence backlog, not just the wire
-hop. Plus a waterfall breaking a segment's latency into upload /
-recognize / assemble phases (with the unmeasured capture leg drawn as a labelled hatched segment)
-and the separately-sampled viewer leg set off by a gap. A `Segments / lines` stat shows
-`segments_total` against `lines_total` — the fragmentation readout: roughly
-1–3 segments per line is healthy, and a ratio climbing well past that means phrases are splitting
-on every hesitation. A status badge at the top reads `ok` /
-`degraded` / `paused` / `closed`: an auto-pause
-shows as "STT Paused," not "Degraded" — it's expected, money-saving behaviour, not a fault — and a
-past blip (a reconnect, a buffer drop) only holds the badge at "Degraded" briefly rather than for
-the rest of the session. Check it during an event to confirm nothing is degrading silently.
+## Options
+
+Everything below is a flag on both `replay` and `live` unless noted. API keys and the admin
+password are environment-only on purpose: a secret on the command line lands in every `ps`
+listing and shell history on the machine.
+
+| | default | |
+|---|---|---|
+| `--engine` | `deepgram` | `deepgram`, `speechmatics`, or `mock` |
+| `--model` | per engine | `nova-3` (Deepgram) / `enhanced` (Speechmatics) |
+| `--language` | per engine | `en-US` (Deepgram) / `en` (Speechmatics) |
+| `--keyterm` | — | proper noun to bias recognition toward; repeatable |
+| `--keyterm-file` | — | one term per line; blank lines and `#` comments ignored |
+| `--auto-pause` / `--no-auto-pause` | on | drop the recognizer connection during silence |
+| `--silence-hold` | `60s` | how long silence must hold before pausing |
+| `--diarize` / `--no-diarize` | on | ask the recognizer who is speaking |
+| `--music-detect` / `--no-music-detect` | on | suppress captions while the recognizer reports music |
+| `--addr` | `:8080` | listen address for the viewer and admin pages |
+| `--mdns-name` | `livecaptions` | advertise `<name>.local`; empty disables |
+| `--logo` | — | image for the viewer's top-right corner (max 2 MiB) |
+| `--transcript-dir` | `./transcripts` | also `$LIVECAPTION_TRANSCRIPT_DIR` |
+| `--no-transcript` | off | disable transcript recording for this session |
+| `--monitor` | off | `replay` only — play the streamed audio over speakers |
+| `--device` | — | `live` only, required — capture device |
+| `--backend` | `pulse` | `live` only — `pulse` or `alsa` |
+| `-v` / `--log-level` | `info` | `debug` also prints the caption stream to stdout |
+| `--no-color` | off | also `$NO_COLOR` |
+
+| env var | |
+|---|---|
+| `DEEPGRAM_API_KEY` / `SPEECHMATICS_API_KEY` | key for the selected `--engine`; only the matching one is read |
+| `ADMIN_PASSWORD` | enables the `/admin` clear-screen control and guards `/admin` with basic auth (user: `admin`) |
+
+### What it does on its own
+
+**Auto-pause.** Silence closes the recognizer connection and audio reopens it, so a quiet room
+doesn't rack up charges. The silence threshold is a compile-time constant (-45 dBFS), not a
+flag — a materially hotter or colder feed needs it moved and a rebuild. Turn the feature off for
+a venue where dead air should keep the connection warm, or raise `--silence-hold` if pauses fire
+during ordinary pauses for breath. See [DESIGN.md §3](DESIGN.md).
+
+**Speakers.** Both engines label the speaker for every word, so a segment spanning a turn is
+split into one caption per speaker rather than credited to whoever started it. A change of
+speaker always breaks the row — two people's words never share a line. On screen it shows as a
+small coloured numbered dot in a left gutter, on the first row of a turn only; the gutter is
+always reserved, so it never appears mid-session and slides painted words sideways. Six colours
+cycle and the number stays authoritative past that. Labels are cluster indices, not identities:
+stable within a connection, renumbered after a reconnect.
+
+**Music.** Speechmatics can flag music in the feed; Deepgram has no equivalent, so the flag does
+nothing there. While music plays captions are suppressed — sung lyrics come back as garble — and
+the status reads `♪ music` so a frozen screen reads as deliberate rather than broken. The open
+transcript line closes at the first note. The detector can be over-sensitive: a loud room or an
+instrument under speech can trip it. Each event is logged with its time and confidence, so if
+it's swallowing speech, run with `--no-music-detect`.
+
+**Profanity.** Filtered on both engines, always, with no flag. Speechmatics drops the word
+entirely — nothing is shown where it was, and surrounding words keep their own timing so the
+line still paces normally. Deepgram masks with asterisks. The word list belongs to the
+recognizer and can't be edited from here; Speechmatics tags profanity for English, Spanish and
+Italian only.
+
+**Speech timing.** A pause of at least 1.5s counts as the speaker actually stopping: it freezes
+the caption row and closes a transcript line. That threshold is a compile-time constant too, not
+a flag. Since every engine publishes only settled results, cadence is governed by the
+recognizer's own finalisation window — see [DESIGN.md §4](DESIGN.md).
+
+## During an event: `/admin`
+
+![The admin dashboard: latency percentiles, a waterfall breaking a segment into upload, recognize and assemble phases, and live counters updating once a second](docs/admin.gif)
+
+A metrics dashboard polling `/api/stats` once a second, plus a mirror of the live captions.
+Check it during an event to confirm nothing is degrading silently.
+
+- **Status badge** — `ok` / `degraded` / `paused` / `closed`. An auto-pause shows as "STT
+  Paused," not "Degraded": it's expected, money-saving behaviour, not a fault. A past blip holds
+  the badge at "Degraded" only briefly rather than for the rest of the session.
+- **Latency** — caption-segment percentiles over a trailing 5-minute window headline the page.
+  Since everything reaching the display is already settled text, that figure *is*
+  time-to-first-pixels. A second row shows viewer-reported publish→paint latency, measured as the
+  word leaves the paced display queue, so it includes the cadence backlog rather than just the
+  wire hop. The waterfall below breaks a segment into upload / recognize / assemble phases, with
+  the unmeasured capture leg drawn as a labelled hatched segment.
+- **Segments / lines** — the fragmentation readout. Roughly 1–3 segments per line is healthy; a
+  ratio climbing well past that means phrases are splitting on every hesitation.
+- **Counters** — restarts, xruns, STT reconnects, buffer drops, auto-pause count and total
+  paused time, SSE client counts.
+
+One operator control: **Clear screen**, which blanks every connected viewer immediately, for
+when something lands on screen that shouldn't stay there. The server closes the in-progress
+transcript line as it goes, so the cleared text still reaches `transcript.txt`.
+
+That control is what `ADMIN_PASSWORD` is for. Set it and both `/admin` and `POST /api/clear`
+require basic auth with user `admin`; leave it unset and the page stays open but the button
+renders greyed out (the API refuses with 503 either way). Basic auth over the LAN is the whole
+threat model: it stops a stranger who wanders onto the page mid-event from blanking the screen,
+not a determined attacker.
+
+`GET /healthz` returns `ok` — useful for a headless box you can't see.
+
+## Transcripts
+
+On by default. Every session writes `./transcripts/<YYYY-MM-DDTHH-MM-SS>/transcript.txt`,
+timestamped and human-readable, with an `[S2]` prefix when the speaker is known. Change the
+location with `--transcript-dir` or `$LIVECAPTION_TRANSCRIPT_DIR`; disable with
+`--no-transcript`.
 
 ## stdout vs stderr
 
-Finalized captions go to stdout; everything else (logs, status line) goes to stderr, so they split
-cleanly:
+Finalized captions go to stdout; logs and the status line go to stderr, so they split cleanly:
 
 ```bash
 livecaption replay recording.mp3 > captions.txt 2> run.log
 ```
 
-At the default log level, stdout carries no captions — watching a session only shows the status
-line on stderr, so the terminal doesn't fill up with caption text. Pass `-v` / `--log-level=debug`
-to get the live stream on stdout (e.g. for the redirect above). Either way, every line is also
-written to `transcripts/<session>/transcript.txt`.
+At the default log level stdout carries no captions, so watching a session shows only the status
+line and the terminal doesn't fill with caption text. Pass `-v` to get the live stream on stdout.
+Either way, every line also reaches `transcript.txt`.
 
 ## Running an event: a short checklist
 
-- **Feed a mono aux/matrix send of the mics, not the main mix.** `-ac 1` will happily downmix
-  music and effects along with speech; this is the single biggest accuracy lever in the project.
-- **Set `--keyterm` for every proper noun** in the event (names, places, in-house terms) — costs
+- **Feed a mono aux/matrix send of the mics, not the main mix.** The pipeline will happily
+  downmix music and effects along with speech. This is the single biggest accuracy lever in the
+  project.
+- **Set `--keyterm` for every proper noun** in the event — names, places, in-house terms. Costs
   nothing, helps a lot. For a long list, put one term per line in a file and pass
-  `--keyterm-file`; `keyterms-esv.txt` is the 1000-term list for reading the ESV. Order it
-  most-likely-spoken first: Speechmatics takes 1000 terms, Deepgram only the first 400, and the cut
-  comes off the end.
-- **Do a `--monitor` dry run beforehand** (on `replay`, with representative audio) to hear and tune
-  perceived delay before you're live.
+  `--keyterm-file`, ordered most-likely-spoken first: Speechmatics takes 1000 terms, Deepgram
+  only the first 400, and the cut comes off the end.
+- **Do a `--monitor` dry run beforehand**, on `replay` with representative audio, to hear and
+  tune perceived delay before you're live.
 - **Check `/admin` shows a clean run** — no restarts, no reconnects, no buffer drops — before
   trusting the feed.
 
 ## Troubleshooting
 
-- **401 on first connect** — check the env var for your engine, `DEEPGRAM_API_KEY` or
-  `SPEECHMATICS_API_KEY`. The run stops immediately rather than retrying, and so
-  does a rejected `--model` / `--language`, which each engine names its own way.
-- **`unknown stt engine`** — only `deepgram`, `speechmatics` and `mock` exist; check `--engine`.
-- **First connect is slow with a big `--keyterm-file`** — Speechmatics builds the dictionary before
-  it acknowledges the session, up to 15 s the first time. It caches identical lists for 24 h, so
-  later connections (including every `--auto-pause` redial) are quick. Don't edit the list between
-  runs on the day for no reason: any change is a new dictionary and a new cold start.
-- **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server (PulseAudio
-  / PipeWire) is running; `alsa` enumeration commonly comes back empty even when ALSA devices work
-  fine, so also try known names like `hw:0,0` or `default` directly with `live --backend alsa`.
-- **Captions lagging** — text lands when the recognizer finalizes a window, so that window is the
-  knob: `endpointing` in `dialURL` for Deepgram, `maxDelay` in `speechmatics.go` for Speechmatics.
-  Watch `Segments / lines` on `/admin`: a ratio climbing well past a few segments per line means
-  phrases are fragmenting, i.e. the window is too aggressive.
-  Check the latency waterfall on `/admin` to see which leg (upload / recognize / assemble) is
-  slow, and see DESIGN.md §4.
-- **First word after a quiet spell is missing/late, or the connection pauses during ordinary
-  pauses for breath** — auto-pause; loosen it with a longer `--silence-hold`, or disable it with
-  `--no-auto-pause`. See "Auto-pause" above.
+- **401 on first connect** — check the env var for your engine. Only the variable matching
+  `--engine` is read, so having the other one set doesn't help. The run stops immediately rather
+  than retrying, and so does a rejected `--model` or `--language`.
+- **`unknown stt engine`** — only `deepgram`, `speechmatics` and `mock` exist.
+- **First connect is slow with a big `--keyterm-file`** — Speechmatics builds the dictionary
+  before acknowledging the session, up to 15 s the first time. It caches identical lists for
+  24 h, so later connections (including every auto-pause redial) are quick. Don't edit the list
+  between runs on the day for no reason: any change is a new dictionary and a new cold start.
+- **No devices listed by `devices`** — confirm `ffmpeg` is on `PATH` and a sound server
+  (PulseAudio / PipeWire) is running. ALSA enumeration commonly comes back empty even when ALSA
+  devices work fine, so also try `hw:0,0` or `default` directly with `live --backend alsa`.
+- **`livecaptions.local` doesn't resolve** — install `avahi-utils` and check `avahi-daemon` is
+  running. The server logs a warning at startup when it can't advertise. The viewer still works
+  at the machine's IP either way.
+- **Captions lagging** — text lands when the recognizer finalizes a window, so that window is
+  the knob, and it's a compile-time constant per engine. Check the latency waterfall on `/admin`
+  to see which leg is slow, watch **Segments / lines** for fragmentation, and see
+  [DESIGN.md §4](DESIGN.md).
+- **The screen empties on its own** — after 10 seconds with no captions the rows decay to blank
+  rather than leaving stale text up. Expected.
+- **First word after a quiet spell is missing or late, or the connection pauses during ordinary
+  pauses for breath** — auto-pause. Loosen it with a longer `--silence-hold`, or disable it with
+  `--no-auto-pause`.
+
+## Development
+
+```bash
+just build     # -> ./bin/livecaption
+just test      # go test ./...
+just lint      # golangci-lint run ./...
+```
+
+The browser-side typesetter has two framework-free test scripts that aren't wired into
+`just test`:
+
+```bash
+node internal/web/caption_pace_test.js
+node internal/web/caption_decay_test.js
+```
+
+`--version` currently always reports `0.1.0`: the version is a build-time `-ldflags` value that
+nothing in the build passes yet.

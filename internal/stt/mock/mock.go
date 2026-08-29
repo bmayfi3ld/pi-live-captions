@@ -17,7 +17,8 @@ import (
 // Engine emits canned phrases paced by the audio it consumes.
 //
 // Everything is driven by media time from the frames, never by wall clock, so
-// output is identical at --speed 1.0 and --speed 10 and reproducible in tests.
+// the same audio produces the same transcripts run after run, whether it
+// arrives at wall-clock rate from replay or as fast as a test can feed it.
 type Engine struct {
 	cfg stt.Config
 	ps  *phraseState

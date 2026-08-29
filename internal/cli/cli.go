@@ -1,8 +1,8 @@
 // Package cli defines the command surface.
 //
 // Subcommands rather than a --source flag, because replay and live take
-// genuinely disjoint options: --speed and --monitor are meaningless for a
-// capture device, and --device is meaningless for a file.
+// genuinely disjoint options: --monitor is meaningless for a capture device,
+// and --device and --backend are meaningless for a file.
 package cli
 
 import (
