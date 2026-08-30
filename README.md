@@ -214,9 +214,9 @@ recognizer's own finalisation window — see [DESIGN.md §4](DESIGN.md).
 A metrics dashboard polling `/api/stats` once a second, plus a mirror of the live captions.
 Check it during an event to confirm nothing is degrading silently.
 
-- **Status badge** — `ok` / `degraded` / `paused` / `closed`. An auto-pause shows as "STT
-  Paused," not "Degraded": it's expected, money-saving behaviour, not a fault. A past blip holds
-  the badge at "Degraded" only briefly rather than for the rest of the session.
+- **Status badge** — **Clean** / **Degraded** / **STT Paused** / **Closed**. An auto-pause shows
+  as "STT Paused," not "Degraded": it's expected, money-saving behaviour, not a fault. A past
+  blip holds the badge at "Degraded" only briefly rather than for the rest of the session.
 - **Latency** — caption-segment percentiles over a trailing 5-minute window headline the page.
   Since everything reaching the display is already settled text, that figure *is*
   time-to-first-pixels. A second row shows viewer-reported publish→paint latency, measured as the
