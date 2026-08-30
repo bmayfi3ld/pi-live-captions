@@ -4,9 +4,8 @@
 
 ![The caption viewer: text arriving a word at a time in a bottom-anchored rolling window, with a coloured numbered dot in the left gutter marking a change of speaker](docs/viewer.gif)
 
-```
-A quick human note: This project was setup to be a solution to provide a speech to text solution using basic but reliable equipment. We wanted something that was not just leaving someones phone randomly plugged in somewhere or trying to make a website work as a critical live event production tool. High end proffesional solutions cover the upper range of the market, but this project aims to be a good middle ground. Real equipment running a local web server with a solid architecture. If any of that sounds good, read on for the AI write-up of the project.
-```
+
+> A quick human note: This project was set up to be a solution to provide a speech to text solution using basic but reliable equipment. We wanted something that was not just leaving someones phone randomly plugged in somewhere or trying to make a website work as a critical live event production tool. High end professional solutions cover the upper range of the market, but this project aims to be a good middle ground. Real equipment running a local web server with a solid architecture. If any of that sounds good, read on for the AI write-up of the project.
 
 Someone who can't follow the person at the front — hard of hearing, sitting at the back, in an
 overflow room, or just up against a bad PA — opens a web page on their phone and reads what's
