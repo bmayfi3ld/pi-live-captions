@@ -29,6 +29,7 @@ import (
 type session struct {
 	src     audio.Source
 	monitor *audio.Monitor
+	audio   *audio.Broadcaster
 	engine  stt.Engine
 	hub     *caption.Hub
 	writer  *caption.Writer
@@ -49,6 +50,8 @@ type buildOpts struct {
 	sourceLabel string // banner value for the source row
 	source      audio.Source
 	monitor     *audio.Monitor
+	audio       *audio.Broadcaster // nil when off or unavailable
+	audioReason string             // why it is off, when the flag asked for it
 	mediaTotal  time.Duration
 	conversion  string
 
@@ -67,6 +70,11 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 	met.SetMediaTotal(o.mediaTotal)
 	if o.monitor != nil {
 		met.MonitorEnabled = true
+	}
+	met.AudioEnabled = o.server.AudioStream
+	met.AudioReason = o.audioReason
+	if o.audio != nil {
+		o.audio.SetCallbacks(met.AudioDrop, met.SetAudioLive)
 	}
 
 	hub := caption.NewHub(met)
@@ -96,7 +104,7 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 	}
 
 	s := &session{
-		src: o.source, monitor: o.monitor, engine: engine,
+		src: o.source, monitor: o.monitor, audio: o.audio, engine: engine,
 		hub: hub, met: met, term: term, log: log,
 		mdnsName: o.server.MDNSName,
 	}
@@ -122,14 +130,20 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 	// Env var rather than a flag: it is a secret, and a flag would put it in
 	// every ps listing and shell history on the machine.
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
-	srv, err := web.NewServer(web.Config{
+	webCfg := web.Config{
 		Addr:          o.server.Addr,
 		Logo:          o.server.Logo,
 		AdminPassword: adminPassword,
 		Hub:           hub,
 		Metrics:       met,
 		Log:           log,
-	})
+	}
+	if o.audio != nil {
+		// Assigned inside the guard: a typed nil in the interface would
+		// register the route and then panic on the first listener.
+		webCfg.Audio = o.audio
+	}
+	srv, err := web.NewServer(webCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +181,25 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 		ui.BannerField{Label: "viewer", Value: base},
 		ui.BannerField{Label: "admin", Value: base + "/admin", Note: adminNote},
 	)
+	fields = append(fields, audioBannerField(o, base))
 	if o.server.MDNSName != "" {
 		fields = append(fields, ui.BannerField{Label: "mdns", Value: o.server.MDNSName + ".local"})
 	}
 	s.bannerFields = fields
 	return s, nil
+}
+
+// audioBannerField reports the audio stream URL, or that there isn't one and
+// why — the degradation has to be visible, not just logged.
+func audioBannerField(o buildOpts, base string) ui.BannerField {
+	switch {
+	case o.audio != nil:
+		return ui.BannerField{Label: "audio", Value: base + "/audio.mp3"}
+	case !o.server.AudioStream:
+		return ui.BannerField{Label: "audio", Value: "disabled", Note: "--no-audio-stream"}
+	default:
+		return ui.BannerField{Label: "audio", Value: "disabled", Note: o.audioReason}
+	}
 }
 
 // run drives the pipeline until the source ends or ctx is cancelled, then
@@ -294,6 +322,9 @@ func (s *session) shutdown() {
 	if s.monitor != nil {
 		_ = s.monitor.Close()
 	}
+	if s.audio != nil {
+		s.audio.Close()
+	}
 	_ = s.src.Close()
 
 	s.mdnsPub.Stop()
@@ -309,6 +340,22 @@ func (s *session) shutdown() {
 	}
 	s.met.SetSTTState(metrics.StateClosed)
 	s.term.Summary(s.met.Snapshot(), s.met.MonitorEnabled)
+}
+
+// newBroadcaster builds the audio fan-out, or reports why there isn't one.
+// The stream is on by default, so an ffmpeg without libmp3lame must degrade
+// to captions-only rather than making every ffmpeg launch fail: captions are
+// the product and must survive anything the audio path does.
+func newBroadcaster(ctx context.Context, enabled bool, log *slog.Logger) (*audio.Broadcaster, string) {
+	if !enabled {
+		return nil, ""
+	}
+	if !audio.HasMP3Encoder(ctx) {
+		reason := "ffmpeg has no libmp3lame encoder"
+		log.Warn("audio stream unavailable; captions unaffected", "reason", reason)
+		return nil, reason
+	}
+	return audio.NewBroadcaster(log), ""
 }
 
 // browserURL turns a listen address into something clickable. ":8080" and

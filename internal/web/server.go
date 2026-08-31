@@ -44,6 +44,16 @@ type Config struct {
 	Hub           *caption.Hub
 	Metrics       *metrics.Metrics
 	Log           *slog.Logger
+	// Audio, when set, is served as a never-ending MP3 body at /audio.mp3.
+	// Declared as an interface here so web keeps no dependency on the audio
+	// package; nil leaves the route unregistered.
+	Audio AudioSource
+}
+
+// AudioSource is the one thing this package needs from the audio broadcaster:
+// a stream of MP3 chunks and a way to stop listening.
+type AudioSource interface {
+	Subscribe() (<-chan []byte, func())
 }
 
 // Server owns the HTTP surface.
@@ -76,6 +86,9 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/time", s.handleTime)
 	mux.HandleFunc("POST /api/viewer-latency", s.handleViewerLatency)
 	mux.Handle("POST /api/clear", s.requireAdmin(http.HandlerFunc(s.handleClear)))
+	if cfg.Audio != nil {
+		mux.HandleFunc("GET /audio.mp3", s.handleAudio)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte("ok"))
 	})
@@ -275,6 +288,60 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ping.C:
 			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
 				return
+			}
+			flusher.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// handleAudio streams the room audio as a never-ending MP3 body, the way
+// internet radio has worked for 25 years — so VLC, mpv, ffplay and curl all
+// open the URL with no client of ours to write.
+//
+// There is deliberately no backlog: a listener joins at the live edge, like a
+// late viewer joining the caption hub. An MP3 decoder resyncs at the next
+// frame header, so a mid-frame join costs ~26 ms of nothing.
+func (s *Server) handleAudio(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	chunks, unsubscribe := s.cfg.Audio.Subscribe()
+	defer unsubscribe()
+
+	h := w.Header()
+	h.Set("Content-Type", "audio/mpeg")
+	h.Set("Cache-Control", "no-cache")
+	// No Content-Length: the body never ends.
+	h.Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	// Transistor and friends probe the URL with HEAD before adding a
+	// station. The body is discarded for HEAD, so streaming it forever just
+	// hangs the probe and the app reports "stream not found".
+	if r.Method == http.MethodHead {
+		return
+	}
+
+	s.cfg.Metrics.AudioListenerJoined()
+	defer s.cfg.Metrics.AudioListenerLeft()
+	s.log.Debug("audio listener connected", "remote", r.RemoteAddr)
+	defer s.log.Debug("audio listener disconnected", "remote", r.RemoteAddr)
+
+	ctx := r.Context()
+	for {
+		select {
+		case chunk, ok := <-chunks:
+			if !ok {
+				return
+			}
+			if _, err := w.Write(chunk); err != nil {
+				return // listener left
 			}
 			flusher.Flush()
 		case <-ctx.Done():

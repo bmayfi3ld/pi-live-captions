@@ -16,6 +16,8 @@ type FileConfig struct {
 	Path    string
 	Log     *slog.Logger
 	OnFrame func(nbytes int, offset time.Duration)
+	// Stream, when set, receives an MP3 encode off a second ffmpeg output.
+	Stream *Broadcaster
 }
 
 // FileSource decodes a file with ffmpeg and releases the PCM at wall-clock
@@ -77,14 +79,23 @@ func (s *FileSource) Start(ctx context.Context) (<-chan Frame, error) {
 }
 
 func (s *FileSource) playOnce(ctx context.Context, out chan<- Frame) error {
+	args := []string{
+		"-hide_banner", "-loglevel", "error",
+		"-i", s.cfg.Path,
+		"-ac", "1", "-ar", "16000",
+		"-f", "s16le", "-",
+	}
+	// ffmpeg decodes no faster than its slowest consumer: pipe:3 is always
+	// drained while stdout is paced by the deadline loop below, so the MP3
+	// stays in step, at most one pipe buffer ahead.
+	aux := s.cfg.Stream != nil
+	if aux {
+		args = append(args, "-f", "mp3", "-b:a", "128k", "-ar", "44100", "pipe:3")
+	}
 	p, err := startFFmpeg(ctx, procOpts{
-		args: []string{
-			"-hide_banner", "-loglevel", "error",
-			"-i", s.cfg.Path,
-			"-ac", "1", "-ar", "16000",
-			"-f", "s16le", "-",
-		},
-		log: s.cfg.Log,
+		args:     args,
+		extraOut: aux,
+		log:      s.cfg.Log,
 	})
 	if err != nil {
 		return err
@@ -93,6 +104,10 @@ func (s *FileSource) playOnce(ctx context.Context, out chan<- Frame) error {
 	s.proc = p
 	s.mu.Unlock()
 	defer p.Close()
+
+	if aux {
+		go s.cfg.Stream.Run(ctx, p.aux)
+	}
 
 	chunkBytes := PipelineFormat.BytesFor(chunkSize)
 	start := time.Now()

@@ -14,7 +14,9 @@ collect at the door.
 
 livecaption takes a mono feed from your soundboard, streams it to a speech-to-text service, and
 pushes the words to every browser on the network. The same URL works on a phone, on a projector
-at the front of the room, and as an OBS browser source for a stream.
+at the front of the room, and as an OBS browser source for a stream. The same server also
+streams the room audio at `/audio.mp3`, so an operator anywhere on the network can hear the feed
+the recognizer is working from.
 
 It needs one Linux machine on the network, `ffmpeg`, and an API key from Deepgram or
 Speechmatics. Design and rationale are in [DESIGN.md](DESIGN.md).
@@ -143,6 +145,35 @@ after 10 seconds with nothing arriving the rows roll themselves empty one at a t
 leaving stale text up, and when auto-pause trips the status reads `silence` with a `— silence —`
 marker in the caption stack.
 
+## Listening to the room audio
+
+The same server also streams the audio it is captioning, at
+<http://livecaptions.local:8080/audio.mp3> — full-quality MP3 off the source feed, not the
+16 kHz mono downmix the recognizer gets. It is a URL, not a page: open it in anything that plays
+internet radio, from an ops laptop at the back of the hall or an overflow room.
+
+```bash
+# Recommended: rides out a server restart on its own.
+mpv --stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_on_network_error=1,reconnect_delay_max=5 \
+    http://livecaptions.local:8080/audio.mp3
+
+ffplay -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 \
+    http://livecaptions.local:8080/audio.mp3
+
+vlc http://livecaptions.local:8080/audio.mp3        # add --repeat for auto-reopen
+curl http://livecaptions.local:8080/audio.mp3 > room.mp3   # ad-hoc recording
+```
+
+A capture restart is a gap in the bytes rather than an end of stream, so playback survives it
+with no client involvement. A full server restart ends the connection, which is what the
+reconnect flags above are for — bare VLC and a plain browser `<audio>` element stop dead and
+need a human to press play again.
+
+There is no backlog and no seeking: a listener joining late starts at the live edge, the same
+stance the caption viewer takes. Replaying stale audio into a live room would be wrong.
+
+Turn the stream off with `--no-audio-stream`.
+
 ## Options
 
 Everything below is a flag on both `replay` and `live` unless noted. API keys and the admin
@@ -161,6 +192,7 @@ listing and shell history on the machine.
 | `--diarize` / `--no-diarize` | on | ask the recognizer who is speaking |
 | `--music-detect` / `--no-music-detect` | on | suppress captions while the recognizer reports music |
 | `--addr` | `:8080` | listen address for the viewer and admin pages |
+| `--audio-stream` / `--no-audio-stream` | on | serve the source audio at `/audio.mp3` |
 | `--mdns-name` | `livecaptions` | advertise `<name>.local`; empty disables |
 | `--logo` | — | image for the viewer's top-right corner (max 2 MiB) |
 | `--transcript-dir` | `./transcripts` | also `$LIVECAPTION_TRANSCRIPT_DIR` |
@@ -198,6 +230,13 @@ the status reads `♪ music` so a frozen screen reads as deliberate rather than 
 transcript line closes at the first note. The detector can be over-sensitive: a loud room or an
 instrument under speech can trip it. Each event is logged with its time and confidence, so if
 it's swallowing speech, run with `--no-music-detect`.
+
+**Audio streaming.** The room audio is served at `/audio.mp3` alongside the captions, encoded as
+a second output of the same ffmpeg that feeds the recognizer — so there is no second capture and
+no drift. If it can't run (an ffmpeg built without `libmp3lame`, say) the captions carry on
+untouched: the startup banner reads `audio  disabled` with the reason, the log carries a
+warning, and `/admin` shows the Audio stream card as `failed`. A listener that stops reading is
+dropped rather than allowed to stall capture, which is counted on the same card.
 
 **Profanity.** Filtered on both engines, always, with no flag. Speechmatics drops the word
 entirely — nothing is shown where it was, and surrounding words keep their own timing so the

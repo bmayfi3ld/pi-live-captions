@@ -73,9 +73,10 @@ type ServerFlags struct {
 	// The admin password has no flag of its own on purpose (see Parse's
 	// description); it is named here so it appears in the help of the
 	// subcommands people actually run, not just the bare root help.
-	Addr     string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages. Set $ADMIN_PASSWORD to enable the admin clear-screen control and require basic auth (user: admin) for /admin."`
-	Logo     string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
-	MDNSName string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
+	Addr        string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages. Set $ADMIN_PASSWORD to enable the admin clear-screen control and require basic auth (user: admin) for /admin."`
+	Logo        string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
+	AudioStream bool   `name:"audio-stream" default:"true" negatable:"" group:"Server" help:"Serve the source audio at /audio.mp3 for VLC/mpv alongside the captions."`
+	MDNSName    string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
 }
 
 // OutputFlags configure transcript recording, which is on by default.

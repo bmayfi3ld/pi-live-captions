@@ -15,6 +15,10 @@ type DeviceConfig struct {
 	Device  string // pulse sink/source name, or ALSA "hw:2,0"
 	Backend string // "pulse" or "alsa"
 	Log     *slog.Logger
+	// Stream, when set, receives an MP3 encode of the captured audio off a
+	// second ffmpeg output. Nil disables the second output entirely, leaving
+	// the args byte-identical to a capture-only run.
+	Stream *Broadcaster
 
 	OnFrame   func(nbytes int, offset time.Duration)
 	OnXrun    func()
@@ -111,9 +115,17 @@ func (s *DeviceSource) Start(ctx context.Context) (<-chan Frame, error) {
 func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeOnly bool) error {
 	args := []string{"-hide_banner", "-loglevel", "error", "-f", s.cfg.Backend, "-i", s.cfg.Device}
 	args = append(args, "-ac", "1", "-ar", "16000", "-f", "s16le", "-")
+	// Second output off the same decode: full-quality MP3 for listeners.
+	// Channels stay as the source's; -ar 44100 is a guard, since libmp3lame
+	// rejects odd rates.
+	aux := s.cfg.Stream != nil && !probeOnly
+	if aux {
+		args = append(args, "-f", "mp3", "-b:a", "128k", "-ar", "44100", "pipe:3")
+	}
 
 	p, err := startFFmpeg(ctx, procOpts{
 		args:     args,
+		extraOut: aux,
 		log:      s.cfg.Log,
 		onXrun:   s.cfg.OnXrun,
 		onStderr: s.cfg.OnStderr,
@@ -132,6 +144,12 @@ func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeO
 		return s.probe(ctx, p, buf)
 	}
 	defer p.Close()
+
+	// One Run per ffmpeg lifetime: a capture restart ends this Run and the
+	// next one picks up, while listeners' HTTP connections outlive both.
+	if aux {
+		go s.cfg.Stream.Run(ctx, p.aux)
+	}
 
 	for {
 		read, err := io.ReadFull(p.stdout, buf)

@@ -431,6 +431,14 @@
     <div class="stat-row"><span class="k">Frames dropped</span><span class="v num" id="mon-dropped">—</span></div>
   </div>
 
+  <div class="card" id="card-audio">
+    <h2><span class="eyebrow">Audio stream</span></h2>
+    <div class="stat-row"><span class="k">State</span><span class="v num" id="aud-state">—</span></div>
+    <div class="stat-row"><span class="k">Listeners</span><span class="v num" id="aud-listeners">—</span></div>
+    <div class="stat-row"><span class="k">Chunks dropped</span><span class="v num" id="aud-dropped">—</span></div>
+    <div class="diag err" id="aud-reason" style="display:none"></div>
+  </div>
+
   <div class="card" id="card-stt">
     <h2><span class="eyebrow">STT</span></h2>
     <div class="stat-row"><span class="k">Engine</span><span class="v num" id="stt-engine">—</span></div>
@@ -802,6 +810,21 @@
     }
     setText("mon-alive", mon.enabled ? (mon.alive ? "playing" : "stopped") : "disabled");
     setChip("mon-dropped", mon.frames_dropped_total, true);
+
+    // ---- audio stream ----
+    var aud = s.audio || {};
+    var audCard = document.getElementById("card-audio");
+    if (aud.enabled) {
+      audCard.classList.remove("dim");
+    } else {
+      audCard.classList.add("dim");
+    }
+    // Three states, so a glance answers "is audio up?": enabled and live is
+    // streaming, enabled and not live is a failure with its reason in red.
+    setText("aud-state", !aud.enabled ? "disabled" : (aud.live ? "streaming" : "failed"));
+    setText("aud-listeners", fmtInt(aud.listeners) + " (" + fmtInt(aud.listeners_total) + " total)");
+    setChip("aud-dropped", aud.chunks_dropped_total, true);
+    setDiag("aud-reason", aud.enabled && !aud.live ? (aud.reason || "") : "");
 
     // ---- stt ----
     setText("stt-engine", stt.engine || "—");

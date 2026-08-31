@@ -876,3 +876,84 @@ func TestAdminPageEnablesClearOnlyWithPassword(t *testing.T) {
 		t.Error("clear control not enabled despite a configured password (marker drifted?)")
 	}
 }
+
+// fakeAudio stands in for the audio broadcaster, so the web tests stay free
+// of ffmpeg.
+type fakeAudio struct{ ch chan []byte }
+
+func (f *fakeAudio) Subscribe() (<-chan []byte, func()) { return f.ch, func() {} }
+
+// TestAudioRouteAbsentWhenUnconfigured: --no-audio-stream (or a missing
+// encoder) must leave no route behind, not an endpoint that hangs forever.
+func TestAudioRouteAbsentWhenUnconfigured(t *testing.T) {
+	base, _, _ := startTestServer(t, newTestConfig())
+	resp, err := http.Get(base + "/audio.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestAudioStreamsChunks is what VLC and mpv see: an unbounded audio/mpeg
+// body that starts flowing before the source has finished.
+func TestAudioStreamsChunks(t *testing.T) {
+	cfg := newTestConfig()
+	fa := &fakeAudio{ch: make(chan []byte, 4)}
+	cfg.Audio = fa
+	base, _, m := startTestServer(t, cfg)
+
+	resp, err := http.Get(base + "/audio.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "audio/mpeg" {
+		t.Errorf("Content-Type = %q, want audio/mpeg", ct)
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		t.Errorf("Content-Length = %q, want none: the body never ends", cl)
+	}
+
+	fa.ch <- []byte("ID3chunk")
+	buf := make([]byte, 8)
+	if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(buf) != "ID3chunk" {
+		t.Errorf("body = %q, want %q", buf, "ID3chunk")
+	}
+	if got := m.Snapshot().Audio.Listeners; got != 1 {
+		t.Errorf("listeners = %d, want 1", got)
+	}
+}
+
+// A HEAD probe (Transistor does one before adding a station) must return
+// instead of streaming the endless body forever.
+func TestAudioHeadReturns(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Audio = &fakeAudio{ch: make(chan []byte, 4)}
+	base, _, _ := startTestServer(t, cfg)
+
+	done := make(chan *http.Response, 1)
+	go func() {
+		resp, err := http.Head(base + "/audio.mp3")
+		if err == nil {
+			done <- resp
+		}
+	}()
+	select {
+	case resp := <-done:
+		defer resp.Body.Close()
+		if got := resp.Header.Get("Content-Type"); got != "audio/mpeg" {
+			t.Fatalf("content-type = %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("HEAD /audio.mp3 did not return")
+	}
+}

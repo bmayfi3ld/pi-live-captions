@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -24,6 +25,10 @@ type proc struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
 	stdin  io.WriteCloser
+	// aux is the read end of fd 3, used for the MP3 stream when the caller
+	// asked ffmpeg for a second output.
+	aux  io.ReadCloser
+	auxW *os.File
 
 	mu         sync.Mutex
 	lastStderr string
@@ -36,9 +41,12 @@ type proc struct {
 type procOpts struct {
 	args      []string
 	wantStdin bool
-	log       *slog.Logger
-	onXrun    func()
-	onStderr  func(string)
+	// extraOut wires a pipe onto the child's fd 3, which ffmpeg addresses as
+	// "pipe:3" — a second output off the same decode, no second capture.
+	extraOut bool
+	log      *slog.Logger
+	onXrun   func()
+	onStderr func(string)
 }
 
 // startFFmpeg launches ffmpeg with the given args and begins draining stderr.
@@ -66,8 +74,21 @@ func startFFmpeg(ctx context.Context, o procOpts) (*proc, error) {
 		p.stdin = stdin
 	}
 
+	if o.extraOut {
+		pr, pw, err := os.Pipe()
+		if err != nil {
+			return nil, fmt.Errorf("ffmpeg aux pipe: %w", err)
+		}
+		cmd.ExtraFiles = []*os.File{pw} // fd 3 in the child
+		p.aux, p.auxW = pr, pw
+	}
+
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start ffmpeg (is it installed and on PATH?): %w", err)
+	}
+	if p.auxW != nil {
+		// Our copy of the write end must go, or the reader never sees EOF.
+		_ = p.auxW.Close()
 	}
 	if o.log != nil {
 		o.log.Debug("ffmpeg started", "args", strings.Join(o.args, " "), "pid", cmd.Process.Pid)
@@ -133,7 +154,15 @@ func (p *proc) Close() error {
 	// it. Draining and discarding here unblocks that write so it can exit
 	// on its own, which is almost always well before WaitDelay.
 	go io.Copy(io.Discard, p.stdout)
+	if p.aux != nil {
+		go io.Copy(io.Discard, p.aux)
+	}
 	err := p.cmd.Wait()
+	if p.aux != nil {
+		// The drain above has hit EOF by now; close the read end so a live
+		// capture that restarts ffmpeg every few seconds cannot leak fds.
+		_ = p.aux.Close()
+	}
 	if err != nil && isExpectedExit(err) {
 		return nil
 	}
@@ -170,6 +199,18 @@ func trimDepth(s string) string {
 		return s[:i]
 	}
 	return s
+}
+
+// HasMP3Encoder reports whether this ffmpeg was built with libmp3lame. The
+// audio stream is on by default, so a build without it must degrade to "no
+// second output" rather than making every ffmpeg launch fail and take the
+// captions down with it.
+func HasMP3Encoder(ctx context.Context) bool {
+	out, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-encoders").Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "libmp3lame")
 }
 
 func probeFile(ctx context.Context, path string) (probeResult, error) {

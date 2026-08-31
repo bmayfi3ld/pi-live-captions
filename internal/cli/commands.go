@@ -22,7 +22,8 @@ func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger
 		return err
 	}
 
-	src, err := audio.NewFileSource(ctx, audio.FileConfig{Path: c.File, Log: log})
+	bc, audioReason := newBroadcaster(ctx, c.AudioStream, log)
+	src, err := audio.NewFileSource(ctx, audio.FileConfig{Path: c.File, Log: log, Stream: bc})
 	if err != nil {
 		return err
 	}
@@ -37,6 +38,8 @@ func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger
 		sourceLabel: src.Describe(),
 		source:      src,
 		monitor:     mon,
+		audio:       bc,
+		audioReason: audioReason,
 		mediaTotal:  src.MediaDuration(),
 		conversion:  src.ConversionDescription(),
 		stt:         c.STTFlags,
@@ -79,16 +82,20 @@ func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger) 
 			"backend", c.Backend)
 	}
 
+	bc, audioReason := newBroadcaster(ctx, c.AudioStream, log)
 	src := audio.NewDeviceSource(audio.DeviceConfig{
 		Device:  c.Device,
 		Backend: c.Backend,
 		Log:     log,
+		Stream:  bc,
 	})
 
 	o := buildOpts{
 		kind:        "live",
 		sourceLabel: src.Describe(),
 		source:      src,
+		audio:       bc,
+		audioReason: audioReason,
 		conversion:  "device -> " + audio.PipelineFormat.String(),
 		stt:         c.STTFlags,
 		server:      c.ServerFlags,

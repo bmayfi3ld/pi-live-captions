@@ -67,6 +67,14 @@ type Metrics struct {
 	monitorDropped atomic.Int64
 	monitorAlive   atomic.Bool
 
+	// Audio stream (/audio.mp3).
+	AudioEnabled        bool   // the flag; false under --no-audio-stream
+	AudioReason         string // why it is degraded, "" when healthy
+	audioLive           atomic.Bool
+	audioListeners      atomic.Int64
+	audioListenersTotal atomic.Int64
+	audioDropped        atomic.Int64
+
 	// STT.
 	Engine string
 	// sttStateHook is set once at startup, before any goroutine that could
@@ -241,6 +249,14 @@ func (m *Metrics) FFmpegRestart()         { m.degrade(&m.ffmpegRestarts) }
 func (m *Metrics) Xrun()                  { m.degrade(&m.xruns) }
 func (m *Metrics) MonitorDrop()           { m.degrade(&m.monitorDropped) }
 func (m *Metrics) SetMonitorAlive(v bool) { m.monitorAlive.Store(v) }
+
+func (m *Metrics) AudioDrop()          { m.degrade(&m.audioDropped) }
+func (m *Metrics) SetAudioLive(v bool) { m.audioLive.Store(v) }
+func (m *Metrics) AudioListenerJoined() {
+	m.audioListeners.Add(1)
+	m.audioListenersTotal.Add(1)
+}
+func (m *Metrics) AudioListenerLeft() { m.audioListeners.Add(-1) }
 
 func (m *Metrics) SetLastStderr(s string) {
 	m.mu.Lock()
@@ -430,6 +446,15 @@ type Snapshot struct {
 		FramesDropped int64 `json:"frames_dropped_total"`
 	} `json:"monitor"`
 
+	Audio struct {
+		Enabled        bool   `json:"enabled"`
+		Live           bool   `json:"live"`
+		Reason         string `json:"reason"`
+		Listeners      int64  `json:"listeners"`
+		ListenersTotal int64  `json:"listeners_total"`
+		ChunksDropped  int64  `json:"chunks_dropped_total"`
+	} `json:"audio"`
+
 	STT struct {
 		Engine       string  `json:"engine"`
 		State        string  `json:"state"`
@@ -536,6 +561,13 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.Monitor.Enabled = m.MonitorEnabled
 	s.Monitor.Alive = m.monitorAlive.Load()
 	s.Monitor.FramesDropped = m.monitorDropped.Load()
+
+	s.Audio.Enabled = m.AudioEnabled
+	s.Audio.Live = m.audioLive.Load()
+	s.Audio.Reason = m.AudioReason
+	s.Audio.Listeners = m.audioListeners.Load()
+	s.Audio.ListenersTotal = m.audioListenersTotal.Load()
+	s.Audio.ChunksDropped = m.audioDropped.Load()
 
 	s.STT.Engine = m.Engine
 	s.STT.State = ConnState(m.sttState.Load()).String()
