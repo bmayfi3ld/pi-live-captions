@@ -1,0 +1,44 @@
+Package: livecaption
+Version: 0.2.0+1
+Architecture: arm64
+Maintainer: bmayfi3ld <bmayfi3ld@users.noreply.github.com>
+Depends: ffmpeg, avahi-daemon, avahi-utils, adduser, systemd
+Recommends: comitup
+Suggests: jq
+Filename: ./livecaption_0.2.0+1_arm64.deb
+Size: 3024822
+MD5sum: c44db670b463a326aa3a028be98b6206
+SHA1: e91162e48f6345dcd0f83ad3713afdd12df7aa8e
+SHA256: 9ac34ccb997786f1a38696d7b406dab27920a2f98ba24a77340ad77df8e580de
+Section: sound
+Priority: optional
+Homepage: https://github.com/bmayfi3ld/pi-live-captions
+Description: Live captions from a soundboard feed to every screen in the room
+ Streams audio from a capture device to a speech-to-text service and serves
+ the resulting captions as a web page on the local network, advertised over
+ mDNS so viewers can reach it by name with no app to install.
+ .
+ Installed as a system service configured from /etc/default/livecaption.
+
+Package: livecaption
+Version: 0.2.0+1
+Architecture: amd64
+Maintainer: bmayfi3ld <bmayfi3ld@users.noreply.github.com>
+Depends: ffmpeg, avahi-daemon, avahi-utils, adduser, systemd
+Recommends: comitup
+Suggests: jq
+Filename: ./livecaption_0.2.0+1_amd64.deb
+Size: 3400174
+MD5sum: 884d966673afa4707dd968b6960f472c
+SHA1: cdc777153b9d2a51b4a5f561374ab96cad83560c
+SHA256: aca052c864a5bc2bb127b35ea2e08b1146bbcf15f2b6f0ea7304452cc357367d
+Section: sound
+Priority: optional
+Homepage: https://github.com/bmayfi3ld/pi-live-captions
+Description: Live captions from a soundboard feed to every screen in the room
+ Streams audio from a capture device to a speech-to-text service and serves
+ the resulting captions as a web page on the local network, advertised over
+ mDNS so viewers can reach it by name with no app to install.
+ .
+ Installed as a system service configured from /etc/default/livecaption.
+
