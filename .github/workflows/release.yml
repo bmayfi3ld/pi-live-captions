@@ -17,7 +17,7 @@ jobs:
       release: ${{ steps.check.outputs.release }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Tags are how the last released version is known; a shallow clone
           # has none, which would make every push look like a release.
@@ -44,8 +44,8 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -58,7 +58,7 @@ jobs:
           MAINTAINER: ${{ github.repository_owner }} <${{ github.repository_owner }}@users.noreply.github.com>
           REPO: ${{ github.repository }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: deb-${{ matrix.arch }}
           path: dist/*.deb
@@ -69,11 +69,11 @@ jobs:
     env:
       VERSION: ${{ needs.gate.outputs.version }}+${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
