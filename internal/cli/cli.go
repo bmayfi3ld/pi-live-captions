@@ -7,10 +7,37 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/kong"
 )
+
+// dropEmptyEnvars unsets LIVECAPTION_* variables that are set but empty, so
+// they read as absent rather than as a deliberate empty value.
+//
+// The service is configured from a systemd EnvironmentFile, where leaving a
+// commented-out setting half-edited (LIVECAPTION_LOGO=) is easy and the
+// failure is otherwise baffling: kong resolves "" against type:"existingfile",
+// which lands on the working directory and reports that the logo "exists but
+// is a directory".
+//
+// LIVECAPTION_MDNS_NAME is the one exception: an empty name is how the mDNS
+// advertisement is deliberately turned off, so silently ignoring it would
+// leave livecaptions.local published by a box meant to be invisible.
+func dropEmptyEnvars() {
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		if name == "LIVECAPTION_MDNS_NAME" {
+			continue
+		}
+		if value == "" && strings.HasPrefix(name, "LIVECAPTION_") {
+			// Only fails on a malformed name, which os.Environ cannot produce.
+			_ = os.Unsetenv(name)
+		}
+	}
+}
 
 // Version is set at build time via -ldflags.
 var Version = "0.1.0"
@@ -26,7 +53,10 @@ type CLI struct {
 
 // Globals apply to every command.
 type Globals struct {
-	Version  kong.VersionFlag `help:"Print version and exit."`
+	// env:"-" opts out of DefaultEnvars: a stray LIVECAPTION_VERSION in the
+	// environment would otherwise make the service print its version and exit
+	// instead of starting.
+	Version  kong.VersionFlag `env:"-" help:"Print version and exit."`
 	LogLevel string           `enum:"debug,info,warn,error" default:"info" group:"Logging" help:"Diagnostic verbosity. debug also prints the live caption stream to stdout."`
 	Verbose  bool             `short:"v" group:"Logging" help:"Shorthand for --log-level=debug, which also shows live captions on stdout."`
 	NoColor  bool             `env:"NO_COLOR" group:"Logging" help:"Disable coloured output."`
@@ -110,6 +140,8 @@ type DevicesCmd struct{}
 
 // Parse builds the kong context.
 func Parse(args []string) (*kong.Context, *CLI, error) {
+	dropEmptyEnvars()
+
 	var cli CLI
 	parser, err := kong.New(&cli,
 		kong.Name("livecaption"),
@@ -126,6 +158,12 @@ func Parse(args []string) (*kong.Context, *CLI, error) {
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true, FlagsLast: true}),
 		kong.Vars{"version": Version},
+		// Every flag also reads LIVECAPTION_<FLAG>, so a deployed unit can be
+		// configured entirely from an EnvironmentFile with no arguments.
+		// Flags carrying an explicit env tag (NO_COLOR) keep it, and the
+		// no-flag secrets above are untouched: they are kong:"-", so kong
+		// never sees them.
+		kong.DefaultEnvars("LIVECAPTION"),
 	)
 	if err != nil {
 		return nil, nil, err

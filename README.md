@@ -30,14 +30,21 @@ the soundboard's USB output, running headless, advertising `livecaptions.local` 
 The whole design points at it, but none of it has been proven on the hardware.
 
 Nothing in the code is architecture-specific — it's pure Go plus `ffmpeg`, no CGO — so this is
-*untested*, not known-broken. What specifically has not been checked on a Pi:
-
-- USB audio capture through ALSA/PulseAudio on Pi hardware
-- CPU headroom for continuous `ffmpeg` resampling alongside a WebSocket upload
-- Long unattended runs: thermals, USB dropouts, wifi
-- avahi/mDNS under Raspberry Pi OS
+*untested*, not known-broken. The specific list of what has not been checked on real appliance
+hardware lives with the setup instructions, in
+[Known unknowns](deploy/README.md#known-unknowns), so there is one place it gets ticked off.
 
 Also unverified anywhere: multi-hour sessions, and more than a handful of simultaneous viewers.
+
+## Deploying to a box
+
+There is a Debian package and an apt repository, so setting up an appliance is
+`apt install livecaption` plus editing two config files. The full runbook — OS install, wifi
+provisioning with comitup, audio device selection, logo, the systemd service, and the upgrade
+path — is **[deploy/README.md](deploy/README.md)**.
+
+The primary target is a Chromebox CN60 (amd64); the Pi (arm64) is packaged and documented but
+still unproven.
 
 ## Try it in two minutes
 
@@ -179,6 +186,12 @@ Turn the stream off with `--no-audio-stream`.
 Everything below is a flag on both `replay` and `live` unless noted. API keys and the admin
 password are environment-only on purpose: a secret on the command line lands in every `ps`
 listing and shell history on the machine.
+
+Every flag can also be set as an environment variable — uppercase the flag name and prefix it
+with `LIVECAPTION_`, so `--mdns-name` is `LIVECAPTION_MDNS_NAME`. That is how the deployed
+service is configured: the systemd unit passes no arguments at all and reads everything from
+`/etc/default/livecaption`. A variable that is set but empty counts as unset. (`--no-color`
+keeps the conventional unprefixed `NO_COLOR`.)
 
 | | default | |
 |---|---|---|
@@ -357,5 +370,7 @@ node internal/web/caption_pace_test.js
 node internal/web/caption_decay_test.js
 ```
 
-`--version` currently always reports `0.1.0`: the version is a build-time `-ldflags` value that
-nothing in the build passes yet.
+The version reported by `--version` comes from the first `## X.Y.Z` heading in `CHANGELOG.md`,
+injected at build time. `just build` appends `+dev`; released packages append the build number
+(`0.2.0+42`). A plain `go build` with no `-ldflags` falls back to the literal in
+`internal/cli/cli.go`.

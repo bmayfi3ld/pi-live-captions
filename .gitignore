@@ -8,3 +8,5 @@ transcripts/*
 bin/*
 # Keyterm lists are per-event material, not code: they get edited on the day.
 keyterms-*.txt
+# Built packages.
+dist/

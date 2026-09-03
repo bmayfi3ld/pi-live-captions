@@ -1,0 +1,48 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+configure)
+	# --system: no login, no password ageing, uid from the system range.
+	if ! getent passwd livecaption >/dev/null; then
+		adduser --system --group --no-create-home \
+			--home /var/lib/livecaption \
+			--gecos "livecaption service" livecaption
+	fi
+	# /dev/snd is group-owned by audio; without this the capture device is
+	# unreadable and ffmpeg fails at startup.
+	if getent group audio >/dev/null; then
+		usermod -aG audio livecaption
+	fi
+
+	install -d -m 0755 /etc/livecaption
+	# Never clobber configured secrets on upgrade.
+	if [ ! -e /etc/livecaption/secrets.env ]; then
+		install -m 0640 -o root -g livecaption \
+			/usr/share/livecaption/secrets.env.example \
+			/etc/livecaption/secrets.env
+	fi
+
+	systemctl daemon-reload || true
+	# Enabled but not started: it cannot work until an audio device and an API
+	# key are configured, and a failed start here would look like a bad package.
+	systemctl enable livecaption.service >/dev/null 2>&1 || true
+
+	if [ -z "$2" ]; then
+		cat <<'MSG'
+
+livecaption is installed but not started. Next steps:
+
+  1. sudo -u livecaption livecaption devices     # find the capture device
+  2. sudoedit /etc/default/livecaption           # set LIVECAPTION_DEVICE
+  3. sudoedit /etc/livecaption/secrets.env       # set DEEPGRAM_API_KEY
+  4. sudo systemctl start livecaption
+
+Full runbook: /usr/share/doc/livecaption/README.md
+
+MSG
+	fi
+	;;
+esac
+
+exit 0

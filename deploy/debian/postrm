@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+purge)
+	rm -f /etc/livecaption/secrets.env
+	rmdir /etc/livecaption 2>/dev/null || true
+	# Transcripts go too, but only on purge. A plain remove (or a version
+	# rollback, which is a remove plus an install) must not destroy the
+	# recordings of events that already happened.
+	rm -rf /var/lib/livecaption
+	if getent passwd livecaption >/dev/null; then
+		deluser --system livecaption >/dev/null 2>&1 || true
+	fi
+	;;
+esac
+
+case "$1" in
+remove|purge)
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	;;
+esac
+
+exit 0

@@ -260,3 +260,85 @@ func TestBrowserURL(t *testing.T) {
 		}
 	}
 }
+
+// TestFlagsReadEnvVars pins the LIVECAPTION_* names the deployed systemd unit
+// configures the service with. It takes no arguments beyond the subcommand, so
+// a kong upgrade that changed DefaultEnvars' naming would silently leave every
+// box running on defaults; this fails instead.
+func TestFlagsReadEnvVars(t *testing.T) {
+	t.Setenv("LIVECAPTION_DEVICE", "plughw:CARD=Device,DEV=0")
+	t.Setenv("LIVECAPTION_ADDR", ":80")
+	t.Setenv("LIVECAPTION_MDNS_NAME", "captions")
+	t.Setenv("LIVECAPTION_BACKEND", "alsa")
+	t.Setenv("LIVECAPTION_AUDIO_STREAM", "false")
+
+	_, c, err := Parse([]string{"live"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Live.Device != "plughw:CARD=Device,DEV=0" {
+		t.Errorf("Device = %q, want it from LIVECAPTION_DEVICE", c.Live.Device)
+	}
+	if c.Live.Backend != "alsa" {
+		t.Errorf("Backend = %q, want alsa", c.Live.Backend)
+	}
+	if c.Live.Addr != ":80" {
+		t.Errorf("Addr = %q, want :80", c.Live.Addr)
+	}
+	if c.Live.MDNSName != "captions" {
+		t.Errorf("MDNSName = %q, want captions", c.Live.MDNSName)
+	}
+	if c.Live.AudioStream {
+		t.Error("AudioStream = true, want LIVECAPTION_AUDIO_STREAM=false to disable it")
+	}
+}
+
+// TestNoColorKeepsItsUnprefixedName guards the one flag with an explicit env
+// tag: DefaultEnvars must not rename NO_COLOR, which is a cross-tool
+// convention rather than ours to prefix.
+func TestNoColorKeepsItsUnprefixedName(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("LIVECAPTION_DEVICE", "default")
+
+	_, c, err := Parse([]string{"live"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !c.NoColor {
+		t.Error("NO_COLOR did not disable colour")
+	}
+}
+
+// TestEmptySettingIsIgnored covers the half-edited EnvironmentFile line
+// (LIVECAPTION_LOGO= with nothing after it). Without dropEmptyEnvars kong
+// resolves "" against existingfile, hits the working directory, and refuses to
+// start with "exists but is a directory".
+func TestEmptySettingIsIgnored(t *testing.T) {
+	t.Setenv("LIVECAPTION_DEVICE", "default")
+	t.Setenv("LIVECAPTION_LOGO", "")
+	t.Setenv("LIVECAPTION_KEYTERM_FILE", "")
+
+	_, c, err := Parse([]string{"live"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Live.Logo != "" || c.Live.KeytermFile != "" {
+		t.Errorf("Logo = %q, KeytermFile = %q, want both empty", c.Live.Logo, c.Live.KeytermFile)
+	}
+}
+
+// TestEmptyMDNSNameDisablesIt is the exception to TestEmptySettingIsIgnored:
+// an empty name is the documented way to switch the advertisement off, so it
+// must not be swallowed as "unset" and fall back to the default.
+func TestEmptyMDNSNameDisablesIt(t *testing.T) {
+	t.Setenv("LIVECAPTION_DEVICE", "default")
+	t.Setenv("LIVECAPTION_MDNS_NAME", "")
+
+	_, c, err := Parse([]string{"live"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if c.Live.MDNSName != "" {
+		t.Errorf("MDNSName = %q, want empty to disable the advertisement", c.Live.MDNSName)
+	}
+}

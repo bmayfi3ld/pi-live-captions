@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+remove|deconfigure)
+	systemctl stop livecaption.service >/dev/null 2>&1 || true
+	systemctl disable livecaption.service >/dev/null 2>&1 || true
+	;;
+esac
+
+exit 0

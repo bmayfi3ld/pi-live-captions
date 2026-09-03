@@ -1,0 +1,39 @@
+[Unit]
+Description=livecaption
+Documentation=file:///usr/share/doc/livecaption/README.md
+# sound.target waits for the USB capture device; avahi must be up before the
+# server tries to publish livecaptions.local.
+After=network-online.target sound.target avahi-daemon.service
+Wants=network-online.target
+# This is a venue appliance whose power is pulled at the end of each event.
+# Never stop retrying, however many times it has already failed. Belongs in
+# [Unit]: systemd ignores it under [Service].
+StartLimitIntervalSec=0
+
+[Service]
+User=livecaption
+Group=livecaption
+# The capture device lives in /dev/snd, which is group-owned by audio.
+SupplementaryGroups=audio
+
+# No arguments: every flag is also LIVECAPTION_<FLAG>, so all configuration
+# lives in these two files. The leading dash on the second means the service
+# still starts before any API key is set (useful with LIVECAPTION_ENGINE=mock).
+EnvironmentFile=/etc/default/livecaption
+EnvironmentFile=-/etc/livecaption/secrets.env
+ExecStart=/usr/bin/livecaption live
+
+# Bind :80 without running as root. Deliberately not setcap on the binary:
+# apt replaces /usr/bin/livecaption on every upgrade, which drops the
+# capability and would silently stop the service binding.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Creates /var/lib/livecaption owned by the service user; transcripts live here.
+StateDirectory=livecaption
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

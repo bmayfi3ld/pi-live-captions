@@ -1,0 +1,34 @@
+# Settings for the livecaption service.
+#
+# Each setting is the command-line flag of the same name, uppercased with a
+# LIVECAPTION_ prefix:  LIVECAPTION_FOO=bar  ==  --foo=bar
+# Run `livecaption live --help` for the full list and the defaults.
+#
+# Apply changes with:  sudo systemctl restart livecaption
+
+# Capture device. Run `sudo -u livecaption livecaption devices` to list them.
+# Prefer the plughw:CARD= form over hw:1,0 — USB card numbers move between
+# boots, card names do not.
+LIVECAPTION_BACKEND=alsa
+LIVECAPTION_DEVICE=plughw:CARD=Device,DEV=0
+
+# Port 80 so the room can use http://livecaptions.local with no :port suffix.
+LIVECAPTION_ADDR=:80
+
+# Advertised as <name>.local over mDNS. Set it empty to turn the advertisement
+# off entirely (viewers then need the box's IP address).
+LIVECAPTION_MDNS_NAME=livecaptions
+
+LIVECAPTION_TRANSCRIPT_DIR=/var/lib/livecaption/transcripts
+
+# Optional — uncomment once the file is actually in place. Both must point at
+# a file that exists; the service will not start otherwise.
+#LIVECAPTION_LOGO=/var/lib/livecaption/logo.png
+#LIVECAPTION_KEYTERM_FILE=/etc/livecaption/keyterms.txt
+
+# Other things you might want:
+#LIVECAPTION_ENGINE=mock          # offline, no API key, no cost — for a dry run
+#LIVECAPTION_LOG_LEVEL=debug
+#LIVECAPTION_AUDIO_STREAM=false   # stop serving the audio at /audio.mp3
+#LIVECAPTION_DIARIZE=false        # stop attributing segments to speakers
+#LIVECAPTION_MUSIC_DETECT=false   # if music detection is eating real speech
