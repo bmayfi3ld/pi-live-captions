@@ -29,7 +29,7 @@ if [ -z "${MAINTAINER:-}" ]; then
 	email=$(git config user.email || true)
 	MAINTAINER="${name:-unknown} <${email:-nobody@invalid}>"
 fi
-REPO=${REPO:-brandonmayfield/pi-caption-stream}
+REPO=${REPO:-bmayfi3ld/pi-live-captions}
 OUT=${OUT:-"$ROOT/dist"}
 
 STAGE=$(mktemp -d)

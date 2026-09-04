@@ -23,7 +23,7 @@ LIVECAPTION_TRANSCRIPT_DIR=/var/lib/livecaption/transcripts
 
 # Optional — uncomment once the file is actually in place. Both must point at
 # a file that exists; the service will not start otherwise.
-#LIVECAPTION_LOGO=/var/lib/livecaption/logo.png
+#LIVECAPTION_LOGO=/etc/livecaption/logo.png
 #LIVECAPTION_KEYTERM_FILE=/etc/livecaption/keyterms.txt
 
 # Other things you might want:

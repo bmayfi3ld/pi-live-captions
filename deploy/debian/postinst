@@ -15,6 +15,7 @@ configure)
 		usermod -aG audio livecaption
 	fi
 
+	install -d -o livecaption -g livecaption -m 0755 /var/lib/livecaption
 	install -d -m 0755 /etc/livecaption
 	# Never clobber configured secrets on upgrade.
 	if [ ! -e /etc/livecaption/secrets.env ]; then

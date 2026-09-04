@@ -1,13 +1,8 @@
 # Setting up a livecaption box
 
-A start-to-finish runbook for turning a bare machine into a caption appliance:
+A runbook for turning a bare machine into a caption appliance:
 plugged into the soundboard, running headless, serving
 <http://livecaptions.local> to every phone and screen in the room.
-
-Everything here is a command you run yourself. There is no setup script on
-purpose — you should be able to read what is about to happen to the box. The
-fiddly parts (creating the service user, installing the unit, permissions) live
-in the Debian package instead, and step 5 says exactly what it does.
 
 **Target:** Debian Trixie or Raspberry Pi OS Trixie, 64-bit.
 The primary box is a **Chromebox CN60** (amd64). A **Raspberry Pi 4/5** (arm64)
@@ -22,18 +17,7 @@ About fifteen commands, twenty minutes plus OS install time.
 
 ### Chromebox CN60 (primary)
 
-The CN60 ships with ChromeOS and firmware write protection on. Getting Debian
-onto it is a one-time job:
-
-1. Power off, open the case, remove the **write-protect screw** from the
-   mainboard, reassemble.
-2. Enter Developer Mode, then enable legacy/UEFI boot in the firmware.
-3. Install **Debian Trixie** from the netinst image. At the tasksel prompt
-   deselect the desktop environment and select **SSH server** and **standard
-   system utilities** only. A desktop wastes disk on a 16 GB M.2 and pulls in a
-   display manager the box will never use.
-
-If the box is already running Debian, skip all of this.
+Recommend looking at https://docs.mrchromebox.tech/docs/getting-started.html to get the box to a state where custom OS's can be installed. Then installing Debian Trixie like normal from a USB drive.
 
 ### Raspberry Pi 4/5 (unproven)
 
@@ -48,11 +32,9 @@ ssh <user>@<hostname>.local
 sudo apt update && sudo apt full-upgrade
 ```
 
-## 2. Wifi that a stranger can reconfigure — comitup
+## 2. Automated wifi setup with comitup
 
-Skip this entirely if the box will be on wired ethernet. **The CN60 has no
-built-in wifi**, so it also needs a USB wifi adapter whose driver supports AP
-mode.
+You can skip this entirely if the box will be on wired ethernet.
 
 comitup solves the venue problem: the box arrives somewhere new, cannot see any
 network it knows, and there is no keyboard. So it raises its own access point.
@@ -64,17 +46,10 @@ pick one and enter the password, and the box joins it and remembers it.
 > keyboard and monitor.
 
 ```sh
-# comitup is not in Debian; it ships its own repository.
-sudo apt install -y curl
-curl -fsSL https://davesteele.github.io/key-arch.pub \
-  | sudo gpg --dearmor -o /usr/share/keyrings/davesteele.gpg
-echo "deb [signed-by=/usr/share/keyrings/davesteele.gpg] https://davesteele.github.io/comitup/repo comitup main" \
-  | sudo tee /etc/apt/sources.list.d/comitup.list
-sudo apt update
 sudo apt install -y comitup
 ```
 
-Set the AP name so the operator knows which network is the box:
+Optionally set the AP name so the operator knows which network is the box:
 
 ```sh
 sudoedit /etc/comitup.conf     # ap_name: livecaptions-<nnn>
@@ -84,30 +59,26 @@ sudo reboot
 comitup requires NetworkManager and conflicts with `dhcpcd` and
 `wpa_supplicant` managing the same interface. Its installer usually sorts this
 out; if wifi misbehaves afterwards, check `systemctl status comitup` and follow
-[comitup's own documentation](https://davesteele.github.io/comitup/) — that is
-its problem to solve, not this project's.
+[comitup's own documentation](https://davesteele.github.io/comitup/)
+
 
 ## 3. Add the livecaption package repository
 
 ```sh
 sudo install -d -m 0755 /usr/share/keyrings
-curl -fsSL https://<owner>.github.io/pi-caption-stream/livecaption-archive-keyring.asc \
-  | sudo tee /usr/share/keyrings/livecaption.asc >/dev/null
+sudo apt install -y curl
+curl -fsSL https://bmayfi3ld.github.io/pi-live-captions/livecaption-archive-keyring.asc | sudo tee /usr/share/keyrings/livecaption.asc >/dev/null
 
 sudo tee /etc/apt/sources.list.d/livecaption.sources >/dev/null <<'EOF'
 Types: deb
-URIs: https://<owner>.github.io/pi-caption-stream
-Suites: stable
-Components: main
+URIs: https://bmayfi3ld.github.io/pi-live-captions
+Suites: ./
+Components:
 Signed-By: /usr/share/keyrings/livecaption.asc
 EOF
 
 sudo apt update
 ```
-
-Replace `<owner>` with the GitHub account hosting the repo. The `.sources`
-(deb822) format is Trixie's default; the `Signed-By` line means this key can
-only ever validate this one repository.
 
 ## 4. Install
 
@@ -135,11 +106,13 @@ sudo -u livecaption livecaption devices
 Run it as the service user, not as yourself: if this cannot see the device,
 neither can the service.
 
-Pick the entry for the soundboard's USB output. **Prefer the
+Pick which audio source you want to use from this list. **Prefer the
 `plughw:CARD=<name>,DEV=0` form over `hw:1,0`** — USB card numbers change
 between boots depending on enumeration order, and a box that captions silence
 after a power cycle because the card became `hw:2` is a bad night. Card names
 are stable. `arecord -l` shows the card names if the listing is ambiguous.
+
+For the CN60 it should be `plughw:CARD=PCH,DEV=0`
 
 ## 6. Configure
 
@@ -150,6 +123,8 @@ sudoedit /etc/default/livecaption
 Every setting is a command-line flag, uppercased with a `LIVECAPTION_` prefix
 (`LIVECAPTION_ADDR` is `--addr`), so `livecaption live --help` is the complete
 reference. At minimum set `LIVECAPTION_DEVICE` to what step 5 found.
+
+Then move onto secrets
 
 ```sh
 sudoedit /etc/livecaption/secrets.env
@@ -170,13 +145,12 @@ Shown in the viewer's top-right corner.
 
 ```sh
 scp logo.png <user>@<hostname>.local:/tmp/
-sudo install -o livecaption -g livecaption -m 0644 /tmp/logo.png /var/lib/livecaption/
+sudo install -o root -g livecaption -m 0644 /tmp/logo.png /etc/livecaption/
 ```
 
 Then uncomment `LIVECAPTION_LOGO` in `/etc/default/livecaption`. PNG, JPEG,
 WebP, GIF or SVG, **2 MiB maximum**. It is read once at startup, so replacing
-the file needs a `systemctl restart livecaption`. Viewers who would rather not
-see it can add `?logo=0` to the URL.
+the file needs a `systemctl restart livecaption`.
 
 ### Optional: keyterms
 
@@ -184,8 +158,8 @@ Proper nouns to bias recognition toward — names, places, anything the engine
 would otherwise mangle.
 
 ```sh
-scp keyterms-esv.txt <user>@<hostname>.local:/tmp/
-sudo install -m 0644 /tmp/keyterms-esv.txt /etc/livecaption/keyterms.txt
+scp keyterms.txt <user>@<hostname>.local:/tmp/
+sudo install -m 0644 /tmp/keyterms.txt /etc/livecaption/keyterms.txt
 ```
 
 Then uncomment `LIVECAPTION_KEYTERM_FILE`. One term per line; blank lines and
@@ -213,9 +187,6 @@ journalctl -u livecaption -f
 - Transcripts accumulate under `/var/lib/livecaption/transcripts/<timestamp>/`.
 - **Pull the power, plug it back in, and confirm captions return with no
   login.** This is the one that matters; it is how the box gets used.
-
-Viewers can tune their own screen with query parameters: `?lines=N`, `?size=N`,
-`?theme=light`, `?logo=0`, `?wake=0`.
 
 ## 9. Appliance housekeeping
 
