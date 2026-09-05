@@ -6,10 +6,18 @@ mkdir -p "$HOME/.mozilla/livecaption-kiosk"
 
 # GNOME otherwise locks or blanks the display independently of systemd.
 if command -v gsettings >/dev/null 2>&1; then
-	gsettings set org.gnome.desktop.session idle-delay 0
-	gsettings set org.gnome.desktop.screensaver lock-enabled false
-	gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing
-	gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type nothing
+	# Xfce can have gsettings installed without the GNOME power schemas.
+	schemas=$(gsettings list-schemas)
+	if printf '%s\n' "$schemas" | grep -qx org.gnome.desktop.session; then
+		gsettings set org.gnome.desktop.session idle-delay 0
+	fi
+	if printf '%s\n' "$schemas" | grep -qx org.gnome.desktop.screensaver; then
+		gsettings set org.gnome.desktop.screensaver lock-enabled false
+	fi
+	if printf '%s\n' "$schemas" | grep -qx org.gnome.settings-daemon.plugins.power; then
+		gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing
+		gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type nothing
+	fi
 fi
 
 # X11 desktops otherwise blank the display independently of systemd.

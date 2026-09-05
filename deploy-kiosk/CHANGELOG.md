@@ -3,6 +3,10 @@
 The topmost version heading is the source of truth for the kiosk package
 version. Cutting a kiosk release means adding a new `## X.Y.Z` heading here.
 
+## 0.1.1
+
+- Fix kiosk startup on Xfce by only applying GNOME settings when their schemas are installed.
+
 ## 0.1.0
 
 - Create a dedicated unprivileged kiosk user.
