@@ -7,12 +7,13 @@ behind it.
 ## Building a package by hand
 
 ```sh
-just deb amd64          # -> dist/livecaption_0.2.0+dev_amd64.deb
+just deb amd64          # -> dist/livecaption_0.2.1~dev_amd64.deb
 just deb arm64
 ```
 
 Version comes from the first `## X.Y.Z` heading in `CHANGELOG.md`
-(`deploy/version.sh`), with `+dev` appended for local builds. Pass an explicit
+(`deploy/version.sh`), with `~dev` appended for local builds so a released package always sorts
+newer. Pass an explicit
 version as the second argument to override.
 
 Cross-compiling needs no toolchain: the module is pure Go and builds with

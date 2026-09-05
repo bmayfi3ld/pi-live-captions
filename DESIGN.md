@@ -80,6 +80,8 @@ The capture path can degrade in ways that don't stop the audio, so each has a co
 - **ffmpeg exits** (USB unplugged) → relaunch with exponential backoff, `ffmpeg_restarts_total`.
   Media offset accumulates across restarts so timestamps stay monotonic.
 - **ALSA xruns** → stderr is scanned for overrun/underrun tokens, `xruns_total`.
+- **Duplicate ALSA timestamps** → each live output derives timestamps from processed sample count,
+  preventing non-monotonic DTS errors without changing the PCM consumed by the application.
 - **Bad device name** → caught at startup by a probe read, so a typo is an immediate clear error
   rather than an infinite restart loop.
 

@@ -3,6 +3,7 @@ package audio
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,6 +19,25 @@ func TestDeviceDescribe(t *testing.T) {
 	s := NewDeviceSource(DeviceConfig{Device: "hw:2,0", Backend: "alsa"})
 	if got, want := s.Describe(), "alsa:hw:2,0 (-> 16000 Hz mono)"; got != want {
 		t.Errorf("Describe() = %q, want %q", got, want)
+	}
+}
+
+func TestDeviceFFmpegArgsRegenerateOutputTimestamps(t *testing.T) {
+	s := NewDeviceSource(DeviceConfig{Device: "hw:2,0", Backend: "alsa", Stream: NewBroadcaster(nil)})
+	args, aux := s.ffmpegArgs(false)
+	if !aux {
+		t.Fatal("streaming capture did not enable the auxiliary output")
+	}
+	if got := strings.Count(strings.Join(args, " "), "-af asetpts=N/SR/TB"); got != 2 {
+		t.Errorf("timestamp filter count = %d, want 2; args: %v", got, args)
+	}
+
+	args, aux = s.ffmpegArgs(true)
+	if aux || strings.Contains(strings.Join(args, " "), "pipe:3") {
+		t.Errorf("probe enabled auxiliary output; args: %v", args)
+	}
+	if got := strings.Count(strings.Join(args, " "), "-af asetpts=N/SR/TB"); got != 1 {
+		t.Errorf("probe timestamp filter count = %d, want 1; args: %v", got, args)
 	}
 }
 

@@ -4,6 +4,11 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
+## 0.2.1
+
+- Fix recurring non-monotonic DTS errors from ALSA capture by deriving live PCM and MP3 output
+  timestamps from processed sample counts.
+
 ## 0.2.0
 
 - Debian package, private apt repo, and a manual setup runbook (`deploy/`).

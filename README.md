@@ -371,6 +371,6 @@ node internal/web/caption_decay_test.js
 ```
 
 The version reported by `--version` comes from the first `## X.Y.Z` heading in `CHANGELOG.md`,
-injected at build time. `just build` appends `+dev`; released packages append the build number
+injected at build time. `just build` appends `~dev`; released packages append the build number
 (`0.2.0+42`). A plain `go build` with no `-ldflags` falls back to the literal in
 `internal/cli/cli.go`.

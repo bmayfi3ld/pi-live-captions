@@ -4,7 +4,7 @@
 # Deliberately dpkg-deb over debhelper: this is a single static binary and a
 # handful of text files, which does not justify the full Debian toolchain.
 #
-#   ./deploy/build-deb.sh amd64            # version from CHANGELOG.md, +dev
+#   ./deploy/build-deb.sh amd64            # version from CHANGELOG.md, ~dev
 #   ./deploy/build-deb.sh arm64 0.2.0+42   # explicit version (CI)
 set -euo pipefail
 
@@ -20,7 +20,7 @@ esac
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-VERSION=${2:-"$("$ROOT/deploy/version.sh")+dev"}
+VERSION=${2:-"$("$ROOT/deploy/version.sh")~dev"}
 # `|| true` matters: git config exits non-zero when unset, which under set -e
 # would abort the build with no message at all on a machine (or a CI runner)
 # that has no git identity configured.

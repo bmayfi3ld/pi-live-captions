@@ -110,19 +110,25 @@ func (s *DeviceSource) Start(ctx context.Context) (<-chan Frame, error) {
 	return out, nil
 }
 
-// captureOnce runs one ffmpeg lifetime. With probeOnly it just verifies the
-// device opens, then tears down.
-func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeOnly bool) error {
+func (s *DeviceSource) ffmpegArgs(probeOnly bool) ([]string, bool) {
 	args := []string{"-hide_banner", "-loglevel", "error", "-f", s.cfg.Backend, "-i", s.cfg.Device}
-	args = append(args, "-ac", "1", "-ar", "16000", "-f", "s16le", "-")
+	// ALSA can repeat packet timestamps. Derive output timestamps from sample
+	// count so neither muxer receives duplicate DTS values.
+	args = append(args, "-af", "asetpts=N/SR/TB", "-ac", "1", "-ar", "16000", "-f", "s16le", "-")
 	// Second output off the same decode: full-quality MP3 for listeners.
 	// Channels stay as the source's; -ar 44100 is a guard, since libmp3lame
 	// rejects odd rates.
 	aux := s.cfg.Stream != nil && !probeOnly
 	if aux {
-		args = append(args, "-f", "mp3", "-b:a", "128k", "-ar", "44100", "pipe:3")
+		args = append(args, "-af", "asetpts=N/SR/TB", "-f", "mp3", "-b:a", "128k", "-ar", "44100", "pipe:3")
 	}
+	return args, aux
+}
 
+// captureOnce runs one ffmpeg lifetime. With probeOnly it just verifies the
+// device opens, then tears down.
+func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeOnly bool) error {
+	args, aux := s.ffmpegArgs(probeOnly)
 	p, err := startFFmpeg(ctx, procOpts{
 		args:     args,
 		extraOut: aux,
