@@ -5,9 +5,8 @@ plugged into the soundboard, running headless, serving
 <http://livecaptions.local> to every phone and screen in the room.
 
 **Target:** Debian Trixie or Raspberry Pi OS Trixie, 64-bit.
-The primary box is a **Chromebox CN60** (amd64). A **Raspberry Pi 4/5** (arm64)
-is supported by the package but **has never been run in production** — see
-[Known unknowns](#known-unknowns).
+The primary box is a **Chromebox CN60** (amd64). The package also supports a
+**Raspberry Pi 4/5** (arm64).
 
 About fifteen commands, twenty minutes plus OS install time.
 
@@ -19,7 +18,7 @@ About fifteen commands, twenty minutes plus OS install time.
 
 Recommend looking at https://docs.mrchromebox.tech/docs/getting-started.html to get the box to a state where custom OS's can be installed. Then installing Debian Trixie like normal from a USB drive.
 
-### Raspberry Pi 4/5 (unproven)
+### Raspberry Pi 4/5
 
 Flash **Raspberry Pi OS Trixie, 64-bit Lite** with Raspberry Pi Imager. In the
 advanced options set the hostname, enable SSH, and create your user before
@@ -246,23 +245,6 @@ livecaption` deletes them along with the service user.
 | No audio at `/audio.mp3` | The installed ffmpeg has no `libmp3lame`. The service logs `audio disabled` at startup and carries on serving captions. |
 | Service starts, captions never appear | Wrong capture device (step 5), or silence: `--auto-pause` disconnects the recognizer after 60 seconds of quiet and reconnects on sound, which is normal and shows in the log. Confirm audio is actually arriving with `LIVECAPTION_LOG_LEVEL=debug`. |
 | Won't start after editing config | Usually `LIVECAPTION_LOGO` or `LIVECAPTION_KEYTERM_FILE` pointing at a file that is not there. `journalctl -u livecaption -n 20` names it. |
-
-## Known unknowns
-
-Untested on real venue hardware. Tick these off as they are confirmed, and
-correct this document when reality disagrees:
-
-- [ ] Boot-start after a cold power cycle, and after a *pulled-power* cycle
-- [ ] USB capture from the soundboard through ALSA, over a multi-hour service
-- [ ] `avahi-publish` running as the non-root `livecaption` user
-- [ ] `.local` resolution from phones on venue wifi
-- [ ] comitup's AP appearing when no known network is present, without
-      fighting avahi
-- [ ] CPU and memory headroom on the real box — run `scripts/pi-headroom.sh 3h`
-      (its per-model factors are Pi-specific; on the CN60 the numbers it
-      reports are a direct measurement rather than a projection)
-- [ ] `apt upgrade` restarting cleanly and preserving config edits
-- [ ] Anything at all on a Raspberry Pi
 
 ## For maintainers
 
