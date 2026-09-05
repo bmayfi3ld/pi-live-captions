@@ -28,6 +28,8 @@ configure)
 	# Enabled but not started: it cannot work until an audio device and an API
 	# key are configured, and a failed start here would look like a bad package.
 	systemctl enable livecaption.service >/dev/null 2>&1 || true
+	# Restart only an already-running service: a new install stays inactive.
+	systemctl try-restart livecaption.service >/dev/null 2>&1 || true
 
 	if [ -z "$2" ]; then
 		cat <<'MSG'

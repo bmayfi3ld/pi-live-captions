@@ -4,6 +4,10 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
+## 0.2.3
+
+- Restart a running livecaption service after a package upgrade.
+
 ## 0.2.2
 
 - Label the apt repository as `stable` rather than `unknown` in apt output.
