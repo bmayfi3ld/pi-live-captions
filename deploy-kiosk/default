@@ -1,0 +1,2 @@
+# Page shown by the kiosk browser.
+KIOSK_URL='http://livecaptions.local?wake=0'

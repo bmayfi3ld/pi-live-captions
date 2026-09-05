@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Live Caption Kiosk
+Exec=/usr/bin/livecaption-kiosk
+Terminal=true
+X-GNOME-Autostart-enabled=true

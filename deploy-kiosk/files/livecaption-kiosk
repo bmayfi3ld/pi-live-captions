@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+. /etc/default/livecaption-kiosk
+mkdir -p "$HOME/.mozilla/livecaption-kiosk"
+
+# GNOME otherwise locks or blanks the display independently of systemd.
+if command -v gsettings >/dev/null 2>&1; then
+	gsettings set org.gnome.desktop.session idle-delay 0
+	gsettings set org.gnome.desktop.screensaver lock-enabled false
+	gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type nothing
+	gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type nothing
+fi
+
+# X11 desktops otherwise blank the display independently of systemd.
+if command -v xset >/dev/null 2>&1; then
+	xset s off
+	xset -dpms
+	xset s noblank
+fi
+
+while :; do
+	printf 'Waiting for caption service at %s...\n' "$KIOSK_URL"
+	until curl --fail --silent --output /dev/null --max-time 5 "$KIOSK_URL"; do
+		sleep 3
+	done
+	printf 'Caption service is ready; starting Firefox.\n'
+
+	systemd-inhibit --what=idle:sleep --who=livecaption-kiosk \
+		--why='Kiosk display must remain available' \
+		firefox-esr --kiosk --no-remote --profile "$HOME/.mozilla/livecaption-kiosk" "$KIOSK_URL" || true
+	sleep 2
+done
