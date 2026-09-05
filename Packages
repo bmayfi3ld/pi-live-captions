@@ -191,3 +191,20 @@ Description: Unattended browser display for livecaption
  Starts Firefox in kiosk mode after graphical login and prevents the machine
  and display from sleeping.
 
+Package: livecaption-kiosk
+Version: 0.1.1+2
+Architecture: all
+Maintainer: bmayfi3ld <bmayfi3ld@users.noreply.github.com>
+Depends: adduser, curl, firefox-esr, systemd, libglib2.0-bin
+Filename: ./livecaption-kiosk_0.1.1+2_all.deb
+Size: 3916
+MD5sum: 6d138a2f24571d2704ec42699ba649aa
+SHA1: 3ce3df9820b992bceaf74fc9f89f266e1cb98196
+SHA256: 43a288debb02a0243099a33b6ff99f2f649453484e7e0437a0a224ceb312355e
+Section: misc
+Priority: optional
+Homepage: https://github.com/bmayfi3ld/pi-live-captions
+Description: Unattended browser display for livecaption
+ Starts Firefox in kiosk mode after graphical login and prevents the machine
+ and display from sleeping.
+
