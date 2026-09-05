@@ -50,7 +50,7 @@ const (
 	// smaller pieces) or if phrases fragment across rows (raise it, but never
 	// to within reach of breakGap). Watch Segments / lines on /admin to tell
 	// which is happening.
-	maxDelay = 0.7
+	maxDelay = 1.2
 
 	// handshakeTimeout bounds the wait for RecognitionStarted. Without it a
 	// server that accepts the socket and then goes quiet would park Run
