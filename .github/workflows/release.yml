@@ -93,7 +93,12 @@ jobs:
           # makes `apt install livecaption=<older>` work as a rollback.
           dpkg-scanpackages --multiversion . > Packages
           gzip -k9f Packages
-          apt-ftparchive release . > Release
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin=livecaption \
+            -o APT::FTPArchive::Release::Label=livecaption \
+            -o APT::FTPArchive::Release::Suite=stable \
+            -o APT::FTPArchive::Release::Codename=stable \
+            release . > Release
           gpg --batch --yes --default-key "${{ secrets.APT_GPG_KEY_ID }}" -abs -o Release.gpg Release
           gpg --batch --yes --default-key "${{ secrets.APT_GPG_KEY_ID }}" --clearsign -o InRelease Release
 
