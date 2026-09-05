@@ -174,3 +174,20 @@ Description: Live captions from a soundboard feed to every screen in the room
  .
  Installed as a system service configured from /etc/default/livecaption.
 
+Package: livecaption-kiosk
+Version: 0.1.0+1
+Architecture: all
+Maintainer: bmayfi3ld <bmayfi3ld@users.noreply.github.com>
+Depends: adduser, curl, firefox-esr, systemd, libglib2.0-bin
+Filename: ./livecaption-kiosk_0.1.0+1_all.deb
+Size: 3836
+MD5sum: 275d798aec3e2907eff3b705301f1ea4
+SHA1: dc5f047bd7d83a186703d631e50ebd29142e18cc
+SHA256: a2c5468c873f4984d5cbeccfba07cdfa7fcdffb0574024d7e29041fd9e7dd55f
+Section: misc
+Priority: optional
+Homepage: https://github.com/bmayfi3ld/pi-live-captions
+Description: Unattended browser display for livecaption
+ Starts Firefox in kiosk mode after graphical login and prevents the machine
+ and display from sleeping.
+
