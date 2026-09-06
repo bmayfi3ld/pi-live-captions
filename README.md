@@ -112,6 +112,7 @@ see the [usage reference](docs/usage.md) for tuning and troubleshooting.
 
 - [Server setup](deploy/README.md) — OS, networking, audio, configuration, and upgrades
 - [Kiosk setup](deploy-kiosk/README.md) — automatic login and a dedicated caption display
+- [Android audio client](docs/android-audio-client.md) — durable room-audio playback with automatic recovery
 - [Usage reference](docs/usage.md) — commands, all options, viewer settings, audio, and troubleshooting
 - [Design](DESIGN.md) — pipeline architecture and trade-offs
 - [Package publishing](deploy/apt-repo.md) — building packages and maintaining the apt repository

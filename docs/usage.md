@@ -108,7 +108,9 @@ curl http://livecaptions.local:8080/audio.mp3 > room.mp3   # ad-hoc recording
 A capture restart is a gap in the bytes rather than an end of stream, so playback survives it
 with no client involvement. A full server restart ends the connection, which is what the
 reconnect flags above are for — bare VLC and a plain browser `<audio>` element stop dead and
-need a human to press play again.
+need a human to press play again. For an unattended Pixel receiver, follow the
+[Android audio-client runbook](android-audio-client.md); its outer retry loop also
+recovers when the player exits or the server is unavailable initially.
 
 There is no backlog and no seeking: a listener joining late starts at the live edge, the same
 stance the caption viewer takes. Replaying stale audio into a live room would be wrong.
