@@ -40,9 +40,18 @@ func NewGate(cfg PauseConfig) *Gate {
 	return &Gate{cfg: cfg, active: true, changed: make(chan struct{})}
 }
 
-// Observe feeds a real frame, computing its RMSDBFS. Reports whether Active()
-// changed as a result.
+// Observe uses the caption gate's per-frame decision when available, otherwise
+// computes RMSDBFS. Reports whether Active() changed as a result.
 func (g *Gate) Observe(f audio.Frame) bool {
+	if f.NoiseGated {
+		// Release belongs to the caption gate; connection hold starts only
+		// after it closes, even when the operator chooses a lower threshold.
+		db := -100.0
+		if f.NoiseGateOpen {
+			db = 0
+		}
+		return g.ObserveLevel(db, f.Offset)
+	}
 	return g.ObserveLevel(audio.RMSDBFS(f.PCM), f.Offset)
 }
 

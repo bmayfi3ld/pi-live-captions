@@ -25,16 +25,14 @@ type MonitorConfig struct {
 	OnAlive func(bool)
 }
 
-// Monitor plays the exact frames the pipeline is sending to the STT service,
-// so caption delay can be judged by ear.
+// Monitor plays the original pipeline frames before caption noise suppression,
+// so input quality and caption delay can be judged by ear.
 //
 // The tap point is deliberate: playing the original file with a separate
 // player would drift against our scheduler, so what you heard would not line
-// up with what was sent. Teeing the frames we already emit means what you hear
-// is bit-identical to what the
-// recognizer receives, released by the same clock. It also means you hear the
-// 16 kHz mono downmix, which is the point — bad source audio becomes audible
-// instead of being inferred from bad transcripts.
+// up with what was sent. Teeing the frames we already emit preserves their
+// clock and the 16 kHz mono downmix. Quiet input stays audible here even when
+// the caption gate suppresses it, so operators can diagnose the original feed.
 type Monitor struct {
 	cfg  MonitorConfig
 	ch   chan []byte

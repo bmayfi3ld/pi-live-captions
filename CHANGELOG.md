@@ -8,6 +8,10 @@ adding a new `## X.Y.Z` heading here.
 
 ### Added
 - a music delay to avoid back and forth jitter with music detection
+- Caption audio gate with live admin threshold and release controls, input RMS and peak
+  meters, and threshold markers in a dedicated card. Defaults to -35 dBFS and a 3-second
+  release; startup values can be configured with `--noise-threshold-dbfs` and
+  `--noise-release`. Live adjustments are session-only; listener audio is unchanged.
 
 ### Changed
 - default accuracy/latency for speechmatics to 1.2 seconds

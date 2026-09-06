@@ -63,14 +63,17 @@ type buildOpts struct {
 func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, error) {
 	started := time.Now()
 	met := metrics.New(Version, started.Format("2006-01-02T15-04-05"))
+	gate, err := audio.NewNoiseGate(audio.NoiseSettings{ThresholdDBFS: o.stt.NoiseThresholdDBFS, ReleaseSec: o.stt.NoiseRelease.Seconds()})
+	if err != nil {
+		return nil, err
+	}
+	met.NoiseGate = gate
 	met.SourceKind = o.kind
 	met.SourceSpec = o.sourceLabel
 	met.SourceFormat = o.conversion
 	met.Engine = o.stt.Engine
 	met.SetMediaTotal(o.mediaTotal)
-	if o.monitor != nil {
-		met.MonitorEnabled = true
-	}
+	met.MonitorEnabled = o.monitor != nil
 	met.AudioEnabled = o.server.AudioStream
 	met.AudioReason = o.audioReason
 	if o.audio != nil {
@@ -136,6 +139,7 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 		AdminPassword: adminPassword,
 		Hub:           hub,
 		Metrics:       met,
+		NoiseGate:     gate,
 		Log:           log,
 	}
 	if o.audio != nil {
@@ -173,7 +177,7 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 		fields = append(fields, ui.BannerField{Label: "logo", Value: o.server.Logo})
 	}
 	base := browserURL(o.server.Addr)
-	adminNote := "clear-screen disabled: set ADMIN_PASSWORD"
+	adminNote := "controls disabled: set ADMIN_PASSWORD"
 	if adminPassword != "" {
 		adminNote = "password required (user: admin)"
 	}
@@ -233,6 +237,8 @@ func (s *session) run(ctx context.Context) error {
 	if s.monitor != nil {
 		frames = s.monitor.Wrap(ctx, frames)
 	}
+
+	frames = s.met.NoiseGate.Wrap(ctx, frames)
 
 	s.term.Ready("ready — Ctrl-C to stop")
 	s.term.StartStatus(s.met.Snapshot)

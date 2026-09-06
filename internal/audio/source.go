@@ -63,7 +63,10 @@ func (f Format) String() string {
 
 // Frame is one chunk of PCM plus the timing needed for latency accounting.
 type Frame struct {
-	PCM []byte
+	// Gate decisions travel with frames so auto-pause cannot race ahead of audio.
+	NoiseGated    bool
+	NoiseGateOpen bool
+	PCM           []byte
 	// Offset is the media time of the first sample, measured from the start
 	// of the stream. Latency is computed against this, not against wall clock,
 	// so a replay at --speed 1.0 and a live capture measure the same thing.

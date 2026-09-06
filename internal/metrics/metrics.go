@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"livecaption/internal/audio"
 )
 
 // ConnState is the STT connection state, shown on the status line and /admin.
@@ -46,6 +48,8 @@ func (s ConnState) String() string {
 
 // Metrics is safe for concurrent use by every stage of the pipeline.
 type Metrics struct {
+	// Set before the pipeline starts; settings remain owned by the gate.
+	NoiseGate *audio.NoiseGate
 	// Immutable session identity, set once at startup.
 	Version   string
 	SessionID string
@@ -416,10 +420,11 @@ func (m *Metrics) SetTranscriptError(err error) {
 // Snapshot is a consistent point-in-time copy, serialized straight to JSON for
 // /api/stats and used verbatim by the status line and shutdown summary.
 type Snapshot struct {
-	Version   string    `json:"version"`
-	SessionID string    `json:"session_id"`
-	StartedAt time.Time `json:"started_at"`
-	UptimeSec float64   `json:"uptime_sec"`
+	NoiseGate *audio.NoiseSnapshot `json:"noise_gate,omitempty"`
+	Version   string               `json:"version"`
+	SessionID string               `json:"session_id"`
+	StartedAt time.Time            `json:"started_at"`
+	UptimeSec float64              `json:"uptime_sec"`
 	// Health is the server-computed "what is happening right now" summary —
 	// "closed" / "paused" / "degraded" / "ok" — so the status line, /admin
 	// and the shutdown summary read the exact same verdict instead of each
@@ -541,6 +546,10 @@ func (m *Metrics) Snapshot() Snapshot {
 	}
 
 	var s Snapshot
+	if m.NoiseGate != nil {
+		gate := m.NoiseGate.Snapshot()
+		s.NoiseGate = &gate
+	}
 	s.Version = m.Version
 	s.SessionID = m.SessionID
 	s.StartedAt = m.StartedAt

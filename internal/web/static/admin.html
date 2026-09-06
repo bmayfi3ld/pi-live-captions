@@ -347,6 +347,14 @@
     white-space: pre; pointer-events: none;
     font-weight: 600; font-size: 1.05rem; line-height: 1.25;
   }
+  .noise-meter { position: relative; margin: 0.35rem 0; }
+  .noise-meter meter { display: block; width: 100%; height: 1.2rem; }
+  .noise-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--fg); pointer-events: none; transform: translateX(-1px); }
+  .noise-scale { display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--muted); }
+  .noise-note { font-size: 0.78rem; color: var(--muted); margin: 0.5rem 0; }
+  #noise-fields { border: 0; padding: 0; margin: 0.7rem 0; min-width: 0; }
+  #noise-fields label { display: block; font-size: 0.82rem; margin: 0.5rem 0; }
+  #noise-fields input { width: 6rem; margin-left: 0.4rem; }
 </style>
 </head>
 <body>
@@ -423,6 +431,41 @@
     <div class="stat-row"><span class="k">ffmpeg restarts</span><span class="v num" id="src-restarts">—</span></div>
     <div class="stat-row"><span class="k">Xruns</span><span class="v num" id="src-xruns">—</span></div>
     <div class="diag err" id="src-stderr" style="display:none"></div>
+  </div>
+
+  <div class="card" id="card-noise-gate">
+    <h2><span class="eyebrow">Caption audio gate</span></h2>
+    <div class="stat-row"><label class="k" for="noise-rms">Input RMS</label><span class="v num" id="noise-rms-value">—</span></div>
+    <div class="noise-meter">
+      <meter id="noise-rms" min="-100" max="0" value="-100" aria-describedby="noise-threshold-active noise-meter-help"></meter>
+      <span class="noise-marker" id="noise-rms-marker" hidden aria-hidden="true"></span>
+    </div>
+    <div class="noise-scale"><span>−100 dBFS</span><span>0 dBFS</span></div>
+    <div class="stat-row"><label class="k" for="noise-peak">Recent peak (1 s)</label><span class="v num" id="noise-peak-value">—</span></div>
+    <div class="noise-meter">
+      <meter id="noise-peak" min="-100" max="0" value="-100" aria-describedby="noise-threshold-active noise-meter-help"></meter>
+      <span class="noise-marker" id="noise-peak-marker" hidden aria-hidden="true"></span>
+    </div>
+    <div class="noise-scale"><span>−100 dBFS</span><span>0 dBFS</span></div>
+    <p class="noise-note" id="noise-threshold-active">Threshold marker: unavailable</p>
+    <div class="stat-row"><span class="k">Caption gate</span><span class="v" id="noise-state">unavailable</span></div>
+    <p class="noise-note" id="noise-freshness">Waiting for input</p>
+    <p class="noise-note" id="noise-meter-help">Original digital input, before filtering; not room loudness. Markers show the RMS threshold, not a peak limit. Near 0 dBFS means low headroom; upstream distortion may still occur.</p>
+    <form id="noise-form">
+      <fieldset id="noise-fields" disabled>
+        <legend>Caption audio gate</legend>
+        <label title="Open when frame RMS exceeds this level. Higher (less negative) suppresses more audio. −100 passes effectively all nonzero input; 0 mutes caption input.">Threshold (dBFS)
+          <input id="noise-threshold" type="number" min="-100" max="0" step="any" required aria-describedby="noise-defaults noise-control-help">
+        </label>
+        <label title="Keep audio passing this long after the last above-threshold frame. Below-threshold whispering does not reset this timer. Longer protects pauses and word endings; zero closes immediately.">Release time (seconds)
+          <input id="noise-release" type="number" min="0" max="60" step="any" required aria-describedby="noise-defaults noise-control-help">
+        </label>
+        <button type="submit" id="noise-apply">Apply</button>
+      </fieldset>
+      <p class="noise-note" id="noise-defaults">Defaults unavailable</p>
+      <p class="noise-note" id="noise-control-help">Higher thresholds suppress more; longer release protects speech pauses. Below-threshold whispers do not keep the gate open. STT auto-pause waits after gate closure. Changes apply to this session only; restart restores startup settings. Listener audio is unchanged; queued captions may still arrive.</p>
+      <p class="noise-note" id="noise-feedback" role="status"></p>
+    </form>
   </div>
 
   <div class="card" id="card-monitor">
@@ -725,7 +768,66 @@
       wfLegendItem("wf-viewer", "Viewer paint", viewer, viewerP95, viewerN > 0 ? null : "—");
   }
 
+  var noiseInitialized = false;
+  var noiseApplying = false;
+  function renderNoise(g) {
+    var fresh = g && !g.stale;
+    ["rms", "peak"].forEach(function (kind) {
+      var meter = document.getElementById("noise-" + kind);
+      var value = fresh ? g[kind + "_dbfs"] : -100;
+      meter.value = value;
+      meter.setAttribute("aria-valuetext", fresh ? value.toFixed(1) + " dBFS" : "unavailable or stale");
+      setText("noise-" + kind + "-value", fresh ? value.toFixed(1) + " dBFS" + (kind === "peak" && value >= -3 ? " (low headroom)" : "") : "—");
+      var marker = document.getElementById("noise-" + kind + "-marker");
+      marker.hidden = !g;
+      if (g) {
+        marker.style.left = (g.settings.threshold_dbfs + 100) + "%";
+        marker.title = "RMS threshold: " + g.settings.threshold_dbfs + " dBFS";
+      }
+    });
+    setText("noise-state", fresh ? (g.open ? "open" : "closed") : "unavailable / stale");
+    var at = g ? Date.parse(g.last_sample_at) : NaN;
+    setText("noise-freshness", fresh ? "Input updating" : (at > 0 ? "Input stale — last sample " + new Date(at).toLocaleTimeString() : "Waiting for input"));
+    document.getElementById("noise-fields").disabled = !window.ADMIN_CONTROLS || !g || noiseApplying;
+    if (!window.ADMIN_CONTROLS) setText("noise-feedback", "Live controls disabled: set ADMIN_PASSWORD.");
+    if (!g) return;
+    setText("noise-threshold-active", "Threshold marker: " + g.settings.threshold_dbfs + " dBFS · Active release: " + g.settings.release_sec + " s");
+    setText("noise-defaults", "Startup defaults: " + g.startup.threshold_dbfs + " dBFS / " + g.startup.release_sec + " s. Built-in defaults: " + g.defaults.threshold_dbfs + " dBFS / " + g.defaults.release_sec + " s (starting points, not calibrated).");
+    if (!noiseInitialized) {
+      document.getElementById("noise-threshold").value = g.settings.threshold_dbfs;
+      document.getElementById("noise-release").value = g.settings.release_sec;
+      noiseInitialized = true;
+    }
+  }
+
+  document.getElementById("noise-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (!window.ADMIN_CONTROLS || noiseApplying) return;
+    noiseApplying = true;
+    document.getElementById("noise-fields").disabled = true;
+    setText("noise-feedback", "Applying…");
+    fetch("/api/noise-gate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ threshold_dbfs: Number(document.getElementById("noise-threshold").value), release_sec: Number(document.getElementById("noise-release").value) })
+    }).then(function (r) {
+      if (!r.ok) throw new Error("Apply failed (HTTP " + r.status + ")");
+      return r.json();
+    }).then(function (g) {
+      noiseApplying = false;
+      renderNoise(g);
+      document.getElementById("noise-threshold").value = g.settings.threshold_dbfs;
+      document.getElementById("noise-release").value = g.settings.release_sec;
+      setText("noise-feedback", "Applied: " + g.settings.threshold_dbfs + " dBFS, " + g.settings.release_sec + " s release. Session only.");
+    }).catch(function (err) {
+      noiseApplying = false;
+      document.getElementById("noise-fields").disabled = false;
+      setText("noise-feedback", err.message + ". Check active values; request may have reached the server.");
+    });
+  });
+
   function render(s) {
+    renderNoise(s.noise_gate);
     document.getElementById("offline").classList.remove("show");
 
     // ---- health ----
@@ -879,6 +981,7 @@
       lastOkAt = Date.now();
       render(s);
     }).catch(function () {
+      renderNoise(null);
       var offline = document.getElementById("offline");
       offline.classList.add("show");
       var suffix = lastOkAt ? " (last update " + Math.round((Date.now() - lastOkAt) / 1000) + "s ago)" : "";

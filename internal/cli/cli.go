@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+
+	"livecaption/internal/audio"
 )
 
 // dropEmptyEnvars unsets LIVECAPTION_* variables that are set but empty, so
@@ -84,6 +86,9 @@ type STTFlags struct {
 	// wants to carry.
 	KeytermFile string `name:"keyterm-file" type:"existingfile" group:"Speech-to-text" help:"File of keyterms, one per line, blank lines and # comments ignored. Most-likely-spoken first: a list longer than the engine accepts is cut from the end."`
 
+	NoiseThresholdDBFS float64       `name:"noise-threshold-dbfs" default:"-35" group:"Speech-to-text" help:"Caption audio RMS threshold in dBFS (-100 to 0); higher suppresses more, 0 mutes caption input."`
+	NoiseRelease       time.Duration `name:"noise-release" default:"3s" group:"Speech-to-text" help:"Keep caption audio open after the last above-threshold frame (0 to 60s)."`
+
 	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`
 	SilenceHold time.Duration `name:"silence-hold" default:"60s" group:"Speech-to-text" help:"How long the audio must stay silent before the connection is paused."`
 	Diarize     bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Attribute segments to speakers, where the selected engine supports it."`
@@ -95,7 +100,7 @@ func (f *STTFlags) Validate() error {
 	if f.SilenceHold <= 0 {
 		return fmt.Errorf("--silence-hold must be positive (got %s)", f.SilenceHold)
 	}
-	return nil
+	return (audio.NoiseSettings{ThresholdDBFS: f.NoiseThresholdDBFS, ReleaseSec: f.NoiseRelease.Seconds()}).Validate()
 }
 
 // ServerFlags configure the caption web server.
@@ -103,7 +108,7 @@ type ServerFlags struct {
 	// The admin password has no flag of its own on purpose (see Parse's
 	// description); it is named here so it appears in the help of the
 	// subcommands people actually run, not just the bare root help.
-	Addr        string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages. Set $ADMIN_PASSWORD to enable the admin clear-screen control and require basic auth (user: admin) for /admin."`
+	Addr        string `default:":8080" group:"Server" help:"Listen address for the viewer and admin pages. Set $ADMIN_PASSWORD to enable admin controls and require basic auth (user: admin) for /admin."`
 	Logo        string `type:"existingfile" group:"Server" help:"Image shown in the viewer's top-right corner."`
 	AudioStream bool   `name:"audio-stream" default:"true" negatable:"" group:"Server" help:"Serve the source audio at /audio.mp3 for VLC/mpv alongside the captions."`
 	MDNSName    string `name:"mdns-name" default:"livecaptions" group:"Server" help:"Advertise <name>.local via mDNS (avahi-publish) for as long as the server runs. Empty disables."`
@@ -152,9 +157,9 @@ func Parse(args []string) (*kong.Context, *CLI, error) {
 		kong.Description("Live captions: stream audio to a speech-to-text service and serve the text to a webpage.\n\n"+
 			"Environment (no flag equivalent):\n"+
 			"  DEEPGRAM_API_KEY / SPEECHMATICS_API_KEY  key for the selected --engine\n"+
-			"  ADMIN_PASSWORD                           enables the /admin clear-screen control and\n"+
+			"  ADMIN_PASSWORD                           enables the /admin controls and\n"+
 			"                                           guards /admin with basic auth (user: admin);\n"+
-			"                                           unset leaves the control disabled"),
+			"                                           unset leaves controls disabled"),
 		kong.UsageOnError(),
 		kong.ConfigureHelp(kong.HelpOptions{Compact: true, FlagsLast: true}),
 		kong.Vars{"version": Version},

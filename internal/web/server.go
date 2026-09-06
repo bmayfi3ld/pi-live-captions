@@ -11,9 +11,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"math"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"livecaption/internal/audio"
 	"livecaption/internal/caption"
 	"livecaption/internal/metrics"
 )
@@ -43,10 +46,10 @@ type Config struct {
 	AdminPassword string
 	Hub           *caption.Hub
 	Metrics       *metrics.Metrics
+	NoiseGate     *audio.NoiseGate
 	Log           *slog.Logger
 	// Audio, when set, is served as a never-ending MP3 body at /audio.mp3.
-	// Declared as an interface here so web keeps no dependency on the audio
-	// package; nil leaves the route unregistered.
+	// Only subscription is needed here; nil leaves the route unregistered.
 	Audio AudioSource
 }
 
@@ -86,6 +89,7 @@ func NewServer(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/time", s.handleTime)
 	mux.HandleFunc("POST /api/viewer-latency", s.handleViewerLatency)
 	mux.Handle("POST /api/clear", s.requireAdmin(http.HandlerFunc(s.handleClear)))
+	mux.Handle("POST /api/noise-gate", s.requireAdmin(http.NewCrossOriginProtection().Handler(http.HandlerFunc(s.handleNoiseGate))))
 	if cfg.Audio != nil {
 		mux.HandleFunc("GET /audio.mp3", s.handleAudio)
 	}
@@ -391,6 +395,43 @@ func (s *Server) handleClear(w http.ResponseWriter, r *http.Request) {
 	s.cfg.Hub.Clear()
 	s.log.Info("screen cleared by admin", "remote", r.RemoteAddr)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleNoiseGate changes future frames only; queued audio is left alone.
+func (s *Server) handleNoiseGate(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.NoiseGate == nil {
+		http.Error(w, "noise gate unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || contentType != "application/json" {
+		http.Error(w, "application/json required", http.StatusUnsupportedMediaType)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1024)
+	var body struct {
+		Threshold *float64 `json:"threshold_dbfs"`
+		Release   *float64 `json:"release_sec"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil || body.Threshold == nil || body.Release == nil {
+		http.Error(w, "threshold_dbfs and release_sec are required numbers", http.StatusBadRequest)
+		return
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		http.Error(w, "expected one JSON object", http.StatusBadRequest)
+		return
+	}
+	settings := audio.NoiseSettings{ThresholdDBFS: *body.Threshold, ReleaseSec: *body.Release}
+	if err := s.cfg.NoiseGate.Set(settings); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.log.Info("caption noise gate updated", "threshold_dbfs", settings.ThresholdDBFS, "release_sec", settings.ReleaseSec, "remote", r.RemoteAddr)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(s.cfg.NoiseGate.Snapshot())
 }
 
 // handleStats returns the metrics snapshot the admin page polls.
