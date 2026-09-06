@@ -56,6 +56,26 @@ cat /etc/X11/default-display-manager
 If installation reports an unsupported display manager, configure that manager
 to log in as `kiosk` automatically. Otherwise, reboot after installation.
 
+## Upgrade and recover from a locked screen
+
+After the new package is published, upgrade and reboot to apply the desktop
+settings (an already-running Light Locker is not stopped by installation):
+
+```sh
+sudo apt update
+sudo apt install --only-upgrade livecaption-kiosk
+sudo reboot
+```
+
+Version 0.1.2 disables Light Locker autostart for `kiosk` only and configures
+Xfce to prevent idle blanking and sleep on both AC and battery. Other users'
+Light Locker settings are unchanged.
+
+There is no default kiosk password. To unlock an existing session, set one
+from an administrator account with `sudo passwd kiosk`, then enter it at the
+lock screen. This does not disable automatic login. Alternatively, reboot
+after upgrading; no kiosk password is needed for automatic login.
+
 ## Verify before leaving the device unattended
 
 1. Reboot and confirm the user logs in without input.
@@ -77,4 +97,6 @@ sudo apt remove livecaption-kiosk
 ```
 
 The Firefox profile in `~/.mozilla/livecaption-kiosk` belongs to the kiosk user
-and is left in place.
+and is left in place. The kiosk user's desktop settings and
+`~/.config/autostart/light-locker.desktop` override also remain; delete that
+override if you want Light Locker to start again after removing the package.

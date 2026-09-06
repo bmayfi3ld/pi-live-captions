@@ -7,6 +7,18 @@ configure)
 		adduser --disabled-password --gecos '' kiosk
 	fi
 
+	# Disable Light Locker before desktop autostart, including on upgrades.
+	# A per-user override leaves administrator desktops unchanged.
+	kiosk_home=$(getent passwd kiosk | cut -d: -f6)
+	install -d -o kiosk -g "$(id -gn kiosk)" "$kiosk_home/.config" "$kiosk_home/.config/autostart"
+	cat >"$kiosk_home/.config/autostart/light-locker.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Light Locker
+Hidden=true
+EOF
+	chown "kiosk:$(id -gn kiosk)" "$kiosk_home/.config/autostart/light-locker.desktop"
+
 	display_manager=$(basename "$(cat /etc/X11/default-display-manager 2>/dev/null || true)")
 	case "$display_manager" in
 	gdm3)

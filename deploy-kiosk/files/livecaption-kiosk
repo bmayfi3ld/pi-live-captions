@@ -20,6 +20,18 @@ if command -v gsettings >/dev/null 2>&1; then
 	fi
 fi
 
+# Xfce power management is independent of GNOME and systemd inhibitors.
+if command -v xfconf-query >/dev/null 2>&1; then
+	for supply in ac battery; do
+		for setting in blank-on inactivity-on; do
+			xfconf-query -c xfce4-power-manager -p "/xfce4-power-manager/$setting-$supply" --create -t uint -s 0
+		done
+	done
+	for setting in dpms-enabled lock-screen-suspend-hibernate; do
+		xfconf-query -c xfce4-power-manager -p "/xfce4-power-manager/$setting" --create -t bool -s false
+	done
+fi
+
 # X11 desktops otherwise blank the display independently of systemd.
 if command -v xset >/dev/null 2>&1; then
 	xset s off
