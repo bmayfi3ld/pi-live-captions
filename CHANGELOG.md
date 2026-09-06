@@ -8,6 +8,7 @@ adding a new `## X.Y.Z` heading here.
 
 ### Changed
 - default accuracy/latency for speechmatics to 1.2 seconds
+- enabled filler word filtering
 
 ## 0.2.3
 

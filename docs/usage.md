@@ -187,12 +187,6 @@ untouched: the startup banner reads `audio  disabled` with the reason, the log c
 warning, and `/admin` shows the Audio stream card as `failed`. A listener that stops reading is
 dropped rather than allowed to stall capture, which is counted on the same card.
 
-**Profanity.** Filtered on both engines, always, with no flag. Speechmatics drops the word
-entirely — nothing is shown where it was, and surrounding words keep their own timing so the
-line still paces normally. Deepgram masks with asterisks. The word list belongs to the
-recognizer and can't be edited from here; Speechmatics tags profanity for English, Spanish and
-Italian only.
-
 **Speech timing.** A pause of at least 1.5s counts as the speaker actually stopping: it freezes
 the caption row and closes a transcript line. That threshold is a compile-time constant too, not
 a flag. Since every engine publishes only settled results, cadence is governed by the

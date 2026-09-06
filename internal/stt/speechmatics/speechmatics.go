@@ -551,7 +551,7 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		if r.Type != "word" {
 			continue
 		}
-		// Profanity is dropped outright — no mask, no placeholder. This has to
+		// Profanity and Disfluencies are dropped outright. This has to
 		// happen before the run bookkeeping below, not after: opening a run on
 		// a word that is about to vanish would set the run's start to removed
 		// audio (giving every surviving word a phantom leading offset once
@@ -564,7 +564,7 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		// The surviving words keep their own start_time/end_time untouched —
 		// nothing is reindexed or shifted. The hole simply reads as a pause to
 		// the pacer, which is what it was.
-		if slices.Contains(alt.Tags, "profanity") {
+		if slices.Contains(alt.Tags, "profanity") || slices.Contains(alt.Tags, "disfluency") {
 			continue
 		}
 
