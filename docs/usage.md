@@ -70,8 +70,9 @@ Query parameters:
 
 | param | effect |
 |---|---|
-| `?lines=N` | number of caption rows shown (default 5) |
+| `?lines=N` | number of caption rows shown (default 4, reduced when fewer fit) |
 | `?size=N` | base font size in `vw` |
+| `?bottom=N` | bottom edge of the last caption row N% above the viewport bottom, clamped to 0–90; e.g. `?bottom=10`. Respects device safe areas; omitted/invalid keeps the existing 4vh plus safe-area margin |
 | `?theme=light` | light theme (default is dark) |
 | `?logo=0` | hides the logo — for OBS, where branding is composited downstream |
 | `?wake=0` | disables the screen wake lock, gate included — for OBS sources and wall-mounted displays, where nobody is there to tap |
@@ -84,7 +85,10 @@ Captions stream in behind it, so tapping reveals current state rather than an em
 Two things the screen does on its own that are worth knowing before you see them mid-event:
 after 10 seconds with nothing arriving the rows roll themselves empty one at a time rather than
 leaving stale text up, and when auto-pause trips the status reads `silence` with a `— silence —`
-marker in the caption stack.
+marker in the caption stack. Music starts similarly show `♪ music ♪`. Both markers also
+appear in the admin caption scroll and transcript, once per transition rather than on
+reconnect. Transcript markers use the same media clock as speech: music uses its detected
+start and silence uses the end of the last observed media.
 
 ## Listening to the room audio
 
@@ -207,7 +211,9 @@ Check it during an event to confirm nothing is degrading silently.
   time-to-first-pixels. A second row shows viewer-reported publish→paint latency, measured as the
   word leaves the paced display queue, so it includes the cadence backlog rather than just the
   wire hop. The waterfall below breaks a segment into upload / recognize / assemble phases, with
-  the unmeasured capture leg drawn as a labelled hatched segment.
+  the unmeasured capture leg drawn as a labelled hatched segment. Trend chart scales start at
+  zero and only grow to the application's session peak, even after refresh or a spike leaving
+  the graph; the numerical p50/p95/max statistics still describe the rolling five-minute window.
 - **Segments / lines** — the fragmentation readout. Roughly 1–3 segments per line is healthy; a
   ratio climbing well past that means phrases are splitting on every hesitation.
 - **Counters** — restarts, xruns, STT reconnects, buffer drops, auto-pause count and total

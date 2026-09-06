@@ -134,7 +134,8 @@ type latencySample struct {
 // auto-pause resume is a true reading of that audio's latency, but it must not
 // go on defining p95 and max for the next half hour.
 type latencySeries struct {
-	samples []latencySample // ascending by at
+	samples    []latencySample // ascending by at
+	sessionMax time.Duration   // chart scale only; never trimmed
 }
 
 // observe appends a sample and trims the series to the current window.
@@ -145,6 +146,7 @@ func (s *latencySeries) observe(d time.Duration, now time.Time) {
 	if d < 0 {
 		return
 	}
+	s.sessionMax = max(s.sessionMax, d)
 	s.samples = append(s.samples, latencySample{d, now})
 	s.trim(now)
 }
@@ -481,10 +483,11 @@ type Snapshot struct {
 		UploadLatencyP95  float64 `json:"upload_latency_p95_ms"`
 		UploadLatencyMax  float64 `json:"upload_latency_max_ms"`
 
-		RecognizeLatencyLast float64 `json:"recognize_latency_last_ms"`
-		RecognizeLatencyP50  float64 `json:"recognize_latency_p50_ms"`
-		RecognizeLatencyP95  float64 `json:"recognize_latency_p95_ms"`
-		RecognizeLatencyMax  float64 `json:"recognize_latency_max_ms"`
+		RecognizeLatencyLast       float64 `json:"recognize_latency_last_ms"`
+		RecognizeLatencyP50        float64 `json:"recognize_latency_p50_ms"`
+		RecognizeLatencyP95        float64 `json:"recognize_latency_p95_ms"`
+		RecognizeLatencyMax        float64 `json:"recognize_latency_max_ms"`
+		RecognizeLatencySessionMax float64 `json:"recognize_latency_session_max_ms"`
 
 		AssembleLatencyLast float64 `json:"assemble_latency_last_ms"`
 		AssembleLatencyP50  float64 `json:"assemble_latency_p50_ms"`
@@ -503,12 +506,13 @@ type Snapshot struct {
 		Events       int64 `json:"events_total"`
 		SlowDrops    int64 `json:"slow_disconnects_total"`
 
-		ViewerLatencyLast  float64 `json:"viewer_latency_last_ms"`
-		ViewerLatencyP50   float64 `json:"viewer_latency_p50_ms"`
-		ViewerLatencyP95   float64 `json:"viewer_latency_p95_ms"`
-		ViewerLatencyMax   float64 `json:"viewer_latency_max_ms"`
-		ViewerLatencyCount int     `json:"viewer_latency_samples"`
-		ViewerReports      int64   `json:"viewer_reports_total"`
+		ViewerLatencyLast       float64 `json:"viewer_latency_last_ms"`
+		ViewerLatencyP50        float64 `json:"viewer_latency_p50_ms"`
+		ViewerLatencyP95        float64 `json:"viewer_latency_p95_ms"`
+		ViewerLatencyMax        float64 `json:"viewer_latency_max_ms"`
+		ViewerLatencySessionMax float64 `json:"viewer_latency_session_max_ms"`
+		ViewerLatencyCount      int     `json:"viewer_latency_samples"`
+		ViewerReports           int64   `json:"viewer_reports_total"`
 	} `json:"web"`
 
 	Transcript struct {
@@ -537,6 +541,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	processed, total := m.mediaProcessed, m.mediaTotal
 	pauseStart, pausedTotal := m.sttPauseStart, m.sttPausedTotal
 	lastDegradedAt := m.lastDegradedAt
+	recognizeSessionMax, viewerSessionMax := m.latRecognize.sessionMax, m.latViewer.sessionMax
 	m.mu.Unlock()
 
 	// A pause still in progress must count toward PausedSec so a long pause
@@ -604,6 +609,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.STT.RecognizeLatencyP50 = ms(recognizeP50)
 	s.STT.RecognizeLatencyP95 = ms(recognizeP95)
 	s.STT.RecognizeLatencyMax = ms(recognizeMax)
+	s.STT.RecognizeLatencySessionMax = ms(recognizeSessionMax)
 
 	s.STT.AssembleLatencyLast = ms(assembleLast)
 	s.STT.AssembleLatencyP50 = ms(assembleP50)
@@ -654,6 +660,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.Web.ViewerLatencyP50 = ms(viewerP50)
 	s.Web.ViewerLatencyP95 = ms(viewerP95)
 	s.Web.ViewerLatencyMax = ms(viewerMax)
+	s.Web.ViewerLatencySessionMax = ms(viewerSessionMax)
 	s.Web.ViewerLatencyCount = viewerN
 	s.Web.ViewerReports = m.viewerReports.Load()
 

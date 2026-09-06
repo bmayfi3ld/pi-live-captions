@@ -61,7 +61,7 @@
     font: 400 1rem/1.3 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     display: flex;
     flex-direction: column;
-    padding: 4vh 5vw calc(4vh + env(safe-area-inset-bottom, 0px)) 5vw;
+    padding: 4vh 5vw var(--caption-bottom, calc(4vh + env(safe-area-inset-bottom, 0px))) 5vw;
     overflow: hidden;
     overscroll-behavior: none;
     touch-action: manipulation;
@@ -372,13 +372,16 @@
     document.documentElement.style.setProperty("--size", sizeParam + "vw");
   }
 
-  // Default: as many rows as the page is tall — CaptionStack clamps
-  // requestedLines to what actually fits (adjustMaxRows), so a number no
-  // screen can reach means "fill the screen". ?lines=N is the per-viewer
-  // override (a phone and a projector want different counts from the same
-  // server), so nothing here varies per deployment and the page can lay
-  // itself out without waiting on a fetch.
-  var DEFAULT_LINES = 5;
+  // ?bottom=N — bottom edge of the last row, as a viewport percentage.
+  var bottomParam = Number(params.get("bottom"));
+  if (params.has("bottom") && params.get("bottom").trim() !== "" && Number.isFinite(bottomParam)) {
+    var bottom = Math.max(0, Math.min(90, bottomParam));
+    document.documentElement.style.setProperty("--caption-bottom",
+      "max(" + bottom + "dvh, env(safe-area-inset-bottom, 0px))");
+  }
+
+  // ?lines=N overrides the four-row default; CaptionStack reduces it to fit.
+  var DEFAULT_LINES = 4;
   var linesParamNum = parseInt(params.get("lines"), 10);
   var requestedLines = (!isNaN(linesParamNum) && linesParamNum > 0) ? linesParamNum : DEFAULT_LINES;
   var wakeDisabled = params.get("wake") === "0";
@@ -690,10 +693,9 @@
         hubState = ev.state || null;
         // Auto-pause is the room actually going quiet (--silence-hold), so it
         // gets an in-stream marker as well as the indicator. Only on a real
-        // transition from a known previous state: Subscribe replays the
-        // current state as the first event on every connection, and a
-        // reconnect mid-pause must not inject a second marker.
-        if (hubState === "paused" && prevState !== null && prevState !== "paused") {
+        // transition, not a subscription snapshot: reconnecting must not
+        // inject a second marker or invent an event missed while offline.
+        if (!ev.snapshot && hubState === "paused" && prevState !== "paused") {
           captionStack.pushEvent("— silence —");
         }
         applyIndicator();
@@ -705,7 +707,7 @@
       case "music":
         var wasMusic = musicOn;
         musicOn = ev.state === "on";
-        if (musicOn && !wasMusic) captionStack.pushEvent("♪ music ♪");
+        if (!ev.snapshot && musicOn && !wasMusic) captionStack.pushEvent("♪ music ♪");
         applyIndicator();
         return;
       // The operator pressed clear on the admin page. No marker and no

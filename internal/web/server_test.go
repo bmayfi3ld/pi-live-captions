@@ -157,6 +157,7 @@ func TestEventsRelaysPausedStatus(t *testing.T) {
 	defer resp.Body.Close()
 	r := bufio.NewReader(resp.Body)
 	nextSSEData(t, r) // discard the initial status
+	nextSSEData(t, r) // discard the music snapshot
 
 	hub.PublishStatus("paused")
 
@@ -206,6 +207,17 @@ func TestEventsFirstEventReplaysLastStatus(t *testing.T) {
 	}
 	if ev.State != "paused" {
 		t.Errorf("first event state = %q, want %q — a late joiner must learn the current state immediately, not wait for a change that may never come", ev.State, "paused")
+	}
+	if !ev.Snapshot {
+		t.Fatal("initial status must be marked as a snapshot")
+	}
+	data = nextSSEData(t, r)
+	var music caption.Event
+	if err := json.Unmarshal([]byte(data), &music); err != nil {
+		t.Fatal(err)
+	}
+	if music.Kind != caption.KindMusic || music.State != "off" || !music.Snapshot {
+		t.Fatalf("second event = %+v, want explicit music-off snapshot", music)
 	}
 }
 
@@ -293,6 +305,7 @@ func TestEventsDeliversPublishedEvents(t *testing.T) {
 	defer resp.Body.Close()
 	r := bufio.NewReader(resp.Body)
 	nextSSEData(t, r) // discard the initial status
+	nextSSEData(t, r) // discard the music snapshot
 
 	hub.Publish(stt.Transcript{Words: []stt.Word{
 		{Text: "live", Start: 0},
@@ -331,6 +344,7 @@ func TestEventsCarrySpeakerOnTheWire(t *testing.T) {
 	defer resp.Body.Close()
 	r := bufio.NewReader(resp.Body)
 	nextSSEData(t, r) // discard the initial status
+	nextSSEData(t, r) // discard the music snapshot
 
 	hub.Publish(stt.Transcript{Words: stt.Untimed("the guest speaks"), Speaker: 2})
 	data := nextSSEData(t, r)

@@ -119,6 +119,7 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 			return nil, err
 		}
 		s.writer = w
+		hub.OnMarker = w.Write
 	}
 
 	// One place decides what happens to a finalized line: it goes to the

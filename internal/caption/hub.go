@@ -50,6 +50,8 @@ type Event struct {
 
 	// Status/music events only. On a music event, "on" or "off".
 	State string `json:"state,omitempty"`
+	// Snapshot synchronizes indicators without creating another scroll marker.
+	Snapshot bool `json:"snapshot,omitempty"`
 }
 
 // Word is one word on the wire: its text, when the speaker began it in ms from
@@ -180,6 +182,9 @@ type Hub struct {
 	// OnFinal is called for each closed line, on the publishing goroutine.
 	// Used for the terminal and the transcript writer.
 	OnFinal func(Line)
+	// OnMarker records real non-speech transitions, never subscription snapshots.
+	// Like OnFinal, configured before publishing and serialized by op.
+	OnMarker func(Line)
 }
 
 // NewHub builds a hub. m must be non-nil — every construction site has one,
@@ -429,6 +434,9 @@ func (h *Hub) SetMusic(active bool, at time.Duration) {
 				onFinal(line)
 			}
 		}
+		if h.OnMarker != nil {
+			h.OnMarker(Line{Text: "♪ music ♪", OffsetMS: at.Milliseconds(), At: ev.At})
+		}
 		return
 	}
 
@@ -529,9 +537,28 @@ func (h *Hub) PublishStatus(state string) {
 	h.mu.Lock()
 	ev := h.newEventLocked(KindStatus)
 	ev.State = state
+	paused := state == "paused" && h.lastState != "paused"
 	h.lastState = state
+	var line Line
+	var closed bool
+	if paused {
+		line, closed = h.closeLocked(true)
+	}
+	// Silence starts at the end of the last observed media, on the same
+	// media clock used by speech lines and music markers.
+	offset := max(h.prevEnd, h.newestMedia)
+	onFinal := h.OnFinal
 	h.mu.Unlock()
 	h.broadcast(ev)
+	if closed {
+		h.metrics.STTLine()
+		if onFinal != nil {
+			onFinal(line)
+		}
+	}
+	if paused && h.OnMarker != nil {
+		h.OnMarker(Line{Text: "— silence —", OffsetMS: offset.Milliseconds(), At: ev.At})
+	}
 }
 
 // Clear tells every viewer to wipe what it has painted — the operator saw
@@ -613,17 +640,17 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 	h.mu.Lock()
 	ev := h.newEventLocked(KindStatus)
 	ev.State = h.lastState
-	var musicEv Event
+	ev.Snapshot = true
+	musicEv := h.newEventLocked(KindMusic)
+	musicEv.Snapshot = true
+	musicEv.State = "off"
 	if h.lastMusic {
-		musicEv = h.newEventLocked(KindMusic)
 		musicEv.State = "on"
 	}
 	h.subs[ch] = struct{}{}
 	ch <- ev // buffered and empty, cannot block
-	// A viewer joining mid-song needs to know why the screen is frozen.
-	if h.lastMusic {
-		ch <- musicEv
-	}
+	// Always replay off too: a reconnect may have missed the end of music.
+	ch <- musicEv
 	h.mu.Unlock()
 	h.metrics.SSEConnect()
 	h.op.Unlock()

@@ -614,6 +614,7 @@
   // labels stay honest while the page is still warming up.
   var TREND_CAP = 300;
   var trendHistory = { rec: [], view: [] };
+  var trendSession = null;
 
   function pushTrend(key, v) {
     if (typeof v !== "number") return;
@@ -622,7 +623,7 @@
     if (h.length > TREND_CAP) h.shift();
   }
 
-  function drawTrend(key, svgId, emptyId, color) {
+  function drawTrend(key, svgId, emptyId, color, sessionMax) {
     var hist = trendHistory[key];
     var el = document.getElementById(svgId);
     var empty = document.getElementById(emptyId);
@@ -640,12 +641,12 @@
     // with the card.
     var w = Math.round(el.clientWidth) || 320, h = 140;
     el.setAttribute("viewBox", "0 0 " + w + " " + h);
-    var padL = 38, padR = 6, padT = 8, padB = 16;
+    // The server retains peaks even across page refreshes and window expiry.
+    var max = Math.max(1, sessionMax || 0);
+    var min = 0;
+    // Leave room for the whole label when a spike adds another digit.
+    var padL = Math.max(38, fmtMs(max).length * 7 + 8), padR = 6, padT = 8, padB = 16;
     var plotW = w - padL - padR, plotH = h - padT - padB;
-
-    var max = Math.max.apply(null, hist);
-    var min = Math.min.apply(null, hist);
-    if (max === min) { max = max + 1; min = Math.max(0, min - 1); }
 
     var n = hist.length;
     var pts = hist.map(function (v, i) {
@@ -874,12 +875,16 @@
     setText("seg-view-p95", fmtMs(web0.viewer_latency_p95_ms));
     setText("seg-view-max", fmtMs(web0.viewer_latency_max_ms));
 
+    if (trendSession !== s.session_id) {
+      trendSession = s.session_id;
+      trendHistory = { rec: [], view: [] };
+    }
     pushTrend("rec", stt.recognize_latency_last_ms);
     if ((web0.viewer_latency_samples || 0) > 0) pushTrend("view", web0.viewer_latency_last_ms);
 
     var css = getComputedStyle(document.documentElement);
-    drawTrend("rec", "trend-rec", "trend-rec-empty", css.getPropertyValue("--accent").trim());
-    drawTrend("view", "trend-view", "trend-view-empty", css.getPropertyValue("--warn").trim());
+    drawTrend("rec", "trend-rec", "trend-rec-empty", css.getPropertyValue("--accent").trim(), stt.recognize_latency_session_max_ms);
+    drawTrend("view", "trend-view", "trend-view-empty", css.getPropertyValue("--warn").trim(), web0.viewer_latency_session_max_ms);
 
     // ---- source ----
     var src = s.source || {};
@@ -1142,8 +1147,20 @@
         break;
       // First event on every connection carries the server's last-known
       // state — same as the viewer, which this must render identically to.
-      case "status":  hubState = ev.state || null; applyIndicator(); return;
-      case "music":   musicOn = ev.state === "on"; applyIndicator(); return;
+      case "status":
+        var prevState = hubState;
+        hubState = ev.state || null;
+        if (!ev.snapshot && hubState === "paused" && prevState !== "paused") {
+          captionStack.pushEvent("— silence —");
+        }
+        applyIndicator();
+        return;
+      case "music":
+        var wasMusic = musicOn;
+        musicOn = ev.state === "on";
+        if (!ev.snapshot && musicOn && !wasMusic) captionStack.pushEvent("♪ music ♪");
+        applyIndicator();
+        return;
       default: return;
     }
     applyIndicator();

@@ -84,7 +84,8 @@ doesn't resolve.
 | `/audio.mp3` | Live room audio, playable in VLC or mpv |
 | `/healthz` | Basic server health check |
 
-The viewer supports URL settings such as `?lines=5&size=4`, `?theme=light`, and `?logo=0`.
+The viewer defaults to four rows and supports URL settings such as `?lines=4&size=4`,
+`?bottom=10` (last row 10% above the bottom), `?theme=light`, and `?logo=0`.
 On phones over HTTP, tap the initial **Tap to start** prompt to let the page keep the screen
 awake. For OBS or a managed display, use `?wake=0` to disable that behaviour; the kiosk does
 this by default.
