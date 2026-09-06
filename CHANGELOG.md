@@ -6,6 +6,9 @@ adding a new `## X.Y.Z` heading here.
 
 ## Unreleased
 
+### Added
+- a music delay to avoid back and forth jitter with music detection
+
 ### Changed
 - default accuracy/latency for speechmatics to 1.2 seconds
 - enabled filler word filtering

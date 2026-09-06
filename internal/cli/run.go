@@ -262,7 +262,8 @@ func (s *session) run(ctx context.Context) error {
 	close(transcripts)
 	<-hubDone
 
-	// Close any utterance still in progress so the tail is not lost.
+	// Cancel any unconfirmed music release, drop its held words, and close any
+	// live utterance still in progress before the writer is shut down.
 	s.hub.Flush()
 
 	if engineErr != nil && !errors.Is(engineErr, context.Canceled) {

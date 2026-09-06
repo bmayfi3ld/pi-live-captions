@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"livecaption/internal/metrics"
@@ -553,42 +554,37 @@ func TestEventCarriesSpeaker(t *testing.T) {
 // Publish broadcasts nothing and calls no OnFinal, and normal publishing
 // resumes once it goes off.
 func TestMusicSuppressesPublish(t *testing.T) {
-	h := newTestHub()
-	var finals []Line
-	h.OnFinal = func(l Line) { finals = append(finals, l) }
-	sub, unsub := h.Subscribe()
-	defer unsub()
-	drain(sub) // discard the initial status
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestHub()
+		var finals []Line
+		h.OnFinal = func(l Line) { finals = append(finals, l) }
+		sub, unsub := h.Subscribe()
+		defer unsub()
+		drain(sub)
 
-	h.SetMusic(true, 0)
-	drain(sub) // discard the music-on event
-
-	h.Publish(stt.Transcript{Words: stt.Untimed("garbled singing"), Start: time.Second})
-	if len(finals) != 0 {
-		t.Fatalf("expected no line closed while music is on, got %d: %+v", len(finals), finals)
-	}
-	if events := drain(sub); len(events) != 0 {
-		t.Fatalf("expected no broadcast while music is on, got %+v", events)
-	}
-
-	// The song ended at 5s, after the garble above — which is therefore song,
-	// and must not come back out of the hold.
-	h.SetMusic(false, 5*time.Second)
-	if events := drain(sub); len(events) != 1 || events[0].Kind != KindMusic {
-		t.Fatalf("expected only the music-off event, got %+v", events)
-	}
-
-	h.Publish(stt.Transcript{Words: stt.Untimed("captions resume"), Start: 10 * time.Second})
-	events := drain(sub)
-	var found bool
-	for _, ev := range events {
-		if ev.Kind == KindCaption {
-			found = true
+		h.SetMusic(true, 0)
+		drain(sub)
+		h.Publish(stt.Transcript{Words: stt.Untimed("garbled singing"), Start: time.Second})
+		h.SetMusic(false, 5*time.Second)
+		time.Sleep(musicEndHold - time.Nanosecond)
+		synctest.Wait()
+		if events := drain(sub); len(events) != 0 {
+			t.Fatalf("music ended before hold deadline: %+v", events)
 		}
-	}
-	if !found {
-		t.Fatal("expected captions to resume once music is off")
-	}
+		time.Sleep(time.Nanosecond)
+		synctest.Wait()
+		if events := drain(sub); len(events) != 1 || events[0].Kind != KindMusic || events[0].State != "off" {
+			t.Fatalf("expected only music-off at deadline, got %+v", events)
+		}
+		if len(finals) != 0 {
+			t.Fatalf("music garble reached transcript: %+v", finals)
+		}
+
+		h.Publish(stt.Transcript{Words: stt.Untimed("captions resume"), Start: 10 * time.Second})
+		if events := drain(sub); len(events) != 1 || events[0].Kind != KindCaption {
+			t.Fatalf("captions did not resume: %+v", events)
+		}
+	})
 }
 
 // TestMusicOffReleasesSpeechAfterEndTime is the regression for the dropped
@@ -597,60 +593,56 @@ func TestMusicSuppressesPublish(t *testing.T) {
 // on. Suppressing on arrival order lost them; suppressing on the media time
 // the edge reports keeps them.
 func TestMusicOffReleasesSpeechAfterEndTime(t *testing.T) {
-	h := newTestHub()
-	var finals []Line
-	h.OnFinal = func(l Line) { finals = append(finals, l) }
-	sub, unsub := h.Subscribe()
-	defer unsub()
-	drain(sub)
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestHub()
+		var finals []Line
+		h.OnFinal = func(l Line) { finals = append(finals, l) }
+		sub, unsub := h.Subscribe()
+		defer unsub()
+		drain(sub)
 
-	h.SetMusic(true, 5*time.Second)
-	drain(sub)
+		h.SetMusic(true, 5*time.Second)
+		drain(sub)
+		h.Publish(stt.Transcript{
+			Words: []stt.Word{{Text: "ooh", Start: 8 * time.Second, End: 9 * time.Second}},
+			Start: 8 * time.Second, Duration: time.Second,
+		})
+		h.Publish(stt.Transcript{
+			Words: []stt.Word{
+				{Text: "yeah", Start: 13200 * time.Millisecond, End: 13350 * time.Millisecond},
+				{Text: "please", Start: 13600 * time.Millisecond, End: 14 * time.Second},
+			},
+			Start: 13200 * time.Millisecond, Duration: 800 * time.Millisecond, Speaker: 1,
+		})
+		h.SetMusic(false, 13400*time.Millisecond)
+		// Speech arriving during the hold must join the same ordered replay.
+		h.Publish(stt.Transcript{Words: []stt.Word{{Text: "continue", Start: 14 * time.Second, End: 14500 * time.Millisecond}}, Start: 14 * time.Second, Duration: 500 * time.Millisecond, Speaker: 1})
+		time.Sleep(musicEndHold)
+		synctest.Wait()
 
-	// Pure song, entirely before the music ends.
-	h.Publish(stt.Transcript{
-		Words: []stt.Word{{Text: "ooh", Start: 8 * time.Second, End: 9 * time.Second}},
-		Start: 8 * time.Second, Duration: time.Second,
-	})
-	// The straddling window: the tail of the song, then the first real word.
-	// This is the one that used to vanish whole.
-	h.Publish(stt.Transcript{
-		Words: []stt.Word{
-			{Text: "yeah", Start: 13200 * time.Millisecond, End: 13350 * time.Millisecond},
-			{Text: "please", Start: 13600 * time.Millisecond, End: 14 * time.Second},
-		},
-		Start: 13200 * time.Millisecond, Duration: 800 * time.Millisecond,
-		Speaker: 1,
-	})
-
-	// Only now does the provider report where the music actually stopped.
-	h.SetMusic(false, 13400*time.Millisecond)
-
-	var captions []Event
-	for _, ev := range drain(sub) {
-		if ev.Kind == KindCaption {
-			captions = append(captions, ev)
+		var captions []Event
+		for _, ev := range drain(sub) {
+			if ev.Kind == KindCaption {
+				captions = append(captions, ev)
+			}
 		}
-	}
-	if len(captions) != 1 {
-		t.Fatalf("expected exactly one released caption, got %d: %+v", len(captions), captions)
-	}
-	if len(captions[0].Words) != 1 || captions[0].Words[0].Text != "please" {
-		t.Errorf("released words = %+v, want just \"please\"", captions[0].Words)
-	}
-	// Start was re-derived from the surviving word, so its offset is 0 rather
-	// than carrying a phantom lead-in from the song that was cut.
-	if captions[0].Words[0].OffsetMS != 0 {
-		t.Errorf("released word offset = %dms, want 0", captions[0].Words[0].OffsetMS)
-	}
-	if captions[0].Speaker != 1 {
-		t.Errorf("released speaker = %d, want 1", captions[0].Speaker)
-	}
-	for _, l := range finals {
-		if strings.Contains(l.Text, "ooh") || strings.Contains(l.Text, "yeah") {
-			t.Errorf("song leaked into the transcript: %q", l.Text)
+		if len(captions) != 2 || captionText(captions[0]) != "please" || captionText(captions[1]) != "continue" {
+			t.Fatalf("released captions = %+v", captions)
 		}
-	}
+		if captions[0].Words[0].OffsetMS != 0 || captions[0].Speaker != 1 {
+			t.Errorf("trimmed caption lost timing/speaker: %+v", captions[0])
+		}
+		// A delayed pre-boundary final stays filtered after release.
+		h.Publish(stt.Transcript{Words: []stt.Word{{Text: "late-song", Start: 13 * time.Second, End: 13200 * time.Millisecond}}, Start: 13 * time.Second, Duration: 200 * time.Millisecond})
+		if events := drain(sub); len(events) != 0 {
+			t.Errorf("late pre-boundary final leaked: %+v", events)
+		}
+		for _, l := range finals {
+			if strings.Contains(l.Text, "ooh") || strings.Contains(l.Text, "yeah") {
+				t.Errorf("song leaked into transcript: %q", l.Text)
+			}
+		}
+	})
 }
 
 // TestMusicResetDropsHeld covers the dialer's gate reset: a fresh connection
@@ -683,32 +675,75 @@ func TestMusicResetDropsHeld(t *testing.T) {
 	}
 }
 
-// TestHeldSegmentsAreBounded pins the cap on the hold: a song long enough to
-// outrun maxHeldSegments must not grow it without limit, and what survives is
-// the tail nearest the boundary — the part the music-end edge can still
-// release.
-func TestHeldSegmentsAreBounded(t *testing.T) {
+func TestHeldSegmentsUseMediaWindow(t *testing.T) {
 	h := newTestHub()
 	h.SetMusic(true, 0)
-	for i := range maxHeldSegments * 3 {
-		at := time.Duration(i) * time.Second
-		h.Publish(stt.Transcript{
-			Words: []stt.Word{{Text: "la", Start: at, End: at + time.Second}},
-			Start: at, Duration: time.Second,
+	// More than the old 32-segment cap all fit in the five-second window.
+	for i := range 40 {
+		at := 10*time.Second + time.Duration(i)*100*time.Millisecond
+		h.Publish(stt.Transcript{Words: []stt.Word{{Text: "tail", Start: at, End: at + 50*time.Millisecond}}, Start: at, Duration: 50 * time.Millisecond})
+	}
+	if got := len(h.held); got != 40 {
+		t.Fatalf("held %d in-window segments, want 40", got)
+	}
+	// Advancing media trims old words and preserves one exactly at the cutoff.
+	h.Publish(stt.Transcript{Words: []stt.Word{{Text: "boundary", Start: 20 * time.Second, End: 20 * time.Second}}, Start: 20 * time.Second})
+	if got := captionText(Event{Words: wireWords(h.held[0])}); got != "boundary" {
+		t.Fatalf("oldest retained text = %q, want boundary", got)
+	}
+}
+
+func TestMusicRestartCancelsPendingRelease(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestHub()
+		sub, unsub := h.Subscribe()
+		defer unsub()
+		drain(sub)
+		h.SetMusic(true, time.Second)
+		drain(sub)
+		h.SetMusic(false, 2*time.Second)
+		h.Publish(stt.Transcript{Words: stt.Untimed("gap garble"), Start: 3 * time.Second})
+		time.Sleep(musicEndHold - time.Second)
+		h.SetMusic(true, 4*time.Second)
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if events := drain(sub); len(events) != 0 {
+			t.Fatalf("restart emitted stale release: %+v", events)
+		}
+		h.SetMusic(false, 5*time.Second)
+		time.Sleep(musicEndHold)
+		synctest.Wait()
+		events := drain(sub)
+		if len(events) != 1 || events[0].Kind != KindMusic || events[0].State != "off" {
+			t.Fatalf("new hold did not release exactly once: %+v", events)
+		}
+	})
+}
+
+func TestMusicPendingLifecycle(t *testing.T) {
+	for _, action := range []struct {
+		name string
+		run  func(*Hub)
+	}{{"reset", func(h *Hub) { h.SetMusic(false, 0) }}, {"flush", func(h *Hub) { h.Flush() }}} {
+		t.Run(action.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h := newTestHub()
+				sub, unsub := h.Subscribe()
+				defer unsub()
+				drain(sub)
+				h.SetMusic(true, time.Second)
+				drain(sub)
+				h.Publish(stt.Transcript{Words: stt.Untimed("old clock"), Start: 2 * time.Second})
+				h.SetMusic(false, 2*time.Second)
+				action.run(h)
+				drain(sub)
+				time.Sleep(musicEndHold)
+				synctest.Wait()
+				if events := drain(sub); len(events) != 0 {
+					t.Fatalf("canceled callback emitted events: %+v", events)
+				}
+			})
 		})
-	}
-
-	h.mu.Lock()
-	got := len(h.held)
-	first := h.held[0].Start
-	h.mu.Unlock()
-
-	if got != maxHeldSegments {
-		t.Errorf("held = %d segments, want %d", got, maxHeldSegments)
-	}
-	want := time.Duration(maxHeldSegments*3-maxHeldSegments) * time.Second
-	if first != want {
-		t.Errorf("oldest held segment starts at %v, want %v (the tail, not the head)", first, want)
 	}
 }
 

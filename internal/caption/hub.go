@@ -93,13 +93,12 @@ const subscriberBuffer = 16
 // unpunctuated ramble can't grow a single line without bound.
 const maxUtteranceChars = 1000
 
-// maxHeldSegments bounds Hub.held, so a set that runs for an hour cannot grow
-// it without limit. Only the tail either side of the music's end is ever
-// released, and at Speechmatics' 0.7s max_delay this is ~20s of it.
-//
-// ponytail: a fixed count, not a media-time window. Raise it if a provider
-// ever reports the end of music later than that.
-const maxHeldSegments = 32
+// musicEndHold debounces brief gaps in music. musicReplayWindow independently
+// controls how much timestamped recognizer output is retained for replay.
+const (
+	musicEndHold      = 2 * time.Second
+	musicReplayWindow = 4 * time.Second
+)
 
 // breakGap is how long the audio must go quiet before it counts as the
 // speaker actually stopping, rather than drawing breath. It drives both the
@@ -121,6 +120,10 @@ const breakGap = 1500 * time.Millisecond
 // when a transcript line closes — from media-time gaps and terminal
 // punctuation, since the engine itself no longer reports either.
 type Hub struct {
+	// op serializes complete public operations, including broadcasts and
+	// OnFinal callbacks. In particular, music-off and its replay are atomic
+	// with respect to live publishing, clear, reset, and shutdown.
+	op  sync.Mutex
 	mu  sync.RWMutex
 	seq int64
 	// committed is the text of the transcript line in progress.
@@ -163,7 +166,13 @@ type Hub struct {
 	// lastMusic mirrors music for Subscribe, the same way lastState mirrors
 	// PublishStatus — a client joining mid-song needs to know the screen is
 	// frozen on purpose.
-	lastMusic bool
+	lastMusic       bool
+	musicTimer      *time.Timer
+	musicToken      uint64
+	pendingEnd      time.Duration
+	newestMedia     time.Duration
+	confirmedCutoff time.Duration
+	cutoffSet       bool
 
 	subs    map[chan Event]struct{}
 	metrics *metrics.Metrics
@@ -184,6 +193,13 @@ func NewHub(m *metrics.Metrics) *Hub {
 // below is deliberate: there is exactly one thing to do with a segment, not
 // three branches keyed off control flags the engine no longer reports.
 func (h *Hub) Publish(t stt.Transcript) {
+	h.op.Lock()
+	defer h.op.Unlock()
+	h.publish(t)
+}
+
+// publish is Publish with h.op already held.
+func (h *Hub) publish(t stt.Transcript) {
 	text := strings.TrimSpace(t.Text())
 	if text == "" {
 		return
@@ -201,11 +217,19 @@ func (h *Hub) Publish(t stt.Transcript) {
 	// out on media time.
 	if h.music {
 		h.held = append(h.held, t)
-		if len(h.held) > maxHeldSegments {
-			h.held = h.held[len(h.held)-maxHeldSegments:]
-		}
+		h.newestMedia = max(h.newestMedia, t.End())
+		h.trimHeldLocked()
 		h.mu.Unlock()
 		return
+	}
+	if h.cutoffSet {
+		var ok bool
+		t, ok = afterMusic(t, h.confirmedCutoff)
+		if !ok {
+			h.mu.Unlock()
+			return
+		}
+		text = strings.TrimSpace(t.Text())
 	}
 	// The break must be evaluated, and the line it closes flushed, BEFORE
 	// this segment is appended — otherwise a pause lands inside the new
@@ -355,53 +379,121 @@ func endsSentence(s string) bool {
 // offset, so it is all dropped rather than released against a meaningless
 // boundary.
 func (h *Hub) SetMusic(active bool, at time.Duration) {
+	h.op.Lock()
+	defer h.op.Unlock()
+
 	h.mu.Lock()
-	if h.music == active {
-		// The engine can only send edges, but this is cheap insurance
-		// against a redundant one being treated as a fresh state change.
+	if !active && at <= 0 {
+		h.cancelMusicEndLocked()
+		h.held = nil
+		h.newestMedia = 0
+		h.confirmedCutoff = 0
+		h.cutoffSet = false
+		if !h.music {
+			h.mu.Unlock()
+			return
+		}
+		h.music = false
+		h.lastMusic = false
+		ev := h.newEventLocked(KindMusic)
+		ev.State = "off"
+		h.mu.Unlock()
+		h.broadcast(ev)
+		return
+	}
+
+	h.newestMedia = max(h.newestMedia, at)
+	h.trimHeldLocked()
+	if active {
+		if h.music {
+			if h.musicTimer != nil {
+				h.cancelMusicEndLocked()
+				h.held = nil // the abandoned gap was still part of the song
+			}
+			h.mu.Unlock()
+			return
+		}
+		h.music = true
+		h.lastMusic = true
+		h.confirmedCutoff = 0
+		h.cutoffSet = false
+		line, closed := h.closeLocked(true)
+		ev := h.newEventLocked(KindMusic)
+		ev.State = "on"
+		onFinal := h.OnFinal
+		h.mu.Unlock()
+		h.broadcast(ev)
+		if closed {
+			h.metrics.STTLine()
+			if onFinal != nil {
+				onFinal(line)
+			}
+		}
+		return
+	}
+
+	if !h.music || h.musicTimer != nil {
 		h.mu.Unlock()
 		return
 	}
-	h.music = active
-	h.lastMusic = active
+	h.pendingEnd = at
+	h.musicToken++
+	token := h.musicToken
+	h.musicTimer = time.AfterFunc(musicEndHold, func() { h.releaseMusic(token) })
+	h.mu.Unlock()
+}
 
-	var line Line
-	var closed bool
-	var held []stt.Transcript
-	if active {
-		line, closed = h.closeLocked(true)
-	} else {
-		if at > 0 {
-			held = h.held
-		}
-		h.held = nil
+func (h *Hub) releaseMusic(token uint64) {
+	h.op.Lock()
+	defer h.op.Unlock()
+
+	h.mu.Lock()
+	if h.musicTimer == nil || h.musicToken != token || !h.music {
+		h.mu.Unlock()
+		return
 	}
+	h.musicTimer = nil
+	h.music = false
+	h.lastMusic = false
+	h.confirmedCutoff = max(h.pendingEnd, h.newestMedia-musicReplayWindow)
+	h.cutoffSet = true
+	held := h.held
+	h.held = nil
 	ev := h.newEventLocked(KindMusic)
-	if active {
-		ev.State = "on"
-	} else {
-		ev.State = "off"
-	}
-	onFinal := h.OnFinal
+	ev.State = "off"
 	h.mu.Unlock()
 
 	h.broadcast(ev)
-	if closed {
-		h.metrics.STTLine()
-		if onFinal != nil {
-			onFinal(line)
+	for _, transcript := range held {
+		if transcript, ok := afterMusic(transcript, h.confirmedCutoff); ok {
+			h.publish(transcript)
 		}
 	}
-	// Replayed through Publish rather than inlined here, so the released speech
-	// gets the same break detection, line closing and fan-out as any other
-	// segment. It has to happen after the unlock above — Publish takes h.mu —
-	// and after the "off" event, so a viewer is told the screen is live again
-	// before the text meant for it arrives.
-	for _, t := range held {
-		if t, ok := afterMusic(t, at); ok {
-			h.Publish(t)
+}
+
+func (h *Hub) cancelMusicEndLocked() {
+	if h.musicTimer != nil {
+		h.musicTimer.Stop()
+		h.musicTimer = nil
+	}
+	h.musicToken++
+	h.pendingEnd = 0
+}
+
+func (h *Hub) trimHeldLocked() {
+	cutoff := h.newestMedia - musicReplayWindow
+	if cutoff <= 0 {
+		return
+	}
+	kept := h.held[:0]
+	for _, transcript := range h.held {
+		if transcript, ok := afterMusic(transcript, cutoff); ok {
+			kept = append(kept, transcript)
 		}
 	}
+	// ponytail: media-time retention is not a hard memory cap if provider
+	// timestamps stall; add a defensive count/byte cap only if observed.
+	h.held = kept
 }
 
 // afterMusic strips the words the music covered from t, reporting false if
@@ -432,6 +524,8 @@ func afterMusic(t stt.Transcript, at time.Duration) (stt.Transcript, bool) {
 
 // PublishStatus broadcasts a connection state change.
 func (h *Hub) PublishStatus(state string) {
+	h.op.Lock()
+	defer h.op.Unlock()
 	h.mu.Lock()
 	ev := h.newEventLocked(KindStatus)
 	ev.State = state
@@ -451,6 +545,8 @@ func (h *Hub) PublishStatus(state string) {
 // Not replayed in Subscribe: a clear is an edge, not a state. A viewer that
 // connects afterwards has nothing painted to wipe.
 func (h *Hub) Clear() {
+	h.op.Lock()
+	defer h.op.Unlock()
 	h.mu.Lock()
 	line, closed := h.closeLocked(true)
 	// Anything held through a song the operator cleared during is older than
@@ -473,7 +569,11 @@ func (h *Hub) Clear() {
 // Flush closes any in-progress utterance. Called at shutdown so the tail of a
 // session is not lost when the speaker was still talking.
 func (h *Hub) Flush() {
+	h.op.Lock()
+	defer h.op.Unlock()
 	h.mu.Lock()
+	h.cancelMusicEndLocked()
+	h.held = nil
 	line, closed := h.closeLocked(true)
 	onFinal := h.OnFinal
 	h.mu.Unlock()
@@ -509,6 +609,7 @@ func (h *Hub) newEventLocked(k Kind) Event {
 func (h *Hub) Subscribe() (<-chan Event, func()) {
 	ch := make(chan Event, subscriberBuffer)
 
+	h.op.Lock()
 	h.mu.Lock()
 	ev := h.newEventLocked(KindStatus)
 	ev.State = h.lastState
@@ -518,24 +619,24 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 		musicEv.State = "on"
 	}
 	h.subs[ch] = struct{}{}
-	h.mu.Unlock()
-
 	ch <- ev // buffered and empty, cannot block
-	// A viewer joining mid-song needs to know why the screen is frozen —
-	// pushed after the status event it already replays, same buffered
-	// channel, so it also cannot block.
+	// A viewer joining mid-song needs to know why the screen is frozen.
 	if h.lastMusic {
 		ch <- musicEv
 	}
+	h.mu.Unlock()
 	h.metrics.SSEConnect()
+	h.op.Unlock()
 
 	var once sync.Once
 	return ch, func() {
 		once.Do(func() {
+			h.op.Lock()
+			defer h.op.Unlock()
 			h.mu.Lock()
 			delete(h.subs, ch)
-			h.mu.Unlock()
 			close(ch)
+			h.mu.Unlock()
 			h.metrics.SSEDisconnect()
 		})
 	}
@@ -549,14 +650,9 @@ func (h *Hub) Subscribe() (<-chan Event, func()) {
 // whatever was said during it.
 func (h *Hub) broadcast(ev Event) {
 	h.mu.RLock()
-	targets := make([]chan Event, 0, len(h.subs))
-	for ch := range h.subs {
-		targets = append(targets, ch)
-	}
-	h.mu.RUnlock()
-
+	defer h.mu.RUnlock()
 	h.metrics.SSEEvent()
-	for _, ch := range targets {
+	for ch := range h.subs {
 		select {
 		case ch <- ev:
 		default:
