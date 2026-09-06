@@ -25,6 +25,8 @@ Assume the user already has an instance running when you need one.
 - Do not create commits, wait for the user to review the changes
 - Always check that the current checkout is clean before starting work, ask the user if there are any pending changes
 - Do not create new branches, check that the current branch is clean then do work there, ask the user if the current branch is dirty
+- when making changes to the primary application or its deployment package, create a changelog entry for the change
+- similarly when making a change to the kiosk deployment update its changelog
 
 ## Lint
 
