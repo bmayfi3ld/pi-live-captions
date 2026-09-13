@@ -1,21 +1,21 @@
 Codename: stable
-Date: Sun, 13 Sep 2026 00:51:02 +0000
+Date: Sun, 13 Sep 2026 03:25:16 +0000
 Label: livecaption
 Origin: livecaption
 Suite: stable
 MD5Sum:
- 6b02e3809e9244399c3fcce6408d0098            12607 Packages
- 5caed749a5dd56cb71c7ad4f8359420e             2273 Packages.gz
- 3553b2eb751f89cb1ece3e8d9b99fba7              108 Release
+ ab4575734cedd5edd1bb47e173456161            14385 Packages
+ 548d681ae5558227a12114d200880d96             2482 Packages.gz
+ 2f2f93d8b9aa04c84bbedf3d10291162              108 Release
 SHA1:
- d59fa4d7c0dd33d9396be124842c9ef968d232c1            12607 Packages
- c843294ccc429d7a542badf439d72c7780457536             2273 Packages.gz
- 53850afdd67fea80b43c9cb5d3ac45346d73aaf4              108 Release
+ 66dfa683e908446607a3e88e2924665d7df7855e            14385 Packages
+ 319968f4bd6df129e16101cc6135e09604b5a27f             2482 Packages.gz
+ 6413fa9ede0086b67ad0d7dad9227989b3ce9ff9              108 Release
 SHA256:
- e0cbb8cd9307e28651cfb151e737096319b32c6c053dd65f6955d374c1427990            12607 Packages
- fafe98c3d8f373ecc7300e52ac05ea154c2997affcb2c75c020cd714c16c0ffe             2273 Packages.gz
- 7ff1dc8aed5e4f9afdc2811a16f2f0e2c312b5616229dfa448dc9eee13fdc8a4              108 Release
+ 596d2438a7082e9049555fa26e6c0fc625906a2e1b758b9b0eff79fa02433b00            14385 Packages
+ c6c830e03f4dae1bcc5bcdb2bf41d46cfb51adba78f3d34265d1e762562b3bf5             2482 Packages.gz
+ 35ba50e886744bf9bba0de27cc7e282ea790864afa12bdc315f8a30be94127b1              108 Release
 SHA512:
- 41502e536088f836436479db8523fbbbf596255daf5829cfba4b7dea1aa6a536f8117a65e5219a7e52a4b28c9cfa0bffdf551e0cfc3f78d611cdb8f21c57b08d            12607 Packages
- ea29756d07b03f6041ce116166402afdd3471987b8d6ee8cf85789168b95c66ef08474269b72f25b61aeca02f4f9664f11ae4909b4d7306e3cdffb50857f3ab5             2273 Packages.gz
- 9fc9e3af3efdd3bbecd2468c43f5cc362ba9e61a07d4157db90caa86dad66501c7cfbc0fbcf5ad0058c8dce4e34da0548c019fa6c55bb7bf372848ae1c2967e2              108 Release
+ 2f5fc1af8c0372d617f0b15ddcdfbc992f1ccc174139ad67b06681946853fe7169118cf0afea3390bd23702230b97132f5c3ef372494e5a8576caa054adf16aa            14385 Packages
+ b0ffe235b0c9aaec5e3ef9fe521167b262874717b5cfb3807a60bde88c1e98eaa7e0f43202d48809f3559dbb31b66d734c42e7daa87dacf4a48fdd1b31cb697a             2482 Packages.gz
+ 51ad2e2946d45d50ed9e65d39b00d96c81c33a38574f258a78993504d6977d5ddc1457f4089c9382eca598efa9fe4169d8a6a980b5f3ce5695bccd5c50c3fb7f              108 Release
