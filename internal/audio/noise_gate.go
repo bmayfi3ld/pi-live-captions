@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	DefaultNoiseThresholdDBFS = -35.0
-	DefaultNoiseRelease       = 3 * time.Second
+	DefaultNoiseThresholdDBFS = -50.0
+	DefaultNoiseRelease       = 5 * time.Second
 )
 
 // NoiseSettings controls caption audio, not the separate listener MP3 stream.

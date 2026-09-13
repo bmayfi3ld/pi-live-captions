@@ -9,6 +9,9 @@ adding a new `## X.Y.Z` heading here.
 ### Added
 - Duration-based STT usage metrics: `/api/stats` now reports cumulative audio sent in minutes and hours, and the admin dashboard displays both totals alongside bytes sent.
 
+### Changed
+- Caption audio gate defaults are now -50 dBFS with a 5-second release.
+
 ### Fixed
 - Paused reconnect-buffer rotation no longer falsely reports dropped audio or degraded health when speech resumes.
 

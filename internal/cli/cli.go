@@ -86,8 +86,8 @@ type STTFlags struct {
 	// wants to carry.
 	KeytermFile string `name:"keyterm-file" type:"existingfile" group:"Speech-to-text" help:"File of keyterms, one per line, blank lines and # comments ignored. Most-likely-spoken first: a list longer than the engine accepts is cut from the end."`
 
-	NoiseThresholdDBFS float64       `name:"noise-threshold-dbfs" default:"-35" group:"Speech-to-text" help:"Caption audio RMS threshold in dBFS (-100 to 0); higher suppresses more, 0 mutes caption input."`
-	NoiseRelease       time.Duration `name:"noise-release" default:"3s" group:"Speech-to-text" help:"Keep caption audio open after the last above-threshold frame (0 to 60s)."`
+	NoiseThresholdDBFS float64       `name:"noise-threshold-dbfs" default:"-50" group:"Speech-to-text" help:"Caption audio RMS threshold in dBFS (-100 to 0); higher suppresses more, 0 mutes caption input."`
+	NoiseRelease       time.Duration `name:"noise-release" default:"5s" group:"Speech-to-text" help:"Keep caption audio open after the last above-threshold frame (0 to 60s)."`
 
 	AutoPause   bool          `default:"true" negatable:"" group:"Speech-to-text" help:"Stop the recognizer connection while the audio is silent, so a quiet room costs nothing."`
 	SilenceHold time.Duration `name:"silence-hold" default:"60s" group:"Speech-to-text" help:"How long the audio must stay silent before the connection is paused."`
