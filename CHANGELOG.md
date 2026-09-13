@@ -4,7 +4,7 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
-## Unreleased
+## 0.5.0
 
 ### Added
 - Duration-based STT usage metrics: `/api/stats` now reports cumulative audio sent in minutes and hours, and the admin dashboard displays both totals alongside bytes sent.
