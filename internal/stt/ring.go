@@ -13,6 +13,7 @@ import (
 type chunk struct {
 	pcm        []byte
 	capturedAt time.Time
+	active     bool
 }
 
 // ring holds PCM chunks while the connection is down or catching up,
@@ -36,20 +37,16 @@ func newRing(capBytes int, met *metrics.Metrics, gate *Gate) *ring {
 
 func (r *ring) push(f audio.Frame) {
 	r.mu.Lock()
-	r.chunks = append(r.chunks, chunk{pcm: f.PCM, capturedAt: f.CapturedAt})
+	r.chunks = append(r.chunks, chunk{pcm: f.PCM, capturedAt: f.CapturedAt, active: r.gate.Active()})
 	r.bytes += len(f.PCM)
 	for r.bytes > r.capBytes && len(r.chunks) > 1 {
 		dropped := r.chunks[0]
 		r.chunks = r.chunks[1:]
 		r.bytes -= len(dropped.pcm)
-		// While the gate is inactive, an eviction is the pre-roll buffer
-		// working as designed: we keep pushing silent frames so the ring
-		// always holds the most recent ~bufferAudio, and the oldest stale
-		// silence has to go somewhere. That's not degradation, so it stays
-		// uncounted. While the gate is active, though, evicting live audio
-		// means the link isn't draining fast enough to keep up — that IS
-		// worth flagging.
-		if r.gate.Active() {
+		// Classify evictions by the discarded chunk's admission-time gate
+		// state: paused pre-roll rotation is expected even after a resume,
+		// while active-period audio loss remains degradation.
+		if dropped.active {
 			r.met.STTBufferDrop()
 		}
 	}

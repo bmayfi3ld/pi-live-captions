@@ -4,6 +4,11 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
+## Unreleased
+
+### Fixed
+- Paused reconnect-buffer rotation no longer falsely reports dropped audio or degraded health when speech resumes.
+
 ## 0.4.0
 
 ### Changed
