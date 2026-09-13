@@ -104,4 +104,109 @@ for (const [query, expected] of [['', undefined], ['bottom=10', '10'], ['bottom=
   assert.equal(styles['--caption-bottom'], expected === undefined ? undefined :
     `max(${expected}dvh, env(safe-area-inset-bottom, 0px))`);
 }
+// Run the admin transcript script itself with a compact DOM. This checks the
+// page-local docking state without a server or browser layout engine.
+const transcriptScript = admin.slice(
+  admin.lastIndexOf('<script>\n(function () {') + '<script>\n'.length,
+  admin.lastIndexOf('</script>')
+);
+function transcriptPage(width, controls, resizeObserver) {
+  const elements = {};
+  const timers = [];
+  const windowEvents = {};
+  let observer;
+  let stacks = 0;
+  let retypesets = 0;
+  let streams = 0;
+  let stream;
+  function classes() {
+    const names = new Set();
+    return {
+      add: name => names.add(name), remove: name => names.delete(name),
+      contains: name => names.has(name),
+      toggle(name, on) { if (on) names.add(name); else names.delete(name); return on; }
+    };
+  }
+  function element(id) {
+    return elements[id] ||= {
+      classList: classes(), style: {}, listeners: {}, checked: false, height: 80,
+      addEventListener(name, fn) { this.listeners[name] = fn; },
+      getBoundingClientRect() { return {height: this.height}; }
+    };
+  }
+  const rootStyles = {};
+  const context = {
+    document: {
+      documentElement: {style: {setProperty(name, value) { rootStyles[name] = value; }}},
+      getElementById: element,
+      addEventListener() {}
+    },
+    window: {
+      ADMIN_CONTROLS: controls,
+      matchMedia: () => ({matches: width <= 600}),
+      CaptionStack() {
+        stacks++;
+        return { retypeset() { retypesets++; }, pushEvent() {}, appendSegment() {}, breakRow() {} };
+      },
+      addEventListener(name, fn) { windowEvents[name] = fn; }
+    },
+    ResizeObserver: resizeObserver ? function (fn) { observer = fn; this.observe = function () {}; } : undefined,
+    EventSource: function () { streams++; stream = this; this.readyState = 1; },
+    setTimeout(fn) { timers.push(fn); return timers.length; }, clearTimeout() {}
+  };
+  context.window.ResizeObserver = context.ResizeObserver;
+  context.EventSource.CLOSED = 2;
+  vm.runInContext(transcriptScript, vm.createContext(context));
+  return {elements, rootStyles, timers, windowEvents, observer: () => observer(), stream: () => stream,
+    stacks: () => stacks, retypesets: () => retypesets, streams: () => streams};
+}
+
+assert.match(admin, /<label class="lt-pin"><input id="lt-pin" type="checkbox"> Pin transcript<\/label>/);
+assert(admin.includes('max-height: 50dvh') && admin.includes('env(safe-area-inset-bottom, 0px)'));
+assert(admin.includes('minmax(min(100%, 21rem), 1fr)') && admin.includes('minmax(min(100%, 17rem), 1fr)'));
+assert(admin.includes('overflow-wrap: anywhere'));
+for (const width of [390, 600]) {
+  const page = transcriptPage(width, false, true);
+  assert.equal(page.elements['lt-pin'].checked, true, `${width}px starts pinned`);
+  assert(page.elements['lt-card'].classList.contains('pinned'));
+  assert.equal(page.rootStyles['--lt-dock-space'], '80px');
+}
+const desktop = transcriptPage(601, false, true);
+assert.equal(desktop.elements['lt-pin'].checked, false, '601px starts inline');
+assert(!desktop.elements['lt-card'].classList.contains('pinned'));
+assert.equal(desktop.rootStyles['--lt-dock-space'], '0px');
+
+const page = transcriptPage(390, false, true);
+const pin = page.elements['lt-pin'];
+const card = page.elements['lt-card'];
+card.classList.add('dim');
+pin.checked = false;
+pin.listeners.change();
+assert(!card.classList.contains('pinned'));
+assert(card.classList.contains('dim'), 'pinning preserves connection state classes');
+assert.equal(page.rootStyles['--lt-dock-space'], '0px');
+pin.checked = true;
+pin.listeners.change();
+assert(card.classList.contains('pinned'));
+assert(card.classList.contains('dim'));
+for (let i = 0; i < 3; i++) { pin.checked = !pin.checked; pin.listeners.change(); }
+assert.equal(page.stacks(), 1, 'toggles keep one caption stack');
+assert.equal(page.streams(), 1, 'toggles keep one event stream');
+card.height = 120;
+page.observer();
+assert.equal(pin.checked, false, 'resize does not reset the selected mode');
+assert.equal(page.rootStyles['--lt-dock-space'], '0px', 'inline resize keeps no dock clearance');
+pin.checked = true;
+pin.listeners.change();
+page.observer();
+assert.equal(page.rootStyles['--lt-dock-space'], '120px', 'measured dock height updates clearance');
+for (const timer of page.timers) timer();
+assert(page.retypesets() > 0, 'toggle and resize schedule caption retypesetting');
+
+const fallback = transcriptPage(390, false, false);
+fallback.elements['lt-card'].height = 100;
+fallback.windowEvents.resize();
+assert.equal(fallback.rootStyles['--lt-dock-space'], '100px', 'resize fallback updates dock clearance');
+assert.equal(fallback.stacks(), 1, 'disabled server controls do not affect local pinning');
+
 console.log('admin/viewer checks passed');

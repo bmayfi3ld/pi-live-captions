@@ -10,6 +10,8 @@ adding a new `## X.Y.Z` heading here.
 - Duration-based STT usage metrics: `/api/stats` now reports cumulative audio sent in minutes and hours, and the admin dashboard displays both totals alongside bytes sent.
 
 ### Changed
+- The admin live transcript starts pinned on pages initially 600 pixels wide or narrower; its inline “Pin transcript” toggle remains local to the current page.
+
 - Caption audio gate defaults are now -50 dBFS with a 5-second release.
 
 ### Fixed
