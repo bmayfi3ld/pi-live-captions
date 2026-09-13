@@ -419,7 +419,7 @@ type serverMessage struct {
 			// Tags is Speechmatics' own per-word metadata, sent as standard
 			// with no config field to enable it. The list is fixed and not
 			// user-alterable: "profanity" (en, es and it only) and
-			// "disfluency". Only the former is acted on — see transcripts().
+			// "disfluency". Both are removed — see transcripts().
 			Tags []string `json:"tags"`
 		} `json:"alternatives"`
 	} `json:"results"`
@@ -495,6 +495,8 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 	var words []stt.Word
 	var speaker int
 	var start, end float64
+	var punctuationSuffix string
+	removedSincePunctuation := false
 	open := false
 
 	flush := func() {
@@ -517,27 +519,14 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		}
 		alt := r.Alternatives[0]
 
-		// A punctuation result attaches to the preceding word with no space
-		// and inherits the run it's joining — it must never start a run of
-		// its own (there is nothing to attribute punctuation to on its own,
-		// and treating a comma as a speaker change would fragment text that
-		// belongs together). If somehow the very first result is
-		// punctuation, there is no run to attach to yet, so it is dropped
-		// rather than starting one for a symbol alone.
-		// It also attaches to the preceding Word rather than becoming one of
-		// its own: punctuation is not a word a pacer should reveal on its
-		// own beat, and gluing it here is what keeps Transcript.Text() —
-		// which joins Words with single spaces — identical to the string
-		// this loop used to build.
-		//
-		// Punctuation is kept even when the word it followed was filtered as
-		// profanity: a terminal "." is what closes a caption line in the hub,
-		// so dropping it would merge sentences. The cost is a comma landing one
-		// word early ("you're a <profanity>, really" -> "you're a, really"),
-		// which is cheaper than losing the line break.
+		// Punctuation attaches to the preceding word and never starts a run.
+		// A removal can bring two separate punctuation results together; reconcile
+		// that boundary without touching contiguous punctuation such as "..." or
+		// "?!". Punctuation still extends the run even when its mark is dropped.
 		if r.Type == "punctuation" {
-			if open && len(words) > 0 {
-				words[len(words)-1].Text += alt.Content
+			if open {
+				appendPunctuation(&words[len(words)-1], &punctuationSuffix, removedSincePunctuation, alt.Content)
+				removedSincePunctuation = false
 				end = r.EndTime
 			}
 			continue
@@ -551,8 +540,8 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		if r.Type != "word" {
 			continue
 		}
-		// Profanity and Disfluencies are dropped outright. This has to
-		// happen before the run bookkeeping below, not after: opening a run on
+		// Profanity and disfluencies are dropped outright. This has to happen
+		// before the run bookkeeping below, not after: opening a run on
 		// a word that is about to vanish would set the run's start to removed
 		// audio (giving every surviving word a phantom leading offset once
 		// hub.wireWords subtracts Transcript.Start), leave `open` true with no
@@ -565,6 +554,9 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		// nothing is reindexed or shifted. The hole simply reads as a pause to
 		// the pacer, which is what it was.
 		if slices.Contains(alt.Tags, "profanity") || slices.Contains(alt.Tags, "disfluency") {
+			if open {
+				removedSincePunctuation = true
+			}
 			continue
 		}
 
@@ -579,6 +571,8 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 		// above: a trailing comma has an end_time but no spoken duration, and
 		// folding it in would give the pacer a word that takes longer to say
 		// than it does.
+		punctuationSuffix = ""
+		removedSincePunctuation = false
 		words = append(words, stt.Word{
 			Text:  alt.Content,
 			Start: stt.SecondsToDuration(r.StartTime),
@@ -589,6 +583,27 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 	flush()
 
 	return ts, nil
+}
+
+func appendPunctuation(word *stt.Word, suffix *string, removedSincePunctuation bool, incoming string) {
+	if removedSincePunctuation && isPunctuationCollision(*suffix, incoming) {
+		if *suffix == "," && isTerminalPunctuation(incoming) {
+			word.Text = word.Text[:len(word.Text)-len(*suffix)] + incoming
+			*suffix = incoming
+		}
+		return
+	}
+	word.Text += incoming
+	*suffix += incoming
+}
+
+func isPunctuationCollision(existing, incoming string) bool {
+	return (existing == "," || isTerminalPunctuation(existing)) &&
+		(incoming == "," || isTerminalPunctuation(incoming))
+}
+
+func isTerminalPunctuation(s string) bool {
+	return s == "." || s == "?" || s == "!"
 }
 
 // parseSpeaker turns Speechmatics' speaker label into this package's 1-based

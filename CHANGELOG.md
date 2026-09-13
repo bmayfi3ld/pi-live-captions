@@ -4,6 +4,11 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
+## 0.6.0
+
+### Fixed
+- Speechmatics punctuation from removed profanity or disfluencies no longer creates duplicate or conflicting sentence marks in new transcripts.
+
 ## 0.5.0
 
 ### Added

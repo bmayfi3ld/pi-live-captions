@@ -15,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 
 	"livecaption/internal/audio"
+	"livecaption/internal/caption"
 	"livecaption/internal/metrics"
 	"livecaption/internal/stt"
 )
@@ -130,12 +131,19 @@ func wordResult(content string, start, end, confidence float64, speaker string) 
 	}
 }
 
-// profanityResult is a word result carrying Speechmatics' own "profanity" tag,
-// which it sends as standard with no config field to enable it.
-func profanityResult(content string, start, end float64, speaker string) map[string]any {
+// taggedWordResult is a word result carrying one Speechmatics removal tag.
+func taggedWordResult(content string, start, end float64, speaker, tag string) map[string]any {
 	r := wordResult(content, start, end, 1.0, speaker)
-	r["alternatives"].([]map[string]any)[0]["tags"] = []string{"profanity"}
+	r["alternatives"].([]map[string]any)[0]["tags"] = []string{tag}
 	return r
+}
+
+func profanityResult(content string, start, end float64, speaker string) map[string]any {
+	return taggedWordResult(content, start, end, speaker, "profanity")
+}
+
+func disfluencyResult(content string, start, end float64, speaker string) map[string]any {
+	return taggedWordResult(content, start, end, speaker, "disfluency")
 }
 
 func punctuationResult(content string, at float64, speaker string) map[string]any {
@@ -145,6 +153,23 @@ func punctuationResult(content string, at float64, speaker string) map[string]an
 		"end_time":     at,
 		"alternatives": []map[string]any{{"content": content, "speaker": speaker}},
 	}
+}
+
+func resultTranscripts(t *testing.T, results []map[string]any) []stt.Transcript {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"results": results})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg serverMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatal(err)
+	}
+	ts, err := msg.transcripts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ts
 }
 
 // --- config ---
@@ -556,17 +581,223 @@ func TestTranscripts_ProfanityIsStripped(t *testing.T) {
 	}
 }
 
-// TestTranscripts_AllProfanityYieldsNothing guards the empty-run edge: flush()
-// gates on `open`, not on len(words), so a window that is entirely profanity
+func TestTranscripts_ReconcilesPunctuationAcrossRemovedWords(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []map[string]any
+		want    string
+	}{
+		{
+			name: "duplicate commas across disfluency",
+			results: []map[string]any{
+				wordResult("would", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+				disfluencyResult("um", .2, .4, "S1"), punctuationResult(",", .4, "S1"),
+				wordResult("swim", .4, .6, 1, "S1"),
+			},
+			want: "would, swim",
+		},
+		{
+			name: "duplicate commas across profanity",
+			results: []map[string]any{
+				wordResult("And", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+				profanityResult("damn", .2, .4, "S1"), punctuationResult(",", .4, "S1"),
+				wordResult("next", .4, .6, 1, "S1"),
+			},
+			want: "And, next",
+		},
+		{
+			name: "terminal replaces comma",
+			results: []map[string]any{
+				wordResult("Okay", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+				disfluencyResult("um", .2, .4, "S1"), punctuationResult(".", .4, "S1"),
+			},
+			want: "Okay.",
+		},
+		{
+			name: "terminal wins over comma",
+			results: []map[string]any{
+				wordResult("Winston", 0, .2, 1, "S1"), punctuationResult(".", .2, "S1"),
+				profanityResult("damn", .2, .4, "S1"), punctuationResult(",", .4, "S1"),
+				wordResult("father", .4, .6, 1, "S1"),
+			},
+			want: "Winston. father",
+		},
+		{
+			name: "existing terminal wins",
+			results: []map[string]any{
+				wordResult("Really", 0, .2, 1, "S1"), punctuationResult("?", .2, "S1"),
+				disfluencyResult("um", .2, .4, "S1"), punctuationResult(".", .4, "S1"),
+			},
+			want: "Really?",
+		},
+		{
+			name: "consecutive removals",
+			results: []map[string]any{
+				wordResult("Well", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+				disfluencyResult("um", .2, .4, "S1"), punctuationResult(",", .4, "S1"),
+				profanityResult("damn", .4, .6, "S1"), punctuationResult(",", .6, "S1"),
+				wordResult("anyway", .6, .8, 1, "S1"),
+			},
+			want: "Well, anyway",
+		},
+		{
+			name: "lone punctuation remains",
+			results: []map[string]any{
+				disfluencyResult("um", 0, .2, "S1"),
+				wordResult("well", .2, .4, 1, "S1"),
+				profanityResult("damn", .4, .6, "S1"), punctuationResult(",", .6, "S1"),
+				wordResult("anyway", .6, .8, 1, "S1"),
+			},
+			want: "well, anyway",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := resultTranscripts(t, tt.results)
+			if len(ts) != 1 || ts[0].Text() != tt.want {
+				t.Errorf("transcripts = %+v, want one transcript %q", ts, tt.want)
+			}
+		})
+	}
+}
+
+func TestTranscripts_PreservesPunctuationOutsideRemovalCollisions(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []map[string]any
+		want    []string
+	}{
+		{
+			name: "abbreviation with and without removal",
+			results: []map[string]any{
+				wordResult("a.m.", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+				wordResult("today", .2, .4, 1, "S1"),
+				wordResult("a.m.", .4, .6, 1, "S1"),
+				disfluencyResult("um", .6, .8, "S1"), punctuationResult(",", .8, "S1"),
+			},
+			want: []string{"a.m., today a.m.,"},
+		},
+		{
+			name: "contiguous clusters",
+			results: []map[string]any{
+				wordResult("Wait", 0, .2, 1, "S1"), punctuationResult("...", .2, "S1"),
+				wordResult("Really", .2, .4, 1, "S1"), punctuationResult("?!", .4, "S1"),
+			},
+			want: []string{"Wait... Really?!"},
+		},
+		{
+			name: "leading removal punctuation is dropped",
+			results: []map[string]any{
+				disfluencyResult("um", 0, .2, "S1"), punctuationResult(",", .2, "S1"),
+				wordResult("well", .2, .4, 1, "S1"),
+			},
+			want: []string{"well"},
+		},
+		{
+			name: "kept word and speaker boundary reset state",
+			results: []map[string]any{
+				wordResult("Okay", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+				profanityResult("damn", .2, .4, "S1"), punctuationResult(".", .4, "S1"),
+				wordResult("next", .4, .6, 1, "S1"), punctuationResult(",", .6, "S1"),
+				wordResult("Again", .6, .8, 1, "S2"), punctuationResult("?", .8, "S2"),
+			},
+			want: []string{"Okay. next,", "Again?"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := resultTranscripts(t, tt.results)
+			if len(ts) != len(tt.want) {
+				t.Fatalf("got %d transcripts, want %d: %+v", len(ts), len(tt.want), ts)
+			}
+			for i, want := range tt.want {
+				if ts[i].Text() != want {
+					t.Errorf("run %d Text = %q, want %q", i, ts[i].Text(), want)
+				}
+			}
+		})
+	}
+}
+
+func TestTranscripts_CollisionPreservesWordAndSegmentTiming(t *testing.T) {
+	ts := resultTranscripts(t, []map[string]any{
+		wordResult("Okay", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+		disfluencyResult("um", .2, .4, "S1"), punctuationResult(".", .5, "S1"),
+	})
+	if len(ts) != 1 {
+		t.Fatalf("got %d transcripts, want 1: %+v", len(ts), ts)
+	}
+	want := []stt.Word{{Text: "Okay.", Start: 0, End: 200 * time.Millisecond}}
+	if !slices.Equal(ts[0].Words, want) {
+		t.Errorf("Words = %+v, want %+v", ts[0].Words, want)
+	}
+	if ts[0].Duration != 500*time.Millisecond {
+		t.Errorf("Duration = %v, want 500ms from the suppressed punctuation", ts[0].Duration)
+	}
+}
+
+func TestTranscripts_RemovalStateIsMessageLocalAndFlatTextUnchanged(t *testing.T) {
+	first := resultTranscripts(t, []map[string]any{
+		wordResult("Okay", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+		disfluencyResult("um", .2, .4, "S1"), punctuationResult(".", .4, "S1"),
+	})
+	second := resultTranscripts(t, []map[string]any{
+		wordResult("again", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+	})
+	if first[0].Text() != "Okay." || second[0].Text() != "again," {
+		t.Errorf("independent messages = %q, %q", first[0].Text(), second[0].Text())
+	}
+
+	msg := serverMessage{Transcript: "a.m.,", Metadata: struct {
+		StartTime  float64 `json:"start_time"`
+		EndTime    float64 `json:"end_time"`
+		Transcript string  `json:"transcript"`
+	}{Transcript: "a.m.,"}}
+	ts, err := msg.transcripts()
+	if err != nil || len(ts) != 1 || ts[0].Text() != "a.m.," {
+		t.Errorf("flat-text fallback = (%+v, %v), want %q", ts, err, "a.m.,")
+	}
+}
+
+func TestTranscripts_CorrectedPunctuationReachesCaptionHub(t *testing.T) {
+	ts := resultTranscripts(t, []map[string]any{
+		wordResult("Okay", 0, .2, 1, "S1"), punctuationResult(",", .2, "S1"),
+		disfluencyResult("um", .2, .4, "S1"), punctuationResult(".", .4, "S1"),
+	})
+	h := caption.NewHub(metrics.New("test", "session"))
+	sub, unsubscribe := h.Subscribe()
+	defer unsubscribe()
+	<-sub // initial status snapshot
+	<-sub // initial music snapshot
+	var finals []caption.Line
+	h.OnFinal = func(l caption.Line) { finals = append(finals, l) }
+
+	h.Publish(ts[0])
+	select {
+	case event := <-sub:
+		if event.Kind != caption.KindCaption || len(event.Words) != 1 || event.Words[0].Text != "Okay." {
+			t.Errorf("caption event = %+v, want corrected word text", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no caption event")
+	}
+	if len(finals) != 1 || finals[0].Text != "Okay." {
+		t.Errorf("final lines = %+v, want corrected closed line", finals)
+	}
+}
+
+// TestTranscripts_AllFilteredYieldsNothing guards the empty-run edge: flush()
+// gates on `open`, not on len(words), so a window that is entirely filtered
 // must never open a run — otherwise it ships a Transcript with zero words for
 // the hub to drop on empty text.
-func TestTranscripts_AllProfanityYieldsNothing(t *testing.T) {
+func TestTranscripts_AllFilteredYieldsNothing(t *testing.T) {
 	data, _ := json.Marshal(map[string]any{
 		"message": "AddTranscript",
 		"results": []map[string]any{
-			profanityResult("shit", 0, 0.4, "S1"),
-			profanityResult("shit", 0.4, 0.8, "S1"),
-			punctuationResult("!", 0.8, "S1"),
+			profanityResult("shit", 0, 0.4, "S1"), punctuationResult(",", 0.4, "S1"),
+			disfluencyResult("um", 0.4, 0.8, "S1"), punctuationResult("!", 0.8, "S1"),
 		},
 	})
 	var msg serverMessage
