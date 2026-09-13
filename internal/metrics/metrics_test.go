@@ -5,7 +5,28 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"livecaption/internal/audio"
 )
+
+func TestSTTUsageDurations(t *testing.T) {
+	m := New("v", "s")
+	if got := m.Snapshot().STT; got.BytesSent != 0 || got.MinutesSent != 0 || got.HoursSent != 0 {
+		t.Errorf("fresh STT usage = %+v, want all zero", got)
+	}
+
+	m.STTBytesSent(audio.PipelineFormat.BytesFor(time.Hour))
+	got := m.Snapshot().STT
+	if got.BytesSent != int64(audio.PipelineFormat.BytesFor(time.Hour)) {
+		t.Errorf("bytes sent = %d, want %d", got.BytesSent, audio.PipelineFormat.BytesFor(time.Hour))
+	}
+	if got.MinutesSent != 60 {
+		t.Errorf("minutes sent = %v, want 60", got.MinutesSent)
+	}
+	if got.HoursSent != 1 {
+		t.Errorf("hours sent = %v, want 1", got.HoursSent)
+	}
+}
 
 // TestPercentiles feeds a known distribution and checks the exact rank the
 // nearest-rank formula picks, since /admin and the shutdown summary are read

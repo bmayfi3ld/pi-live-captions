@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"livecaption/internal/audio"
 	"livecaption/internal/caption"
 	"livecaption/internal/metrics"
 	"livecaption/internal/stt"
@@ -97,6 +98,42 @@ func TestAPIStatsReturnsSnapshotJSON(t *testing.T) {
 	}
 	if snap.Version != "test-version" {
 		t.Errorf("version = %q, want %q", snap.Version, "test-version")
+	}
+}
+
+func TestAPIStatsCarriesSTTUsageFields(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Metrics.STTBytesSent(audio.PipelineFormat.BytesFor(time.Hour))
+	base, _, _ := startTestServer(t, cfg)
+
+	resp, err := http.Get(base + "/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		STT map[string]json.RawMessage `json:"stt"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	var bytesSent int64
+	if err := json.Unmarshal(body.STT["bytes_sent_total"], &bytesSent); err != nil {
+		t.Fatalf("decode bytes_sent_total: %v", err)
+	}
+	if want := int64(audio.PipelineFormat.BytesFor(time.Hour)); bytesSent != want {
+		t.Errorf("bytes_sent_total = %d, want %d", bytesSent, want)
+	}
+	for name, want := range map[string]float64{"minutes_sent_total": 60, "hours_sent_total": 1} {
+		var got float64
+		if err := json.Unmarshal(body.STT[name], &got); err != nil {
+			t.Errorf("decode %s: %v", name, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("%s = %v, want %v", name, got, want)
+		}
 	}
 }
 

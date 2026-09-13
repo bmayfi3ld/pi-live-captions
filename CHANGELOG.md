@@ -6,6 +6,9 @@ adding a new `## X.Y.Z` heading here.
 
 ## Unreleased
 
+### Added
+- Duration-based STT usage metrics: `/api/stats` now reports cumulative audio sent in minutes and hours, and the admin dashboard displays both totals alongside bytes sent.
+
 ### Fixed
 - Paused reconnect-buffer rotation no longer falsely reports dropped audio or degraded health when speech resumes.
 

@@ -492,6 +492,8 @@
     <div class="stat-row"><span class="k">State</span><span class="v num" id="stt-state">—</span></div>
     <div class="stat-row"><span class="k">Segments / lines</span><span class="v num" id="stt-counts">—</span></div>
     <div class="stat-row"><span class="k">Audio sent</span><span class="v num" id="stt-sent">—</span></div>
+    <div class="stat-row"><span class="k">Audio sent (minutes)</span><span class="v num" id="stt-sent-minutes">—</span></div>
+    <div class="stat-row"><span class="k">Audio sent (hours)</span><span class="v num" id="stt-sent-hours">—</span></div>
     <div class="stat-row"><span class="k">Reconnects</span><span class="v num" id="stt-reconnects">—</span></div>
     <div class="stat-row"><span class="k">Buffer drops</span><span class="v num" id="stt-buffer-drops">—</span></div>
     <div class="stat-row"><span class="k">Auto-pauses</span><span class="v num" id="stt-pauses">—</span></div>
@@ -560,6 +562,10 @@
     if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
     if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
     return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  }
+
+  function fmtUsage(n, unit) {
+    return typeof n === "number" && !isNaN(n) ? n.toFixed(2) + " " + unit : "—";
   }
 
   // Seconds -> mm:ss, or h:mm:ss once past an hour.
@@ -975,6 +981,8 @@
     // gate holds, so the suffix confirms it, matching the phrasing used for
     // stt-state above rather than flagging amber like the counters below.
     setText("stt-sent", fmtBytes(stt.bytes_sent_total) + (stt.state === "paused" ? " (paused)" : ""));
+    setText("stt-sent-minutes", fmtUsage(stt.minutes_sent_total, "min"));
+    setText("stt-sent-hours", fmtUsage(stt.hours_sent_total, "hr"));
     setChip("stt-reconnects", stt.reconnects_total, true);
     setChip("stt-buffer-drops", stt.buffer_drops_total, true);
     // setText, not setChip: an auto-pause is correct, money-saving behaviour,

@@ -486,6 +486,8 @@ type Snapshot struct {
 		Segments     int64   `json:"segments_total"`
 		Lines        int64   `json:"lines_total"`
 		BytesSent    int64   `json:"bytes_sent_total"`
+		MinutesSent  float64 `json:"minutes_sent_total"`
+		HoursSent    float64 `json:"hours_sent_total"`
 		LastError    string  `json:"last_error"`
 		LastErrorAt  string  `json:"last_error_at"`
 		LatencyLast  float64 `json:"latency_last_ms"`
@@ -610,6 +612,9 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.STT.Segments = m.sttSegments.Load()
 	s.STT.Lines = m.sttLines.Load()
 	s.STT.BytesSent = m.sttBytesSent.Load()
+	sentDuration := audio.PipelineFormat.Duration(int(s.STT.BytesSent))
+	s.STT.MinutesSent = sentDuration.Minutes()
+	s.STT.HoursSent = sentDuration.Hours()
 	s.STT.LastError = sttErr
 	if !sttErrAt.IsZero() {
 		s.STT.LastErrorAt = sttErrAt.Format(time.RFC3339)
