@@ -63,6 +63,8 @@ func (c *ReplayCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger
 	return s.run(ctx)
 }
 
+var listDevices = audio.ListDevices
+
 // Run executes a live capture session.
 func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger) error {
 	if err := resolveSTTDefaults(&c.STTFlags); err != nil {
@@ -72,22 +74,30 @@ func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger) 
 		return err
 	}
 
-	devices := audio.ListDevices(ctx)
-	skipped, err := audio.ResolveDevice(devices, c.Backend, c.Device)
-	if err != nil {
-		return err
+	devices := listDevices(ctx)
+	skipped, validationErr := audio.ResolveDevice(devices, c.Backend, c.Device)
+	if validationErr != nil {
+		log.Warn("configured audio input is missing; web session will remain available",
+			"backend", c.Backend, "device", c.Device,
+			"diagnostic", validationErr.Error(), "action", "restart required after correction")
 	}
 	if skipped {
 		log.Warn("device validation skipped: no devices enumerated for backend, proceeding without confirming --device",
-			"backend", c.Backend)
+			"backend", c.Backend, "device", c.Device)
+	}
+
+	blockedReason := ""
+	if validationErr != nil {
+		blockedReason = validationErr.Error()
 	}
 
 	bc, audioReason := newBroadcaster(ctx, c.AudioStream, log)
 	src := audio.NewDeviceSource(audio.DeviceConfig{
-		Device:  c.Device,
-		Backend: c.Backend,
-		Log:     log,
-		Stream:  bc,
+		Device:        c.Device,
+		Backend:       c.Backend,
+		Log:           log,
+		Stream:        bc,
+		BlockedReason: blockedReason,
 	})
 
 	o := buildOpts{
@@ -108,11 +118,17 @@ func (c *LiveCmd) Run(ctx context.Context, term *ui.Terminal, log *slog.Logger) 
 	}
 	defer s.shutdown()
 
+	if validationErr != nil {
+		s.met.SetSourceState("missing", validationErr.Error(), true)
+	} else {
+		s.met.SetSourceState("starting", "", false)
+	}
 	src.SetCallbacks(audio.DeviceCallbacks{
-		OnFrame:   s.met.AddFrame,
-		OnXrun:    s.met.Xrun,
-		OnRestart: s.met.FFmpegRestart,
-		OnStderr:  s.met.SetLastStderr,
+		OnFrame:        s.met.AddFrame,
+		OnXrun:         s.met.Xrun,
+		OnRestart:      s.met.FFmpegRestart,
+		OnStderr:       s.met.SetLastStderr,
+		OnAvailability: func(state, reason string) { s.met.SetSourceState(state, reason, false) },
 	})
 
 	return s.run(ctx)

@@ -432,6 +432,65 @@ func TestSTTPauseAccounting(t *testing.T) {
 	}
 }
 
+func TestSourceStateSnapshotAndRecovery(t *testing.T) {
+	m := New("v", "s")
+	m.SourceKind = "live"
+	m.SourceSpec = "pulse:mic"
+	m.SetSourceState("starting", "", false)
+	if got := m.Snapshot(); got.Source.State != "starting" || got.Source.Error != "" || got.Source.RestartRequired {
+		t.Fatalf("starting source = %+v", got.Source)
+	}
+
+	m.SetLastStderr("old ffmpeg diagnostic")
+	m.SetSourceState("missing", "device not found", true)
+	got := m.Snapshot()
+	if got.Source.State != "missing" || got.Source.Error != "device not found" || !got.Source.RestartRequired {
+		t.Fatalf("missing source = %+v", got.Source)
+	}
+	if got.Source.LastStderr != "old ffmpeg diagnostic" {
+		t.Errorf("historical stderr = %q, want retained diagnostic", got.Source.LastStderr)
+	}
+	for _, state := range []ConnState{StateIdle, StateConnecting, StateConnected, StateReconnecting, StatePaused} {
+		m.SetSTTState(state)
+		if health := m.Snapshot().Health; health != "degraded" {
+			t.Errorf("STT state %q with missing input: health = %q, want degraded", state, health)
+		}
+	}
+	m.SetSTTState(StateClosed)
+	if health := m.Snapshot().Health; health != "closed" {
+		t.Errorf("closed session health = %q, want closed", health)
+	}
+
+	m.SetSTTState(StateConnected)
+	m.SetSourceState("capturing", "", false)
+	m.STTReconnect()
+	if health := m.Snapshot().Health; health != "degraded" {
+		t.Errorf("recovered source with recent restart: health = %q, want degraded", health)
+	}
+	m.mu.Lock()
+	m.lastDegradedAt = time.Now().Add(-degradedWindow - time.Second)
+	m.mu.Unlock()
+	m.SetSTTState(StatePaused)
+	if health := m.Snapshot().Health; health != "paused" {
+		t.Errorf("silence pause after expired unrelated degradation: health = %q, want paused", health)
+	}
+
+	m.SetSTTState(StateConnected)
+	m.SetSourceState("unavailable", "capture failed", false)
+	if health := m.Snapshot().Health; health != "degraded" {
+		t.Errorf("unavailable source health = %q, want degraded", health)
+	}
+}
+
+func TestReplaySourceStateDefaults(t *testing.T) {
+	m := New("v", "s")
+	m.SourceKind = "replay"
+	got := m.Snapshot()
+	if got.Source.State != "" || got.Source.Error != "" || got.Source.RestartRequired {
+		t.Fatalf("replay source defaults = %+v", got.Source)
+	}
+}
+
 // TestConcurrentAccessIsRaceFree hammers every counter from many goroutines
 // while repeatedly snapshotting, matching how the real pipeline hits this
 // struct from capture, the recognizer, SSE handlers and the status line all

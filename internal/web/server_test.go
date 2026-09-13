@@ -100,6 +100,73 @@ func TestAPIStatsReturnsSnapshotJSON(t *testing.T) {
 	}
 }
 
+func TestInputFaultKeepsHTTPReachable(t *testing.T) {
+	cfg := newTestConfig()
+	cfg.Metrics.SourceKind = "live"
+	cfg.Metrics.SourceSpec = "alsa:plughw:CARD=USB,DEV=0"
+	base, _, m := startTestServer(t, cfg)
+
+	for _, tc := range []struct {
+		state, reason string
+		restart       bool
+	}{
+		{"missing", "not found", true},
+		{"unavailable", "capture EOF", false},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			m.SetSourceState(tc.state, tc.reason, tc.restart)
+
+			for _, path := range []string{"/admin", "/", "/healthz"} {
+				resp, err := http.Get(base + path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp.Body.Close()
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("%s status = %d, want 200", path, resp.StatusCode)
+				}
+			}
+
+			resp, err := http.Get(base + "/api/stats")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var snap metrics.Snapshot
+			if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
+				t.Fatal(err)
+			}
+			if snap.Health != "degraded" || snap.Source.State != tc.state || snap.Source.Error != tc.reason || snap.Source.RestartRequired != tc.restart {
+				t.Errorf("snapshot = %+v, want degraded %s/%q/restart=%v", snap.Source, tc.state, tc.reason, tc.restart)
+			}
+		})
+	}
+
+	cfgAuth := newTestConfig()
+	cfgAuth.AdminPassword = "secret"
+	cfgAuth.Metrics.SourceKind = "live"
+	cfgAuth.Metrics.SetSourceState("missing", "not found", true)
+	baseAuth, _, _ := startTestServer(t, cfgAuth)
+	resp, err := http.Get(baseAuth + "/admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("unauthenticated /admin status = %d, want 401", resp.StatusCode)
+	}
+	req, _ := http.NewRequest(http.MethodGet, baseAuth+"/admin", nil)
+	req.SetBasicAuth("admin", "secret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("authenticated /admin status = %d, want 200", resp.StatusCode)
+	}
+}
+
 // TestAPIStatsCarriesAutoPauseFields covers the two new /api/stats fields
 // auto-pause needs: pauses_total (how many times the link auto-paused) and
 // paused_sec (total time spent paused, including a pause in progress), plus

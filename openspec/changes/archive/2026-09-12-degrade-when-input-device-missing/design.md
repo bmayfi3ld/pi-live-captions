@@ -54,7 +54,7 @@ Alternative rejected: rely on `FFmpegRestart` alone. It neither identifies the d
 
 Render the new live-source state and current diagnostic next to the existing selected device. Preserve `#health` rendering. Use text content for device/error strings, never interpolate them as HTML.
 
-Use a native card `title` for hover guidance plus the same text in a failure-only visible help paragraph, covering keyboard and touch without a custom tooltip component. Wording is conditional rather than attempting to infer USB hardware from an ALSA/Pulse identifier:
+Use a failure-only visible help paragraph without a card `title` or hover tooltip. Wording is conditional rather than attempting to infer USB hardware from an ALSA/Pulse identifier:
 
 > If this is a USB device, check that it is plugged in. Otherwise, or if that does not help, SSH into the appliance and follow deploy/README.md steps 5–6 to find and configure the input.
 
@@ -64,7 +64,7 @@ Append one of:
 
 Treat restart as an appliance-level operator action: using the appliance power button to restart it is the standard method. Operators familiar with `systemctl` can instead restart the service, but operator-facing guidance simply says "restart the server" without prescribing either mechanism. A future console button will restart the server without restarting the appliance; this change adds no button, endpoint, or supporting restart machinery.
 
-Clear the fault help/title when capture resumes. Historical stderr may remain, clearly separated from the current state. Replay and responses without the additive fields must not show a fabricated missing-input warning.
+Clear the fault help when capture resumes. Historical stderr may remain, clearly separated from the current state. Replay and responses without the additive fields must not show a fabricated missing-input warning.
 
 ## Risks / Trade-offs
 
@@ -74,7 +74,7 @@ Clear the fault help/title when capture resumes. Historical stderr may remain, c
 - [FFmpeg capture diagnostics cannot reliably distinguish missing hardware from permission/busy errors] → Use `Missing` only for enumeration rejection and `Unavailable` for capture failures, with the real diagnostic. Do not add brittle stderr classifiers.
 - [Concurrent callbacks or retries could leave stale state] → Guard metrics updates and test failure-to-frame transitions, cancellation, and recent-event health separately.
 - [Removing the probe changes existing tests and eliminates its five-second read timeout] → Verify prompt asynchronous startup and cancellation; do not introduce a speculative stalled-device watchdog. Missing-device open failures are the target, not indefinitely silent/blocking drivers.
-- [Native hover cannot be verified from this environment] → Provide a non-hover equivalent, test rendering with existing Node/VM patterns, and leave actual browser/hardware verification to the user.
+- [Visible browser rendering cannot be verified from this environment] → Test the DOM rendering with existing Node/VM patterns, and leave actual browser/hardware verification to the user.
 
 ## Migration Plan
 

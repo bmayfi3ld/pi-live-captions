@@ -4,6 +4,11 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
+## 0.4.0
+
+### Changed
+- Unavailable configured live inputs keep the web console reachable with persistent degraded health; `/admin` shows whether the source is missing and restart-required or unavailable and retrying, with visible guidance instead of a hover tooltip.
+
 ## 0.3.0
 
 ### Added

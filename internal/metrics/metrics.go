@@ -105,6 +105,9 @@ type Metrics struct {
 
 	mu             sync.RWMutex
 	lastStderr     string
+	sourceState    string
+	sourceError    string
+	sourceRestart  bool
 	sttLastErr     string
 	sttLastErrAt   time.Time
 	sttPauseStart  time.Time     // zero when no pause is currently open
@@ -267,6 +270,16 @@ func (m *Metrics) AudioListenerLeft() { m.audioListeners.Add(-1) }
 func (m *Metrics) SetLastStderr(s string) {
 	m.mu.Lock()
 	m.lastStderr = s
+	m.mu.Unlock()
+}
+
+// SetSourceState records the current live input state. A source fault remains
+// active until capture reports a usable PCM frame; it is not time-windowed.
+func (m *Metrics) SetSourceState(state, reason string, restartRequired bool) {
+	m.mu.Lock()
+	m.sourceState = state
+	m.sourceError = reason
+	m.sourceRestart = restartRequired
 	m.mu.Unlock()
 }
 
@@ -434,17 +447,20 @@ type Snapshot struct {
 	Health string `json:"health"`
 
 	Source struct {
-		Kind           string  `json:"kind"`
-		Spec           string  `json:"spec"`
-		Format         string  `json:"format"`
-		FramesTotal    int64   `json:"frames_total"`
-		BytesTotal     int64   `json:"bytes_total"`
-		SecondsTotal   float64 `json:"seconds_total"`
-		TotalSeconds   float64 `json:"total_seconds"` // 0 when unknown (live)
-		FramesDropped  int64   `json:"frames_dropped_total"`
-		FFmpegRestarts int64   `json:"ffmpeg_restarts_total"`
-		Xruns          int64   `json:"xruns_total"`
-		LastStderr     string  `json:"ffmpeg_last_stderr"`
+		Kind            string  `json:"kind"`
+		Spec            string  `json:"spec"`
+		Format          string  `json:"format"`
+		FramesTotal     int64   `json:"frames_total"`
+		BytesTotal      int64   `json:"bytes_total"`
+		SecondsTotal    float64 `json:"seconds_total"`
+		TotalSeconds    float64 `json:"total_seconds"` // 0 when unknown (live)
+		FramesDropped   int64   `json:"frames_dropped_total"`
+		FFmpegRestarts  int64   `json:"ffmpeg_restarts_total"`
+		Xruns           int64   `json:"xruns_total"`
+		LastStderr      string  `json:"ffmpeg_last_stderr"`
+		State           string  `json:"state,omitempty"`
+		Error           string  `json:"error,omitempty"`
+		RestartRequired bool    `json:"restart_required"`
 	} `json:"source"`
 
 	Monitor struct {
@@ -536,7 +552,8 @@ func (m *Metrics) Snapshot() Snapshot {
 	uploadLast, uploadP50, uploadP95, uploadMax, uploadN := m.latUpload.stats(now)
 	recognizeLast, recognizeP50, recognizeP95, recognizeMax, _ := m.latRecognize.stats(now)
 	assembleLast, assembleP50, assembleP95, assembleMax, _ := m.latAssemble.stats(now)
-	lastStderr, sttErr, sttErrAt := m.lastStderr, m.sttLastErr, m.sttLastErrAt
+	lastStderr, sourceState, sourceError, sourceRestart := m.lastStderr, m.sourceState, m.sourceError, m.sourceRestart
+	sttErr, sttErrAt := m.sttLastErr, m.sttLastErrAt
 	transErr := m.transcriptErr
 	processed, total := m.mediaProcessed, m.mediaTotal
 	pauseStart, pausedTotal := m.sttPauseStart, m.sttPausedTotal
@@ -571,6 +588,9 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.Source.FFmpegRestarts = m.ffmpegRestarts.Load()
 	s.Source.Xruns = m.xruns.Load()
 	s.Source.LastStderr = lastStderr
+	s.Source.State = sourceState
+	s.Source.Error = sourceError
+	s.Source.RestartRequired = sourceRestart
 
 	s.Monitor.Enabled = m.MonitorEnabled
 	s.Monitor.Alive = m.monitorAlive.Load()
@@ -643,6 +663,8 @@ func (m *Metrics) Snapshot() Snapshot {
 	switch {
 	case s.STT.State == StateClosed.String():
 		s.Health = "closed"
+	case m.SourceKind == "live" && (sourceState == "missing" || sourceState == "unavailable"):
+		s.Health = "degraded"
 	case s.STT.State == StatePaused.String():
 		s.Health = "paused"
 	case (!lastDegradedAt.IsZero() && time.Since(lastDegradedAt) <= degradedWindow) || transErr != "":

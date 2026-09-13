@@ -1,17 +1,138 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"livecaption/internal/audio"
 	"livecaption/internal/metrics"
 	"livecaption/internal/stt"
+	"livecaption/internal/ui"
 )
 
 // observeLatency touches only s.met, so a session built with nothing but a
 // fresh Metrics is a sufficient fixture for these tests.
 func newLatencySession() *session {
 	return &session{met: metrics.New("test", "session")}
+}
+
+func newTestTerminal() *ui.Terminal {
+	return ui.NewTerminal(ui.Options{Out: io.Discard, Err: io.Discard})
+}
+
+func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
+func TestLiveUnavailableInputKeepsSessionAlive(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ffmpeg"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	original := listDevices
+	defer func() { listDevices = original }()
+	for _, tc := range []struct {
+		name, wantLog string
+		devices       []audio.Device
+	}{
+		{"validation rejected", "action=\"restart required after correction\"", []audio.Device{{Backend: "pulse", Name: "other"}}},
+		{"empty enumeration", "action=retry", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listDevices = func(context.Context) []audio.Device { return tc.devices }
+			var logs bytes.Buffer
+			cmd := LiveCmd{
+				Device: "selected", Backend: "pulse",
+				STTFlags:    STTFlags{Engine: "mock", NoiseThresholdDBFS: -35, NoiseRelease: 3 * time.Second, SilenceHold: time.Minute},
+				ServerFlags: ServerFlags{Addr: "127.0.0.1:0", AudioStream: false},
+				OutputFlags: OutputFlags{NoTranscript: true},
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- cmd.Run(ctx, newTestTerminal(), slog.New(slog.NewTextHandler(&logs, nil))) }()
+			select {
+			case err := <-done:
+				t.Fatalf("live session exited before cancellation: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("live session after cancellation: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("live session did not stop after cancellation")
+			}
+			for _, want := range []string{"backend=pulse", "device=selected", tc.wantLog} {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("logs %q missing %q", logs.String(), want)
+				}
+			}
+		})
+	}
+}
+
+type heldSource struct{}
+
+func (heldSource) Describe() string { return "live input" }
+func (heldSource) Start(ctx context.Context) (<-chan audio.Frame, error) {
+	out := make(chan audio.Frame)
+	go func() {
+		<-ctx.Done()
+		close(out)
+	}()
+	return out, nil
+}
+func (heldSource) Err() error   { return nil }
+func (heldSource) Close() error { return nil }
+
+func TestUnavailableInputKeepsSessionAliveUntilCancellation(t *testing.T) {
+	for _, state := range []string{"missing", "unavailable"} {
+		t.Run(state, func(t *testing.T) {
+			term := newTestTerminal()
+			s, err := newSession(buildOpts{
+				kind: "live", sourceLabel: "alsa:missing", source: heldSource{},
+				stt:    STTFlags{Engine: "mock", NoiseThresholdDBFS: -35, NoiseRelease: 3 * time.Second},
+				server: ServerFlags{Addr: "127.0.0.1:0", AudioStream: false},
+				output: OutputFlags{NoTranscript: true},
+			}, term, testLogger())
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.met.SourceKind = "live"
+			s.met.SetSourceState(state, "input unavailable", state == "missing")
+
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- s.run(ctx) }()
+			select {
+			case err := <-done:
+				t.Fatalf("session exited before cancellation: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if health := s.met.Snapshot().Health; health != "degraded" {
+				t.Errorf("health = %q, want degraded while input is %s", health, state)
+			}
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("session after cancellation: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("session did not stop after cancellation")
+			}
+			s.shutdown()
+		})
+	}
 }
 
 func TestObserveLatency_UsesCapturedAt(t *testing.T) {

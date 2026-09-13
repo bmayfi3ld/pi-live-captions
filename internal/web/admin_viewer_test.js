@@ -34,6 +34,37 @@ assert(svg.includes('1,000 ms</text>'), 'axis stays at peak after spike rolls aw
 assert(svg.includes('0 ms</text>'));
 assert.equal(charts.trendHistory.rec.length, 300);
 
+// Exercise the Source card's actual renderer, including visible troubleshooting
+// guidance and text-only diagnostics.
+const sourceElements = {};
+const sourceContext = vm.createContext({document: {getElementById(id) {
+  return sourceElements[id] ||= {style: {}, textContent: '', removeAttribute(name) { delete this[name]; }};
+}}});
+vm.runInContext(
+  between(admin, '  function setText(', '  // ---- segment trend graphs') +
+  between(admin, '  var sourceHelp = ', '  function render(s)'), sourceContext);
+function sourceSnapshot(state, restart, error) {
+  vm.runInContext(`renderSource(${JSON.stringify({state, restart_required: restart, error, spec: 'pulse:mic'})});`, sourceContext);
+  return sourceElements;
+}
+let source = sourceSnapshot('missing', true, '<device unavailable>');
+assert.equal(source['src-state'].textContent, 'Missing (restart required)');
+assert.equal(source['src-error'].textContent, '<device unavailable>');
+assert.equal(source['src-help'].style.display, 'block');
+assert(!between(admin, '  function renderSource(src)', '  function render(s)').includes('title'), 'Source card has no hover tooltip');
+source = sourceSnapshot('unavailable', false, 'EOF without stderr');
+assert.equal(source['src-state'].textContent, 'Unavailable (retrying automatically)');
+assert(source['src-help'].textContent.includes('retries this configured input automatically'));
+assert.equal(source['src-error'].textContent, 'EOF without stderr');
+source = sourceSnapshot('capturing', false, 'stale error');
+assert.equal(source['src-help'].style.display, 'none');
+assert.equal(source['src-error'].style.display, 'none');
+source = sourceSnapshot('', false, '<old snapshot>');
+assert.equal(source['src-state'].textContent, '—');
+assert.equal(source['src-help'].style.display, 'none');
+assert.equal(source['src-error'].style.display, 'none');
+assert.equal(source['src-error'].innerHTML, undefined, 'diagnostics must be rendered as text');
+
 // Run both pages' actual event handlers against a small caption-stack stub.
 for (const html of [admin, index]) {
   const markers = [];

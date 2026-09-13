@@ -1,8 +1,10 @@
+# live-input-availability Specification
+
 ## Purpose
 
 Keep a caption appliance reachable and explain how to restore its configured live input when that input is missing or unavailable.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Missing input does not terminate the web session
 The system SHALL continue serving `/admin`, `/api/stats`, and the viewer when the configured live input is rejected by device enumeration or cannot be opened for capture, provided unrelated startup prerequisites succeed. Existing admin authentication and `/healthz` liveness behavior SHALL remain unchanged. The system MUST NOT intentionally substitute a different input for a device rejected by validation.
@@ -38,12 +40,12 @@ The stats response SHALL retain the configured source identity and expose curren
 - **THEN** the source is not reported missing and existing paused-health behavior is retained
 
 ### Requirement: Admin input fault is explicit and actionable
-The existing admin health indicator SHALL display its degraded state for an active input fault. The Source card SHALL keep the selected device visible and show `Missing` for a validation rejection or `Unavailable` for an opening/capture failure, with its diagnostic reason. During the fault, the card SHALL provide hover guidance and the same guidance accessible without hover. It SHALL advise checking the cable/connection if the device is USB; otherwise, or if reconnecting does not resolve the problem, SSH into the appliance and follow `deploy/README.md` steps 5 and 6 to discover and configure the device.
+The existing admin health indicator SHALL display its degraded state for an active input fault. The Source card SHALL keep the selected device visible and show `Missing` for a validation rejection or `Unavailable` for an opening/capture failure, with its diagnostic reason. During the fault, the card SHALL provide visible troubleshooting guidance without a hover tooltip. It SHALL advise checking the cable/connection if the device is USB; otherwise, or if reconnecting does not resolve the problem, SSH into the appliance and follow `deploy/README.md` steps 5 and 6 to discover and configure the device.
 
 #### Scenario: Operator inspects a missing-input card
-- **WHEN** an operator views or hovers the Source card during an input fault
-- **THEN** the configured device and missing/unavailable label are visible without relying on color alone
-- **AND** the troubleshooting guidance is available through hover and a keyboard/touch-accessible presentation
+- **WHEN** an operator views the Source card during an input fault
+- **THEN** the configured device, missing/unavailable label, and troubleshooting guidance are visible without relying on color alone
+- **AND** the card does not show a hover tooltip
 
 #### Scenario: Fault clears
 - **WHEN** capture resumes and the admin page receives an updated stats response

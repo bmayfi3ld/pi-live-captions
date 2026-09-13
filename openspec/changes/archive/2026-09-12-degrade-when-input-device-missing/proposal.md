@@ -6,7 +6,7 @@ An unavailable configured input currently terminates startup, leaving a headless
 
 - Continue serving the web console when live-input validation or opening fails; retain the configured device identity and report persistent degraded health.
 - Show an explicit missing/unavailable input state in the admin Source card, using the existing overall health icon rather than adding another status system.
-- Add failure-only hover guidance, also accessible without hover: check USB connections; otherwise SSH into the appliance and follow device discovery/configuration in `deploy/README.md`.
+- Add failure-only visible guidance without a hover tooltip: check USB connections; otherwise SSH into the appliance and follow device discovery/configuration in `deploy/README.md`.
 - Reuse existing FFmpeg capture retries where safe. A device rejected by enumeration remains blocked until restart, preserving the PulseAudio wrong-device fallback safeguard without adding device rediscovery. Guidance distinguishes automatic retries from restart-required failures; configuration changes always require restart.
 - Log the configured backend/device, failure reason, and recovery action at warning level.
 - Leave configuration reload, input switching, new recovery loops, and unrelated startup failures out of scope. A future console button to restart the server without restarting the appliance is also out of scope.

@@ -240,10 +240,12 @@ livecaption` deletes them along with the service user.
 | --- | --- |
 | `permission denied` binding `:80` | The unit grants `AmbientCapabilities=CAP_NET_BIND_SERVICE`; check it survived an override with `systemctl cat livecaption`. **Do not** run `setcap` on `/usr/bin/livecaption` — apt replaces the binary on every upgrade and the capability silently disappears. (The `setcap` advice in the project's `justfile` is for running a locally built binary by hand, where there is no systemd to grant anything.) |
 | `device not found` after a reboot | The USB card was renumbered. Use the `plughw:CARD=<name>,DEV=0` form (step 5). |
+| Source card says `Missing` | The web console and `/healthz` stay reachable while the configured input is rejected. Check the USB connection, or SSH into the appliance and follow steps 5 and 6 to find and configure the input. After correcting it, restart the server. |
+| Source card says `Unavailable` | The server retries the same configured input automatically, so reconnecting it can recover without a restart. If you change the input configuration, restart the server. |
 | A setting seems to do nothing | A misspelled `LIVECAPTION_*` name is silently ignored — nothing validates env var names. Check it against `livecaption live --help`, then confirm what actually took effect in the startup banner: `journalctl -u livecaption -b`. |
 | `livecaptions.local` does not resolve | Is `avahi-daemon` running? Is the viewer on the same subnet — mDNS does not cross most VLAN or guest-network boundaries? Some Android versions still resolve `.local` poorly; hand out the IP address instead. |
 | No audio at `/audio.mp3` | The installed ffmpeg has no `libmp3lame`. The service logs `audio disabled` at startup and carries on serving captions. |
-| Service starts, captions never appear | Wrong capture device (step 5), or silence: `--auto-pause` disconnects the recognizer after 60 seconds of quiet and reconnects on sound, which is normal and shows in the log. Confirm audio is actually arriving with `LIVECAPTION_LOG_LEVEL=debug`. |
+| Service starts, captions never appear | Wrong capture device (step 5), or silence: `--auto-pause` disconnects the recognizer after 60 seconds of quiet and reconnects on sound, which is normal and shows in the log. Confirm the `/admin` Source card says `Capturing`; if it says `Missing` or `Unavailable`, follow the matching guidance above. Confirm audio is actually arriving with `LIVECAPTION_LOG_LEVEL=debug`. |
 | Won't start after editing config | Usually `LIVECAPTION_LOGO` or `LIVECAPTION_KEYTERM_FILE` pointing at a file that is not there. `journalctl -u livecaption -n 20` names it. |
 
 ## For maintainers

@@ -258,6 +258,7 @@
     color: var(--muted); word-break: break-word; white-space: pre-wrap;
   }
   .diag.err { background: var(--crit-soft); color: var(--crit); border-color: color-mix(in srgb, var(--crit) 35%, transparent); }
+  .source-help { margin: 0.7rem 0 0; color: var(--muted); font-size: 0.8rem; }
 
   /* ---- live transcript card ---- */
   #lt-card { margin-top: 1.25rem; }
@@ -421,6 +422,7 @@
     <h2><span class="eyebrow">Source</span></h2>
     <div class="stat-row"><span class="k">Kind</span><span class="v num" id="src-kind">—</span></div>
     <div class="stat-row"><span class="k">Spec</span><span class="v num" id="src-spec">—</span></div>
+    <div class="stat-row"><span class="k">State</span><span class="v" id="src-state">—</span></div>
     <div class="stat-row"><span class="k">Format</span><span class="v num" id="src-format">—</span></div>
     <div class="stat-row"><span class="k">Frames</span><span class="v num" id="src-frames">—</span></div>
     <div class="stat-row"><span class="k">Audio received</span><span class="v num" id="src-bytes">—</span></div>
@@ -430,6 +432,8 @@
     </div>
     <div class="stat-row"><span class="k">ffmpeg restarts</span><span class="v num" id="src-restarts">—</span></div>
     <div class="stat-row"><span class="k">Xruns</span><span class="v num" id="src-xruns">—</span></div>
+    <div class="diag err" id="src-error" style="display:none"></div>
+    <p class="source-help" id="src-help" role="note" style="display:none"></p>
     <div class="diag err" id="src-stderr" style="display:none"></div>
   </div>
 
@@ -827,6 +831,32 @@
     });
   });
 
+  var sourceHelp = "If this is a USB device, check that it is plugged in. Otherwise, or if that does not help, SSH into the appliance and follow deploy/README.md steps 5 and 6 to find and configure the input.";
+
+  function renderSource(src) {
+    var help = document.getElementById("src-help");
+    var fault = src.state === "missing" || src.state === "unavailable";
+    var label = {
+      starting: "Starting",
+      capturing: "Capturing",
+      missing: src.restart_required ? "Missing (restart required)" : "Missing",
+      unavailable: "Unavailable (retrying automatically)"
+    }[src.state] || (src.state || "—");
+    setText("src-state", label);
+    setDiag("src-error", fault ? (src.error || "") : "");
+    if (!fault) {
+      help.style.display = "none";
+      help.textContent = "";
+      return;
+    }
+    var action = src.restart_required
+      ? "After correcting the connection or configuration, restart the server."
+      : "The server retries this configured input automatically and can recover when it is available again. If you change the input configuration, restart the server.";
+    var text = sourceHelp + " " + action;
+    help.textContent = text;
+    help.style.display = "block";
+  }
+
   function render(s) {
     renderNoise(s.noise_gate);
     document.getElementById("offline").classList.remove("show");
@@ -890,6 +920,7 @@
     var src = s.source || {};
     setText("src-kind", src.kind || "—");
     setText("src-spec", src.spec || "—");
+    renderSource(src);
     setText("src-format", src.format || "—");
     setText("src-frames", fmtInt(src.frames_total));
     setText("src-bytes", fmtBytes(src.bytes_total));

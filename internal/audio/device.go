@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os/exec"
 	"sync"
 	"time"
 )
@@ -19,11 +20,15 @@ type DeviceConfig struct {
 	// second ffmpeg output. Nil disables the second output entirely, leaving
 	// the args byte-identical to a capture-only run.
 	Stream *Broadcaster
+	// BlockedReason is set when enumeration rejected this exact device. A
+	// blocked source never launches ffmpeg and remains alive until cancellation.
+	BlockedReason string
 
-	OnFrame   func(nbytes int, offset time.Duration)
-	OnXrun    func()
-	OnRestart func()
-	OnStderr  func(string)
+	OnFrame        func(nbytes int, offset time.Duration)
+	OnXrun         func()
+	OnRestart      func()
+	OnStderr       func(string)
+	OnAvailability func(state, reason string)
 }
 
 // DeviceSource captures live audio via ffmpeg.
@@ -57,10 +62,11 @@ func NewDeviceSource(cfg DeviceConfig) *DeviceSource {
 // corresponds to a way the capture path can degrade without the audio simply
 // stopping, which is exactly what needs a counter behind it.
 type DeviceCallbacks struct {
-	OnFrame   func(nbytes int, offset time.Duration)
-	OnXrun    func()
-	OnRestart func()
-	OnStderr  func(string)
+	OnFrame        func(nbytes int, offset time.Duration)
+	OnXrun         func()
+	OnRestart      func()
+	OnStderr       func(string)
+	OnAvailability func(state, reason string)
 }
 
 // SetCallbacks registers metric hooks. Set before Start.
@@ -69,6 +75,7 @@ func (s *DeviceSource) SetCallbacks(c DeviceCallbacks) {
 	s.cfg.OnXrun = c.OnXrun
 	s.cfg.OnRestart = c.OnRestart
 	s.cfg.OnStderr = c.OnStderr
+	s.cfg.OnAvailability = c.OnAvailability
 }
 
 func (s *DeviceSource) Describe() string {
@@ -76,26 +83,37 @@ func (s *DeviceSource) Describe() string {
 }
 
 func (s *DeviceSource) Start(ctx context.Context) (<-chan Frame, error) {
-	// Fail fast on a bad device name: a typo should be an immediate clear
-	// error, not an infinite restart loop.
-	if err := s.captureOnce(ctx, nil, true); err != nil {
-		return nil, err
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		return nil, fmt.Errorf("start ffmpeg (is it installed and on PATH?): %w", err)
 	}
 
 	out := make(chan Frame)
+	if s.cfg.BlockedReason != "" {
+		go func() {
+			<-ctx.Done()
+			close(out)
+		}()
+		return out, nil
+	}
+
 	go func() {
 		defer close(out)
 		backoff := 250 * time.Millisecond
 		for ctx.Err() == nil {
-			err := s.captureOnce(ctx, out, false)
+			err := s.captureOnce(ctx, out)
 			if ctx.Err() != nil {
 				return
 			}
-			if err != nil {
-				s.cfg.Log.Warn("capture stopped; restarting", "err", err, "retry_in", backoff)
-			} else {
-				s.cfg.Log.Warn("capture ended unexpectedly; restarting", "retry_in", backoff)
+			if err == nil {
+				err = errors.New("capture ended unexpectedly")
 			}
+			reason := err.Error()
+			if s.cfg.OnAvailability != nil {
+				s.cfg.OnAvailability("unavailable", reason)
+			}
+			s.cfg.Log.Warn("audio capture unavailable; retrying",
+				"backend", s.cfg.Backend, "device", s.cfg.Device,
+				"diagnostic", reason, "action", "retry", "retry_in", backoff)
 			if s.cfg.OnRestart != nil {
 				s.cfg.OnRestart()
 			}
@@ -110,7 +128,7 @@ func (s *DeviceSource) Start(ctx context.Context) (<-chan Frame, error) {
 	return out, nil
 }
 
-func (s *DeviceSource) ffmpegArgs(probeOnly bool) ([]string, bool) {
+func (s *DeviceSource) ffmpegArgs() ([]string, bool) {
 	args := []string{"-hide_banner", "-loglevel", "error", "-f", s.cfg.Backend, "-i", s.cfg.Device}
 	// ALSA can repeat packet timestamps. Derive output timestamps from sample
 	// count so neither muxer receives duplicate DTS values.
@@ -118,17 +136,16 @@ func (s *DeviceSource) ffmpegArgs(probeOnly bool) ([]string, bool) {
 	// Second output off the same decode: full-quality MP3 for listeners.
 	// Channels stay as the source's; -ar 44100 is a guard, since libmp3lame
 	// rejects odd rates.
-	aux := s.cfg.Stream != nil && !probeOnly
+	aux := s.cfg.Stream != nil
 	if aux {
 		args = append(args, "-af", "asetpts=N/SR/TB", "-f", "mp3", "-b:a", "128k", "-ar", "44100", "pipe:3")
 	}
 	return args, aux
 }
 
-// captureOnce runs one ffmpeg lifetime. With probeOnly it just verifies the
-// device opens, then tears down.
-func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeOnly bool) error {
-	args, aux := s.ffmpegArgs(probeOnly)
+// captureOnce runs one ffmpeg lifetime.
+func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame) error {
+	args, aux := s.ffmpegArgs()
 	p, err := startFFmpeg(ctx, procOpts{
 		args:     args,
 		extraOut: aux,
@@ -144,12 +161,8 @@ func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeO
 	s.mu.Unlock()
 
 	buf := make([]byte, PipelineFormat.BytesFor(chunkSize))
-
-	if probeOnly {
-		defer p.Close()
-		return s.probe(ctx, p, buf)
-	}
 	defer p.Close()
+	capturing := false
 
 	// One Run per ffmpeg lifetime: a capture restart ends this Run and the
 	// next one picks up, while listeners' HTTP connections outlive both.
@@ -160,6 +173,12 @@ func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeO
 	for {
 		read, err := io.ReadFull(p.stdout, buf)
 		if read > 0 {
+			if !capturing {
+				capturing = true
+				if s.cfg.OnAvailability != nil {
+					s.cfg.OnAvailability("capturing", "")
+				}
+			}
 			s.mu.Lock()
 			s.offset += PipelineFormat.Duration(read)
 			offset := s.offset
@@ -183,31 +202,10 @@ func (s *DeviceSource) captureOnce(ctx context.Context, out chan<- Frame, probeO
 				if msg := p.LastStderr(); msg != "" {
 					return errors.New(msg)
 				}
-				return nil
+				return errors.New("capture ended unexpectedly")
 			}
 			return err
 		}
-	}
-}
-
-// probe reads one chunk to prove the device is really producing audio. A bad
-// device name makes ffmpeg exit here with a useful stderr line.
-func (s *DeviceSource) probe(ctx context.Context, p *proc, buf []byte) error {
-	done := make(chan error, 1)
-	go func() { _, err := io.ReadFull(p.stdout, buf); done <- err }()
-	select {
-	case err := <-done:
-		if err == nil {
-			return nil
-		}
-		if msg := p.LastStderr(); msg != "" {
-			return fmt.Errorf("cannot open %s device %q: %s", s.cfg.Backend, s.cfg.Device, msg)
-		}
-		return fmt.Errorf("cannot open %s device %q: %w", s.cfg.Backend, s.cfg.Device, err)
-	case <-time.After(5 * time.Second):
-		return fmt.Errorf("timed out opening %s device %q", s.cfg.Backend, s.cfg.Device)
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }
 
