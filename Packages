@@ -218,6 +218,50 @@ Description: Live captions from a soundboard feed to every screen in the room
  .
  Installed as a system service configured from /etc/default/livecaption.
 
+Package: livecaption
+Version: 0.4.0+21
+Architecture: amd64
+Maintainer: bmayfi3ld <bmayfi3ld@users.noreply.github.com>
+Depends: ffmpeg, avahi-daemon, avahi-utils, adduser, systemd
+Recommends: comitup
+Suggests: jq
+Filename: ./livecaption_0.4.0+21_amd64.deb
+Size: 3412110
+MD5sum: 09f916d2df7f178738ff5e4fe326de68
+SHA1: 84842c4e0e6757c6a09650d1748c9152feb0540d
+SHA256: 8f3847061bbcfb3af4a508ddb3aa8939bf1324614786b2a1bccfdf52b715994c
+Section: sound
+Priority: optional
+Homepage: https://github.com/bmayfi3ld/pi-live-captions
+Description: Live captions from a soundboard feed to every screen in the room
+ Streams audio from a capture device to a speech-to-text service and serves
+ the resulting captions as a web page on the local network, advertised over
+ mDNS so viewers can reach it by name with no app to install.
+ .
+ Installed as a system service configured from /etc/default/livecaption.
+
+Package: livecaption
+Version: 0.4.0+21
+Architecture: arm64
+Maintainer: bmayfi3ld <bmayfi3ld@users.noreply.github.com>
+Depends: ffmpeg, avahi-daemon, avahi-utils, adduser, systemd
+Recommends: comitup
+Suggests: jq
+Filename: ./livecaption_0.4.0+21_arm64.deb
+Size: 3042434
+MD5sum: b794c594c1bb8e8b2c0e433fb6cfa32f
+SHA1: 399c6e644feddf6b38fc473b4db8cf5a9b0d8bf5
+SHA256: 8a8373b5026b820376c641f44bea96c415beca6bae813855e5f59550d5ae3706
+Section: sound
+Priority: optional
+Homepage: https://github.com/bmayfi3ld/pi-live-captions
+Description: Live captions from a soundboard feed to every screen in the room
+ Streams audio from a capture device to a speech-to-text service and serves
+ the resulting captions as a web page on the local network, advertised over
+ mDNS so viewers can reach it by name with no app to install.
+ .
+ Installed as a system service configured from /etc/default/livecaption.
+
 Package: livecaption-kiosk
 Version: 0.1.0+1
 Architecture: all
