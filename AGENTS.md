@@ -24,6 +24,7 @@ Assume the user already has an instance running when you need one.
 - Do not do work inside of worktrees in harness specific folders (eg: .claude/**), instead do all work in this local project directly
 - Do not create commits, wait for the user to review the changes
 - Always check that the current checkout is clean before starting work, ask the user if there are any pending changes
+    - The exception to this, is if the only change in the current git state is an openspec change that the current agent is tasked with implementing
 - Do not create new branches, check that the current branch is clean then do work there, ask the user if the current branch is dirty
 - when making changes to the primary application or its deployment package, create a changelog entry for the change
 - similarly when making a change to the kiosk deployment update its changelog
