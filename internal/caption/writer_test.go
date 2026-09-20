@@ -148,6 +148,41 @@ func TestWriterCloseIsIdempotentAndWriteAfterCloseIsSafe(t *testing.T) {
 // TestWriterContentSurvivesMultipleWrites is a light end-to-end check that two
 // lines land in order, which the format tests above assume but don't directly
 // exercise across more than one write.
+func TestWriterCompactsAdjacentMarkers(t *testing.T) {
+	m := metrics.New("v", "s")
+	w, err := NewWriter(t.TempDir(), time.Now(), m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	w.Write(Line{Text: "♪ music ♪", OffsetMS: 1000})
+	w.Write(Line{Text: "♪ music ♪", OffsetMS: 2000})
+	w.Write(Line{Text: "— silence —", OffsetMS: 3000})
+	w.Write(Line{Text: "— silence —", OffsetMS: 4000})
+	w.Write(Line{Text: "♪ music ♪", OffsetMS: 5000})
+	w.Write(Line{Text: "again", OffsetMS: 6000})
+	w.Write(Line{Text: "♪ music ♪", OffsetMS: 7000})
+	w.Write(Line{Text: "echo", OffsetMS: 8000})
+	w.Write(Line{Text: "echo", OffsetMS: 9000})
+
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(w.Dir(), "transcript.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[00:01] ♪ music ♪\n[00:03] — silence —\n[00:05] ♪ music ♪\n[00:06] again\n[00:07] ♪ music ♪\n[00:08] echo\n[00:09] echo\n"
+	if string(data) != want {
+		t.Errorf("transcript.txt = %q, want %q", data, want)
+	}
+	snap := m.Snapshot()
+	if snap.Transcript.Lines != 7 || snap.Transcript.Bytes != int64(len(want)) {
+		t.Errorf("metrics = %d lines, %d bytes; want 7 lines, %d bytes", snap.Transcript.Lines, snap.Transcript.Bytes, len(want))
+	}
+}
+
 func TestWriterContentSurvivesMultipleWrites(t *testing.T) {
 	m := metrics.New("v", "s")
 	w, err := NewWriter(t.TempDir(), time.Now(), m)

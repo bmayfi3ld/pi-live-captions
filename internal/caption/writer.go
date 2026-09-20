@@ -23,13 +23,19 @@ import (
 //
 // Opened O_APPEND and flushed periodically, so a crash keeps everything
 // already written.
+const (
+	musicMarker   = "♪ music ♪"
+	silenceMarker = "— silence —"
+)
+
 type Writer struct {
 	dir string
 
-	mu     sync.Mutex
-	txt    *os.File
-	txtBuf *bufio.Writer
-	closed bool
+	mu         sync.Mutex
+	txt        *os.File
+	txtBuf     *bufio.Writer
+	closed     bool
+	lastMarker string
 
 	metrics *metrics.Metrics
 	done    chan struct{}
@@ -88,6 +94,11 @@ func (w *Writer) Write(l Line) {
 		return
 	}
 
+	marker := l.Text == musicMarker || l.Text == silenceMarker
+	if marker && l.Text == w.lastMarker {
+		return
+	}
+
 	clock := audio.FormatClock(time.Duration(l.OffsetMS) * time.Millisecond)
 	// Spelled out as "[S2] " here, unlike the live viewer's terse per-word
 	// badge: row width is scarce on screen, but a file read later has all the
@@ -101,6 +112,11 @@ func (w *Writer) Write(l Line) {
 	if err != nil {
 		w.fail(err)
 		return
+	}
+	if marker {
+		w.lastMarker = l.Text
+	} else {
+		w.lastMarker = ""
 	}
 	w.metrics.TranscriptWrote(1, n)
 }

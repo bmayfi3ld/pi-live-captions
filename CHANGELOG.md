@@ -7,6 +7,7 @@ adding a new `## X.Y.Z` heading here.
 ## Unreleased
 
 ### Changed
+- Newly recorded transcripts compact adjacent identical music and silence markers.
 - set default of the web page to show one less line while scrolling
 
 ## 0.6.0
