@@ -82,11 +82,6 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 
 	hub := caption.NewHub(met)
 
-	// Wired before anything starts so the very first SetSTTState call (idle ->
-	// connecting) already reaches the viewer. Hub.PublishStatus takes its own
-	// lock and never met's, so this can't deadlock against the metrics mutex.
-	met.SetSTTStateHook(func(s metrics.ConnState) { hub.PublishStatus(s.String()) })
-
 	engine, err := newEngine(o.stt.Engine, stt.Config{
 		Format:   audio.PipelineFormat,
 		Model:    o.stt.Model,
@@ -125,7 +120,17 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 		}
 		s.writer = w
 		hub.OnMarker = w.Write
+		log = wireAudit(s, w, gate, met, log)
 	}
+
+	// Wired before anything starts so the very first SetSTTState call (idle ->
+	// connecting) already reaches the viewer and the audit stream. The hook
+	// takes hub's own lock and never met's, so this can't deadlock against
+	// the metrics mutex.
+	met.SetSTTStateHook(func(st metrics.ConnState) {
+		hub.PublishStatus(st.String())
+		s.auditState("stt", st.String())
+	})
 
 	// One place decides what happens to a finalized line: it goes to the
 	// terminal and to the transcript file.
@@ -196,7 +201,39 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 		fields = append(fields, ui.BannerField{Label: "mdns", Value: o.server.MDNSName + ".local"})
 	}
 	s.bannerFields = fields
+	s.emitSessionStart(o, gate)
 	return s, nil
+}
+
+// auditState records one state transition for the audit stream, when there
+// is one.
+func (s *session) auditState(component, state string) {
+	if s.writer != nil {
+		s.writer.StateEvent(component, state)
+	}
+}
+
+// emitSessionStart writes the first audit record: resolved, non-secret
+// runtime configuration only. The metadata type has no field a credential
+// could flow into, so exclusion is by construction.
+func (s *session) emitSessionStart(o buildOpts, gate *audio.NoiseGate) {
+	if s.writer == nil {
+		return
+	}
+	s.writer.SessionStart(caption.StartMeta{
+		Version:      Version,
+		SessionID:    s.met.SessionID,
+		SourceKind:   o.kind,
+		SourceSpec:   o.sourceLabel,
+		SourceFormat: o.conversion,
+		Engine:       o.stt.Engine,
+		Model:        o.stt.Model,
+		Language:     o.stt.Language,
+		Keyterms:     o.stt.Keyterm,
+		Diarize:      o.stt.Diarize,
+		MusicDetect:  o.stt.MusicDetect,
+		NoiseGate:    gate.Snapshot().Settings,
+	})
 }
 
 // audioBannerField reports the audio stream URL, or that there isn't one and
@@ -210,6 +247,36 @@ func audioBannerField(o buildOpts, base string) ui.BannerField {
 	default:
 		return ui.BannerField{Label: "audio", Value: "disabled", Note: o.audioReason}
 	}
+}
+
+// wireAudit composes the session logger with the audit sink and routes the
+// audit streams' inputs into the writer: warning/error diagnostics are
+// mirrored from the log, gate transitions and settings changes arrive at
+// their decision points, and counted degradation events at the metrics hook.
+// The returned logger is both installed as the default (engine drivers
+// capture slog.Default() at run time, before any goroutine starts) and used
+// by everything wired afterwards; the terminal/JSON handler it wraps stays
+// authoritative for people and journald.
+func wireAudit(s *session, w *caption.Writer, gate *audio.NoiseGate, met *metrics.Metrics, log *slog.Logger) *slog.Logger {
+	log = slog.New(&caption.AuditLogHandler{Next: log.Handler(), Writer: w})
+	slog.SetDefault(log)
+	s.log = log
+
+	w.OnAuditFail = func(err error) { log.Warn("session audit stream disabled", "err", err) }
+	if aerr := w.AuditErr(); aerr != nil {
+		log.Warn("session audit stream unavailable; captions unaffected", "err", aerr)
+	}
+
+	gate.OnEdge = w.GateEdge
+	gate.OnSettings = w.GateConfig
+	met.SetAuditHook(func(ev metrics.AuditEvent) {
+		if ev.Event == "state" {
+			w.StateEvent(ev.Component, ev.State)
+			return
+		}
+		w.DropEvent(ev.Component, ev.Event, ev.Count, ev.At, ev.HasAt)
+	})
+	return log
 }
 
 // run drives the pipeline until the source ends or ctx is cancelled, then
@@ -340,13 +407,23 @@ func (s *session) shutdown() {
 	defer cancel()
 	_ = s.server.Shutdown(shutCtx)
 
+	// The connection is over; stamp it before the final records so the
+	// session_end summary reports health "closed" rather than the last
+	// active state.
+	s.met.SetSTTState(metrics.StateClosed)
+
+	snap := s.met.Snapshot()
 	if s.writer != nil {
+		// Flush first so transcript failures are reflected in the one snapshot
+		// shared by the final audit record and terminal summary.
+		s.writer.Flush()
+		snap = s.met.Snapshot()
+		s.writer.SessionEnd(snap)
 		if err := s.writer.Close(); err != nil {
 			s.log.Warn("transcript close failed", "err", err)
 		}
 	}
-	s.met.SetSTTState(metrics.StateClosed)
-	s.term.Summary(s.met.Snapshot(), s.met.MonitorEnabled)
+	s.term.Summary(snap, s.met.MonitorEnabled)
 }
 
 // newBroadcaster builds the audio fan-out, or reports why there isn't one.

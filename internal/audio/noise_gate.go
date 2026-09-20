@@ -56,6 +56,17 @@ type NoiseGate struct {
 	lastSample            time.Time
 	rms                   float64
 	peaks                 []peakSample
+
+	// OnEdge fires exactly once per effective open/close transition, with the
+	// frame's source position, the settings governing the transition, and the
+	// wall-clock instant. The audit stream records these; nothing else
+	// subscribes. Called with g.mu released, and only after Wrap/Process
+	// begins, so assignment needs no synchronization.
+	OnEdge func(open bool, at time.Duration, settings NoiseSettings, observed time.Time)
+	// OnSettings fires after a successful Set, before any frame is processed
+	// with the new values, so the audit stream records the configuration
+	// ahead of the transitions that rely on it.
+	OnSettings func(settings NoiseSettings)
 }
 
 func NewNoiseGate(settings NoiseSettings) (*NoiseGate, error) {
@@ -70,8 +81,11 @@ func (g *NoiseGate) Set(settings NoiseSettings) error {
 		return err
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.settings = settings
+	g.mu.Unlock()
+	if g.OnSettings != nil {
+		g.OnSettings(settings)
+	}
 	return nil
 }
 
@@ -113,7 +127,6 @@ func (g *NoiseGate) Process(f Frame) Frame { return g.process(f, time.Now()) }
 func (g *NoiseGate) process(f Frame, now time.Time) Frame {
 	db, peak := RMSDBFS(f.PCM), peakDBFS(f.PCM)
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if f.Offset < g.lastOffset {
 		g.lastAbove = f.Offset
 	}
@@ -121,14 +134,22 @@ func (g *NoiseGate) process(f Frame, now time.Time) Frame {
 	g.lastSample, g.rms = now, db
 	g.trimPeaks(now)
 	g.peaks = append(g.peaks, peakSample{now, peak})
+	wasOpen := g.open
 	if db > g.settings.ThresholdDBFS {
 		g.open, g.lastAbove = true, f.Offset
 	} else if g.open && f.Offset-g.lastAbove >= time.Duration(g.settings.ReleaseSec*float64(time.Second)) {
 		g.open = false
 	}
+	edge := g.open != wasOpen
+	settings := g.settings
+	at, observed := f.Offset, now
 	f.NoiseGated, f.NoiseGateOpen = true, g.open
 	if !g.open {
 		f.PCM = make([]byte, len(f.PCM))
+	}
+	g.mu.Unlock()
+	if edge && g.OnEdge != nil {
+		g.OnEdge(g.open, at, settings, observed)
 	}
 	return f
 }

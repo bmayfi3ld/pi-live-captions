@@ -140,7 +140,7 @@ func TestRing_EvictionAccountingAcrossGateTransitions(t *testing.T) {
 		gate.ObserveLevel(-80, time.Second)
 		met := metrics.New("test", "test")
 		met.DropFrame()
-		met.STTBufferDrop()
+		met.STTBufferDrop(0)
 		r := newRing(2, met, gate)
 		for i := byte(1); i <= 3; i++ {
 			offset := time.Duration(i) * time.Second

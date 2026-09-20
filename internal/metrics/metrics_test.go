@@ -261,7 +261,7 @@ func TestHealthDegradesForEachDegradation(t *testing.T) {
 		"xruns":            func(m *Metrics) { m.Xrun() },
 		"monitor drops":    func(m *Metrics) { m.MonitorDrop() },
 		"stt reconnects":   func(m *Metrics) { m.STTReconnect() },
-		"stt buffer drops": func(m *Metrics) { m.STTBufferDrop() },
+		"stt buffer drops": func(m *Metrics) { m.STTBufferDrop(0) },
 		"slow disconnects": func(m *Metrics) { m.SSESlowDrop() },
 		"transcript error": func(m *Metrics) { m.SetTranscriptError(errors.New("disk full")) },
 	}
@@ -571,5 +571,82 @@ func TestConcurrentAccessIsRaceFree(t *testing.T) {
 	}
 	if snap.Transcript.Lines != want {
 		t.Errorf("transcript lines = %d, want %d", snap.Transcript.Lines, want)
+	}
+}
+
+// TestAuditHookReceivesEveryDegradationFamily drives each event family at
+// its existing metrics entry point and asserts the structured event the
+// audit stream receives — component, event, source position when known —
+// so no consumer ever has to reconstruct this from log text.
+func TestAuditHookReceivesEveryDegradationFamily(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		apply                    func(*Metrics)
+		wantComponent, wantEvent string
+		wantAt                   time.Duration
+		wantHasAt                bool
+	}{
+		{"frames dropped", func(m *Metrics) { m.DropFrame() }, "source", "frames_dropped", 0, false},
+		{"ffmpeg restart", func(m *Metrics) { m.FFmpegRestart() }, "source", "restart", 0, false},
+		{"xrun", func(m *Metrics) { m.Xrun() }, "source", "xrun", 0, false},
+		{"monitor drop", func(m *Metrics) { m.MonitorDrop() }, "monitor", "drop", 0, false},
+		{"audio drop", func(m *Metrics) { m.AudioDrop() }, "audio_stream", "drop", 0, false},
+		{"reconnect", func(m *Metrics) { m.STTReconnect() }, "stt", "reconnect", 0, false},
+		{"buffer drop", func(m *Metrics) { m.STTBufferDrop(2500 * time.Millisecond) }, "stt", "buffer_drop", 2500 * time.Millisecond, true},
+		{"slow subscriber", func(m *Metrics) { m.SSESlowDrop() }, "web", "slow_subscriber", 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New("v", "s")
+			var events []AuditEvent
+			m.SetAuditHook(func(e AuditEvent) { events = append(events, e) })
+			tc.apply(m)
+			if len(events) != 1 {
+				t.Fatalf("got %d events, want 1", len(events))
+			}
+			e := events[0]
+			if e.Component != tc.wantComponent || e.Event != tc.wantEvent {
+				t.Errorf("event = %s/%s, want %s/%s", e.Component, e.Event, tc.wantComponent, tc.wantEvent)
+			}
+			if e.HasAt != tc.wantHasAt || (tc.wantHasAt && e.At != tc.wantAt) {
+				t.Errorf("source position = (%v, %v), want (%v, true)", e.At, e.HasAt, tc.wantAt)
+			}
+		})
+	}
+}
+
+// TestAuditHookSkipsUnchangedSourceState pins dedup on the source state
+// record: repeated identical SetSourceState calls are not transitions, only
+// a genuine change is.
+func TestAuditHookSkipsUnchangedSourceState(t *testing.T) {
+	m := New("v", "s")
+	var events []AuditEvent
+	m.SetAuditHook(func(e AuditEvent) { events = append(events, e) })
+
+	m.SetSourceState("starting", "", false)
+	m.SetSourceState("starting", "", false)
+	m.SetSourceState("missing", "gone", true)
+
+	if len(events) != 2 {
+		t.Fatalf("got %d events, want 2", len(events))
+	}
+	if events[0].State != "starting" || events[1].State != "missing" {
+		t.Errorf("states = %q, %q; want starting, missing", events[0].State, events[1].State)
+	}
+	if events[0].Event != "state" || events[0].Component != "source" {
+		t.Errorf("event = %s/%s, want source/state", events[0].Component, events[0].Event)
+	}
+}
+
+// TestSetAuditErrorDegradesAndSurfaces covers the audit-failure condition:
+// it degrades health persistently and appears in the snapshot.
+func TestSetAuditErrorDegradesAndSurfaces(t *testing.T) {
+	m := New("v", "s")
+	m.SetAuditError(errors.New("audit disk full"))
+	snap := m.Snapshot()
+	if snap.Audit.LastError != "audit disk full" {
+		t.Errorf("audit last_error = %q", snap.Audit.LastError)
+	}
+	if snap.Health != "degraded" {
+		t.Errorf("health = %q, want degraded", snap.Health)
 	}
 }

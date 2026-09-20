@@ -49,7 +49,7 @@ func (r *ring) push(f audio.Frame) {
 		// state: paused pre-roll rotation is expected even after a resume,
 		// while active-period audio loss remains degradation.
 		if dropped.active {
-			r.met.STTBufferDrop()
+			r.met.STTBufferDrop(dropped.offset)
 		}
 	}
 	r.mu.Unlock()

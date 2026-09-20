@@ -6,6 +6,17 @@ adding a new `## X.Y.Z` heading here.
 
 ## Unreleased
 
+### Added
+- Every recorded session now writes `audit.jsonl` beside `transcript.txt`: an append-only,
+  one-JSON-object-per-line evidence file carrying the same finalized captions and markers as
+  the transcript (with millisecond source timing), plus noise-gate open/close transitions
+  with their source positions, runtime gate setting changes, recognizer connection states,
+  reconnects, pauses, drops, source restarts, session warnings and errors, startup metadata
+  (version, source, recognition and noise-gate configuration — no credentials) and a final
+  metrics summary on clean shutdown. Best-effort by design: an audit write failure disables
+  the audit stream, is reported once in the log and as degraded health on `/admin`, and
+  never interrupts live captions or the transcript. See `docs/usage.md`, "Audit log".
+
 ### Changed
 - Newly recorded transcripts compact adjacent identical music and silence markers.
 - set default of the web page to show one less line while scrolling

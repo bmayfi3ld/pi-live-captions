@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -264,5 +265,109 @@ func TestObserveLatency_ZeroSentAtRecordsTotalNoPhases(t *testing.T) {
 	}
 	if snap.STT.PhaseLatencyCount != 0 {
 		t.Errorf("PhaseLatencyCount = %d, want 0 for a zero SentAt", snap.STT.PhaseLatencyCount)
+	}
+}
+
+// TestSessionAuditLifecycle drives a full session with transcript recording
+// enabled and asserts the audit stream's lifecycle: session_start first with
+// the run's identity, elapsed_ms nondecreasing throughout, the connection
+// state transitions recorded as structured records, and — on a clean
+// shutdown — session_end as the final complete record, carrying the same
+// metrics snapshot the shutdown summary prints. No credential can appear,
+// because the metadata type has nowhere to put one.
+func TestSessionAuditLifecycle(t *testing.T) {
+	s, err := newSession(buildOpts{
+		kind: "live", sourceLabel: "alsa:test", source: heldSource{},
+		stt:    STTFlags{Engine: "mock", NoiseThresholdDBFS: -35, NoiseRelease: 3 * time.Second},
+		server: ServerFlags{Addr: "127.0.0.1:0", AudioStream: false},
+		output: OutputFlags{TranscriptDir: t.TempDir()},
+	}, newTestTerminal(), testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.writer == nil {
+		t.Fatal("writer must be enabled for the audit lifecycle test")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.run(ctx) }()
+	time.Sleep(100 * time.Millisecond) // let the mock connect
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	s.shutdown()
+
+	data, err := os.ReadFile(filepath.Join(s.writer.Dir(), "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("invalid audit line %q: %v", line, err)
+		}
+		records = append(records, rec)
+	}
+	if len(records) < 3 {
+		t.Fatalf("got %d records, want at least session_start, a state change and session_end", len(records))
+	}
+	if records[0]["type"] != "session_start" {
+		t.Errorf("first record = %v, want session_start", records[0])
+	}
+	if records[0]["version"] != Version {
+		t.Errorf("session_start version = %v, want %q", records[0]["version"], Version)
+	}
+	if _, ok := records[0]["session_id"]; !ok {
+		t.Error("session_start missing session_id")
+	}
+	// Credentials are excluded by construction; assert the whole family is
+	// absent from every record, not just the first.
+	for _, rec := range records {
+		raw, _ := json.Marshal(rec)
+		for _, forbidden := range []string{"api_key", "password", "authorization"} {
+			if strings.Contains(strings.ToLower(string(raw)), forbidden) {
+				t.Errorf("record leaks credential field %q: %s", forbidden, raw)
+			}
+		}
+	}
+	// The session timeline is monotonic in elapsed_ms.
+	var prev float64
+	for i, rec := range records {
+		ms := rec["elapsed_ms"].(float64)
+		if i > 0 && ms < prev {
+			t.Errorf("elapsed_ms went backwards: %v then %v", prev, ms)
+		}
+		prev = ms
+	}
+	// The mock connected, and shutdown closed: both transitions recorded.
+	states := map[string]bool{}
+	for _, rec := range records {
+		if rec["type"] == "state" && rec["component"] == "stt" {
+			states[rec["state"].(string)] = true
+		}
+	}
+	if !states["connected"] || !states["closed"] {
+		t.Errorf("stt state records = %v, want connected and closed", states)
+	}
+	last := records[len(records)-1]
+	if last["type"] != "session_end" {
+		t.Errorf("last record = %v, want session_end", last)
+	}
+	summary, _ := last["summary"].(map[string]any)
+	if summary == nil || summary["health"] != "closed" {
+		t.Errorf("session_end summary health = %v, want closed", summary["health"])
+	}
+	if summary != nil {
+		stt, _ := summary["stt"].(map[string]any)
+		if stt == nil || stt["reconnects_total"] != float64(0) || stt["buffer_drops_total"] != float64(0) {
+			t.Errorf("session_end stt counters = %v, want zeros for a clean session", stt)
+		}
+		src, _ := summary["source"].(map[string]any)
+		if src == nil || src["ffmpeg_restarts_total"] != float64(0) {
+			t.Errorf("session_end source counters = %v, want zeros", src)
+		}
 	}
 }

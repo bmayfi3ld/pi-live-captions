@@ -167,3 +167,77 @@ func TestNoiseWrapCancellation(t *testing.T) {
 		t.Fatal("wrapper did not stop")
 	}
 }
+
+// TestNoiseGateEdgesAreAudited pins the audit contract: exactly one edge per
+// effective open/close transition, carrying the frame's source position and
+// the settings governing the transition — and nothing for the frames in
+// between, where the gate merely stayed in one state (no continuous RMS
+// records).
+func TestNoiseGateEdgesAreAudited(t *testing.T) {
+	g, err := NewNoiseGate(NoiseSettings{-45, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet, loud := squareWave(1600, 30), squareWave(1600, 3000)
+
+	type edge struct {
+		open      bool
+		at        time.Duration
+		threshold float64
+		release   float64
+	}
+	var edges []edge
+	g.OnEdge = func(open bool, at time.Duration, settings NoiseSettings, _ time.Time) {
+		edges = append(edges, edge{open, at, settings.ThresholdDBFS, settings.ReleaseSec})
+	}
+
+	now := time.Now()
+	step := func(pcm []byte, seconds int) {
+		g.process(Frame{PCM: pcm, Offset: time.Duration(seconds) * time.Second}, now)
+	}
+
+	step(quiet, 0)
+	step(quiet, 1)
+	step(loud, 2)  // opens
+	step(loud, 3)  // stays open: no edge
+	step(quiet, 4) // release window starts: no edge yet
+	step(quiet, 6) // release elapsed: closes
+	step(quiet, 7) // stays closed: no edge
+	step(loud, 8)  // opens again
+
+	want := []edge{
+		{true, 2 * time.Second, -45, 2},
+		{false, 6 * time.Second, -45, 2},
+		{true, 8 * time.Second, -45, 2},
+	}
+	if len(edges) != len(want) {
+		t.Fatalf("edges = %v, want %v", edges, want)
+	}
+	for i, e := range edges {
+		if e != want[i] {
+			t.Errorf("edge %d = %+v, want %+v", i, e, want[i])
+		}
+	}
+}
+
+// TestNoiseGateSettingsCallbackOrdering pins the config-before-edge contract:
+// Set fires the settings callback (which records the new configuration)
+// before any transition can rely on the new values.
+func TestNoiseGateSettingsCallbackOrdering(t *testing.T) {
+	g, err := NewNoiseGate(NoiseSettings{-45, 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	g.OnSettings = func(s NoiseSettings) { events = append(events, "config") }
+	g.OnEdge = func(bool, time.Duration, NoiseSettings, time.Time) { events = append(events, "edge") }
+
+	if err := g.Set(NoiseSettings{-70, 1}); err != nil {
+		t.Fatal(err)
+	}
+	g.process(Frame{PCM: squareWave(1600, 30), Offset: time.Second}, time.Now())
+
+	if len(events) != 2 || events[0] != "config" || events[1] != "edge" {
+		t.Errorf("event order = %v, want [config edge]", events)
+	}
+}

@@ -834,3 +834,85 @@ func TestSpeakerChangeDoesNotSetBreak(t *testing.T) {
 		t.Fatal("expected a caption event for the second segment")
 	}
 }
+
+// TestLineCarriesEndTiming pins the audit-facing half of Line: the closed
+// line's end is the last merged segment's end on the source clock, present
+// when the segment carried reliable timing and explicitly unknown when it
+// did not — never zero-filled.
+func TestLineCarriesEndTiming(t *testing.T) {
+	h := newTestHub()
+	var finals []Line
+	h.OnFinal = func(l Line) { finals = append(finals, l) }
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub)
+
+	// Two timed segments forming one utterance; punctuation closes it, with
+	// the end taken from the second segment, not the first.
+	h.Publish(stt.Transcript{Words: stt.Untimed("hello there,"), Start: 1000 * time.Millisecond, Duration: 500 * time.Millisecond})
+	h.Publish(stt.Transcript{Words: stt.Untimed("how are you?"), Start: 1500 * time.Millisecond, Duration: 750 * time.Millisecond})
+	if len(finals) != 1 {
+		t.Fatalf("got %d finals, want 1", len(finals))
+	}
+	if finals[0].OffsetMS != 1000 || finals[0].EndMS != 2250 || !finals[0].EndOK {
+		t.Errorf("line = %d..%d (ok=%v), want 1000..2250 (ok=true)", finals[0].OffsetMS, finals[0].EndMS, finals[0].EndOK)
+	}
+
+	// An untimed segment that failed to normalize (Start 0, Duration 0) has
+	// no honest end: EndOK must be false rather than EndMS 0.
+	h.Publish(stt.Transcript{Words: stt.Untimed("lost timing.")})
+	if len(finals) != 2 {
+		t.Fatalf("got %d finals, want 2", len(finals))
+	}
+	if finals[1].EndOK {
+		t.Errorf("untimed line EndOK = true, want false (end_ms %d)", finals[1].EndMS)
+	}
+}
+
+// TestAuditTimelineContinuesAcrossClockRanges drives the writer through the
+// hub with segments on either side of a reconnect-style clock stretch: the
+// audit records' source positions must stay nondecreasing on the one
+// source-session timeline, with millisecond start and end values.
+func TestAuditTimelineContinuesAcrossClockRanges(t *testing.T) {
+	m := metrics.New("v", "s")
+	w, err := NewWriter(t.TempDir(), time.Now(), m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHub(m)
+	h.OnFinal = w.Write
+	sub, unsub := h.Subscribe()
+	defer unsub()
+	drain(sub)
+
+	h.Publish(stt.Transcript{Words: stt.Untimed("before the blip"), Start: time.Second, Duration: 500 * time.Millisecond})
+	// A reconnect hands the recognizer a fresh connection-local clock; the
+	// shared driver renormalizes onto the source clock, so the next segment
+	// arrives with a LATER source position from a fresh connection.
+	h.Publish(stt.Transcript{Words: stt.Untimed("after the blip."), Start: 90*time.Second + 500*time.Millisecond, Duration: 500 * time.Millisecond})
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	records := readAudit(t, w.Dir())
+	if len(records) != 2 {
+		t.Fatalf("got %d records, want 2", len(records))
+	}
+	var prev float64
+	for i, rec := range records {
+		ms, _ := rec["source_ms"].(float64)
+		if i > 0 && ms < prev {
+			t.Errorf("source_ms went backwards: %v then %v", prev, ms)
+		}
+		prev = ms
+	}
+	if records[0]["source_ms"] != float64(1000) {
+		t.Errorf("first source_ms = %v, want 1000", records[0]["source_ms"])
+	}
+	if records[1]["source_ms"] != float64(90500) {
+		t.Errorf("second source_ms = %v, want 90500", records[1]["source_ms"])
+	}
+	if _, present := records[1]["end_ms"]; !present {
+		t.Error("timed reconnect-range line must carry end_ms")
+	}
+}

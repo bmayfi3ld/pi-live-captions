@@ -83,6 +83,12 @@ type Line struct {
 	// belongs to whichever speaker was talking when Publish appended its
 	// text, which closeLocked has no way to see itself — see Hub.Publish.
 	Speaker int
+	// EndMS is the line's source-relative end, the media time its last
+	// segment covered. EndOK is false when that end is not reliably known —
+	// an untimed segment that failed to normalize has no honest end — and
+	// consumers must omit it rather than read EndMS as zero.
+	EndMS int64
+	EndOK bool
 }
 
 // subscriberBuffer is how far a subscriber may fall behind before being
@@ -141,6 +147,13 @@ type Hub struct {
 	// shares a speaker, since a change force-closes the line first (see
 	// Publish).
 	uttSpeaker int
+	// uttEnd/uttEndOK carry the last merged segment's end through the same
+	// utterance lifetime: the line's source-relative end for the audit
+	// record. OK is false when the segment carried no reliable timing (the
+	// normalized-to-zero untimed case), so the record omits the end instead
+	// of inventing one.
+	uttEnd   time.Duration
+	uttEndOK bool
 	// lastSpeaker is the most recently published segment's speaker, used to
 	// detect a speaker change independent of any pause. 0 (unknown) never
 	// counts as a change either way: diarization dropping out mid-session
@@ -251,6 +264,8 @@ func (h *Hub) publish(t stt.Transcript) {
 	}
 	h.committed = joinText(h.committed, text)
 	h.prevEnd = t.End()
+	h.uttEnd = t.End()
+	h.uttEndOK = t.Duration > 0
 
 	ev := h.newEventLocked(KindCaption)
 	ev.Words, ev.Break = wireWords(t), broke // the delta, never the accumulation
@@ -348,6 +363,8 @@ func (h *Hub) closeLocked(broke bool) (Line, bool) {
 		OffsetMS: h.uttStart.Milliseconds(),
 		At:       time.Now(),
 		Speaker:  h.uttSpeaker,
+		EndMS:    h.uttEnd.Milliseconds(),
+		EndOK:    h.uttEndOK,
 	}
 	h.committed = ""
 	return line, true

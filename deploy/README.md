@@ -184,6 +184,10 @@ journalctl -u livecaption -f
 - `http://livecaptions.local/audio.mp3` plays the source audio in VLC or mpv.
 - `http://livecaptions.local/admin` shows metrics.
 - Transcripts accumulate under `/var/lib/livecaption/transcripts/<timestamp>/`.
+- Each session directory also holds `audit.jsonl`, the machine-readable
+  companion to `transcript.txt` (see `docs/usage.md`, "Audit log"). Copy or
+  collect it alongside the transcript when pulling evidence off the box; both
+  files share one directory and one flush cadence.
 - **Pull the power, plug it back in, and confirm captions return with no
   login.** This is the one that matters; it is how the box gets used.
 
@@ -202,7 +206,11 @@ sudo systemctl restart systemd-journald
 sudo apt clean
 ```
 
-Transcripts themselves are not the risk — roughly 100 KB per hour.
+Transcripts themselves are not the risk — roughly 100 KB per hour. `audit.jsonl`
+sits beside each transcript in the same directory at a similar size per hour,
+so the same headroom covers it. Journald keeps carrying the service's own
+logs; the audit file is what makes session diagnostics portable with the
+transcript, not a replacement for the journal.
 
 **Known gaps to be aware of, not yet fixed** (see
 `specs/2026-09-01_hardening_transcript_durability.md`): transcript writes are

@@ -103,6 +103,12 @@ type Metrics struct {
 	transcriptLine atomic.Int64
 	transcriptByte atomic.Int64
 
+	// auditHook, set once before the pipeline starts, receives every counted
+	// degradation event and state change the audit stream should record. It
+	// is called with no metrics lock held — its callee takes other locks.
+	auditHook func(AuditEvent)
+	auditErr  string
+
 	mu             sync.RWMutex
 	lastStderr     string
 	sourceState    string
@@ -215,6 +221,29 @@ func New(version, sessionID string) *Metrics {
 	}
 }
 
+// AuditEvent is one degradation or state-change event the audit stream
+// should record, routed from the exact point it was counted. Count is the
+// per-event increment (1); At carries the source-media position when the
+// reporting site knows one.
+type AuditEvent struct {
+	Component string // "source", "stt", "monitor", "audio_stream", "web"
+	Event     string // "state", "restart", "frames_dropped", "reconnect", ...
+	State     string // for Event == "state": the new state
+	Count     int64
+	At        time.Duration
+	HasAt     bool
+}
+
+// SetAuditHook registers the audit event consumer. Must be called before the
+// session starts; called from pipeline goroutines thereafter.
+func (m *Metrics) SetAuditHook(f func(AuditEvent)) { m.auditHook = f }
+
+func (m *Metrics) emitAudit(e AuditEvent) {
+	if m.auditHook != nil {
+		m.auditHook(e)
+	}
+}
+
 // --- Source ---
 
 // AddFrame records one PCM frame reaching the pipeline. offset is the media
@@ -242,24 +271,34 @@ func (m *Metrics) markDegradedLocked() {
 	m.lastDegradedAt = time.Now()
 }
 
-// degrade increments a silent-degradation counter and stamps the health
-// badge's recency window in one step. Every counter that means "something
-// went wrong quietly" goes through here, so none can be bumped without the
-// badge noticing.
-func (m *Metrics) degrade(c *atomic.Int64) {
+// degrade increments a silent-degradation counter, stamps the health
+// badge's recency window, and emits the audit event — in one step, so no
+// counter can be bumped without the badge and the audit stream noticing.
+func (m *Metrics) degrade(e AuditEvent, c *atomic.Int64) {
 	c.Add(1)
 	m.mu.Lock()
 	m.markDegradedLocked()
 	m.mu.Unlock()
+	m.emitAudit(e)
 }
 
-func (m *Metrics) DropFrame()             { m.degrade(&m.framesDropped) }
-func (m *Metrics) FFmpegRestart()         { m.degrade(&m.ffmpegRestarts) }
-func (m *Metrics) Xrun()                  { m.degrade(&m.xruns) }
-func (m *Metrics) MonitorDrop()           { m.degrade(&m.monitorDropped) }
+func (m *Metrics) DropFrame() {
+	m.degrade(AuditEvent{Component: "source", Event: "frames_dropped", Count: 1}, &m.framesDropped)
+}
+func (m *Metrics) FFmpegRestart() {
+	m.degrade(AuditEvent{Component: "source", Event: "restart", Count: 1}, &m.ffmpegRestarts)
+}
+func (m *Metrics) Xrun() {
+	m.degrade(AuditEvent{Component: "source", Event: "xrun", Count: 1}, &m.xruns)
+}
+func (m *Metrics) MonitorDrop() {
+	m.degrade(AuditEvent{Component: "monitor", Event: "drop", Count: 1}, &m.monitorDropped)
+}
 func (m *Metrics) SetMonitorAlive(v bool) { m.monitorAlive.Store(v) }
 
-func (m *Metrics) AudioDrop()          { m.degrade(&m.audioDropped) }
+func (m *Metrics) AudioDrop() {
+	m.degrade(AuditEvent{Component: "audio_stream", Event: "drop", Count: 1}, &m.audioDropped)
+}
 func (m *Metrics) SetAudioLive(v bool) { m.audioLive.Store(v) }
 func (m *Metrics) AudioListenerJoined() {
 	m.audioListeners.Add(1)
@@ -275,12 +314,17 @@ func (m *Metrics) SetLastStderr(s string) {
 
 // SetSourceState records the current live input state. A source fault remains
 // active until capture reports a usable PCM frame; it is not time-windowed.
+// State changes are audited.
 func (m *Metrics) SetSourceState(state, reason string, restartRequired bool) {
 	m.mu.Lock()
+	changed := state != m.sourceState
 	m.sourceState = state
 	m.sourceError = reason
 	m.sourceRestart = restartRequired
 	m.mu.Unlock()
+	if changed {
+		m.emitAudit(AuditEvent{Component: "source", Event: "state", State: state})
+	}
 }
 
 // --- STT ---
@@ -298,7 +342,9 @@ func (m *Metrics) SetSTTState(s ConnState) {
 	}
 }
 func (m *Metrics) STTState() ConnState { return ConnState(m.sttState.Load()) }
-func (m *Metrics) STTReconnect()       { m.degrade(&m.sttReconnect) }
+func (m *Metrics) STTReconnect() {
+	m.degrade(AuditEvent{Component: "stt", Event: "reconnect", Count: 1}, &m.sttReconnect)
+}
 
 // STTSegment counts a caption segment painted to the display. Kept
 // deliberately distinct from STTLine: segments_total / lines_total is the
@@ -315,7 +361,10 @@ func (m *Metrics) STTBytesSent(n int) { m.sttBytesSent.Add(int64(n)) }
 // while the gate was active — i.e. the link is not keeping up with live
 // audio, not the pre-roll buffer discarding stale silence during a pause.
 // See ring.push in internal/stt/deepgram/deepgram.go for the gating logic.
-func (m *Metrics) STTBufferDrop() { m.degrade(&m.sttBufferDrops) }
+// at is the evicted chunk's source position, when its frame carried one.
+func (m *Metrics) STTBufferDrop(at time.Duration) {
+	m.degrade(AuditEvent{Component: "stt", Event: "buffer_drop", Count: 1, At: at, HasAt: at > 0}, &m.sttBufferDrops)
+}
 
 // SetSTTStateHook registers a callback invoked when the STT state changes.
 // Must be called before the session starts — it is not safe against a
@@ -409,7 +458,9 @@ func (m *Metrics) SSEConnect() {
 }
 func (m *Metrics) SSEDisconnect() { m.sseClients.Add(-1) }
 func (m *Metrics) SSEEvent()      { m.sseEvents.Add(1) }
-func (m *Metrics) SSESlowDrop()   { m.degrade(&m.sseSlowDrops) }
+func (m *Metrics) SSESlowDrop() {
+	m.degrade(AuditEvent{Component: "web", Event: "slow_subscriber", Count: 1}, &m.sseSlowDrops)
+}
 
 // --- Transcript ---
 
@@ -425,6 +476,19 @@ func (m *Metrics) SetTranscriptError(err error) {
 		// Call markDegradedLocked directly rather than through a
 		// self-locking wrapper: we already hold m.mu here, and it's a plain
 		// sync.RWMutex, not reentrant — taking it twice would deadlock.
+		m.markDegradedLocked()
+	}
+	m.mu.Unlock()
+}
+
+// SetAuditError records a permanent audit-stream failure. Unlike a transcript
+// error it does not degrade the live-caption path, but it is a condition that
+// has silently removed the session's evidence file, so the health badge
+// reports it for the rest of the session.
+func (m *Metrics) SetAuditError(err error) {
+	m.mu.Lock()
+	if err != nil {
+		m.auditErr = err.Error()
 		m.markDegradedLocked()
 	}
 	m.mu.Unlock()
@@ -540,6 +604,10 @@ type Snapshot struct {
 		LastError string `json:"last_write_error"`
 	} `json:"transcript"`
 
+	Audit struct {
+		LastError string `json:"last_error"`
+	} `json:"audit"`
+
 	Goroutines int `json:"goroutines"`
 }
 
@@ -557,6 +625,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	lastStderr, sourceState, sourceError, sourceRestart := m.lastStderr, m.sourceState, m.sourceError, m.sourceRestart
 	sttErr, sttErrAt := m.sttLastErr, m.sttLastErrAt
 	transErr := m.transcriptErr
+	auditErr := m.auditErr
 	processed, total := m.mediaProcessed, m.mediaTotal
 	pauseStart, pausedTotal := m.sttPauseStart, m.sttPausedTotal
 	lastDegradedAt := m.lastDegradedAt
@@ -672,7 +741,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		s.Health = "degraded"
 	case s.STT.State == StatePaused.String():
 		s.Health = "paused"
-	case (!lastDegradedAt.IsZero() && time.Since(lastDegradedAt) <= degradedWindow) || transErr != "":
+	case (!lastDegradedAt.IsZero() && time.Since(lastDegradedAt) <= degradedWindow) || transErr != "" || auditErr != "":
 		s.Health = "degraded"
 	default:
 		s.Health = "ok"
@@ -695,6 +764,7 @@ func (m *Metrics) Snapshot() Snapshot {
 	s.Transcript.Lines = m.transcriptLine.Load()
 	s.Transcript.Bytes = m.transcriptByte.Load()
 	s.Transcript.LastError = transErr
+	s.Audit.LastError = auditErr
 
 	s.Goroutines = runtime.NumGoroutine()
 	return s

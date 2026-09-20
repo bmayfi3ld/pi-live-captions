@@ -246,6 +246,62 @@ lines before it, never back at `[00:00]`. The same clock covers the `— silence
 `♪ music ♪` markers, so speech, silence and music stay in one order. Transcript files
 written by earlier versions are left exactly as they were.
 
+## Audit log
+
+Every recorded session also writes `audit.jsonl` into the same directory — one JSON object
+per line, append-only, flushed on the same cadence as the transcript. Where `transcript.txt`
+is for people, `audit.jsonl` is for tools: it records the same finalized captions plus
+everything around them that explains what the recognizer actually received. Reading it after
+an event lets you tell a recognition mistake from a noise-gate closure, a reconnect, or
+dropped audio.
+
+Two clocks appear on every record. `observed_at` is absolute UTC wall-clock time;
+`elapsed_ms` is session-relative. `source_ms` is the record's position on the same
+source-session clock the transcript's `[MM:SS]` uses, in integer milliseconds, and is
+present only when the position is genuinely known — it is never guessed.
+
+Record types (`schema_version` is 1):
+
+- `session_start` — first record: application version, session id, source kind/spec/format,
+  recognition engine, model, language and settings, and the initial noise-gate settings.
+  No credentials: the metadata has no field an API key or password could flow into.
+- `caption` — a finalized line as it reached `transcript.txt`: `text`, `source_ms` (start),
+  `end_ms` when the recognizer supplied a reliable end, `speaker` when known.
+- `marker` — a `— silence —` or `♪ music ♪` marker, with its source position.
+- `noise_gate` — one record per effective open/close transition: `open`, the source
+  position it applies at, and the threshold/release values governing it. Never per-frame:
+  silence between transitions is not recorded.
+- `config` — a runtime noise-gate settings change, recorded before the transitions that
+  use the new values.
+- `state` — source availability and recognizer connection state transitions
+  (connecting/connected/reconnecting/paused/closed), source restarts included.
+- `warning` / `error` — session diagnostics mirrored from the application log, with their
+  attributes. A transcript write failure appears here as an `error` record.
+- `drop` — counted degradation events (source frame drops, xruns, ffmpeg restarts,
+  monitor/audio-stream drops, reconnects, recognition-buffer drops, slow web subscribers),
+  with the affected component and a source position when one is known.
+- `session_end` — final record of a clean shutdown, containing the same metrics summary the
+  terminal prints: health, drop/reconnect counters, pause totals, latency statistics and
+  transcript errors.
+
+Example:
+
+```jsonl
+{"schema_version":1,"type":"session_start","observed_at":"2026-08-19T09:31:05.102Z","elapsed_ms":0,"version":"0.6.0","session_id":"2026-08-19T09-31-05","source":{"kind":"live","spec":"alsa:soundboard","format":"44100 Hz stereo s16 -> 16000 Hz mono s16"},"recognition":{"engine":"deepgram","model":"nova-3","language":"en-US","keyterms":null,"diarize":true,"music_detect":false},"noise_gate":{"threshold_dbfs":-50,"release_sec":5}}
+{"schema_version":1,"type":"noise_gate","observed_at":"2026-08-19T09:32:01.480Z","elapsed_ms":56378,"source_ms":56100,"open":true,"threshold_dbfs":-50,"release_sec":5}
+{"schema_version":1,"type":"caption","observed_at":"2026-08-19T09:32:04.911Z","elapsed_ms":59809,"source_ms":58250,"text":"Good evening everybody","speaker":2,"end_ms":59800}
+{"schema_version":1,"type":"drop","observed_at":"2026-08-19T09:35:12.034Z","elapsed_ms":246932,"component":"stt","event":"reconnect","count":1}
+{"schema_version":1,"type":"session_end","observed_at":"2026-08-19T11:02:41.557Z","elapsed_ms":5496455,"summary":{"health":"closed","version":"0.6.0"}}
+```
+
+Incomplete lines only ever appear as the tail after an unclean shutdown; complete lines
+parse independently, so a truncated file loses nothing already written, and a missing
+`session_end` simply means the end was not clean. The audit stream is best-effort: if it
+cannot be written, the failure is logged once (and shown as degraded on `/admin`), the sink
+retires itself, and captions continue unaffected. `transcript.txt` is never disabled by an
+audit failure, nor the reverse. Journald logging continues to work exactly as before; the
+audit file is what makes the same evidence portable with the transcript.
+
 ## stdout vs stderr
 
 Finalized captions go to stdout; logs and the status line go to stderr, so they split cleanly:
