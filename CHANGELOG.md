@@ -4,9 +4,10 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
-## Unreleased
+## 0.7.0
 
 ### Added
+
 - Every recorded session now writes `audit.jsonl` beside `transcript.txt`: an append-only,
   one-JSON-object-per-line evidence file carrying the same finalized captions and markers as
   the transcript (with millisecond source timing), plus noise-gate open/close transitions
@@ -18,10 +19,12 @@ adding a new `## X.Y.Z` heading here.
   never interrupts live captions or the transcript. See `docs/usage.md`, "Audit log".
 
 ### Changed
+
 - Newly recorded transcripts compact adjacent identical music and silence markers.
 - set default of the web page to show one less line while scrolling
 
 ### Fixed
+
 - Transcript timestamps are now positions in the source audio for the whole session: silence
   pauses and reconnects no longer restart the clock at zero, and speech, silence and music
   markers share one nondecreasing timeline in newly recorded transcript files. Existing
@@ -30,29 +33,35 @@ adding a new `## X.Y.Z` heading here.
 ## 0.6.0
 
 ### Fixed
+
 - Speechmatics punctuation from removed profanity or disfluencies no longer creates duplicate or conflicting sentence marks in new transcripts.
 
 ## 0.5.0
 
 ### Added
+
 - Duration-based STT usage metrics: `/api/stats` now reports cumulative audio sent in minutes and hours, and the admin dashboard displays both totals alongside bytes sent.
 
 ### Changed
+
 - The admin live transcript starts pinned on pages initially 600 pixels wide or narrower; its inline “Pin transcript” toggle remains local to the current page.
 
 - Caption audio gate defaults are now -50 dBFS with a 5-second release.
 
 ### Fixed
+
 - Paused reconnect-buffer rotation no longer falsely reports dropped audio or degraded health when speech resumes.
 
 ## 0.4.0
 
 ### Changed
+
 - Unavailable configured live inputs keep the web console reachable with persistent degraded health; `/admin` shows whether the source is missing and restart-required or unavailable and retrying, with visible guidance instead of a hover tooltip.
 
 ## 0.3.0
 
 ### Added
+
 - Viewer `?bottom=N` setting positions the last caption row N% above the viewport bottom
   (0–90%, respecting device safe areas).
 - Music and silence markers in the admin caption scroll and timestamped transcripts.
@@ -63,6 +72,7 @@ adding a new `## X.Y.Z` heading here.
   `--noise-release`. Live adjustments are session-only; listener audio is unchanged.
 
 ### Changed
+
 - Viewer defaults to four caption rows instead of five; `?lines=N` still overrides it.
 - Admin latency charts use a zero baseline and session-wide peak scales that never shrink,
   including after refresh; rolling latency statistics remain five-minute measurements.
@@ -70,6 +80,7 @@ adding a new `## X.Y.Z` heading here.
 - enabled filler word filtering
 
 ### Fixed
+
 - Reconnecting viewers and admin pages receive music-off state, clearing stuck music indicators.
 - Reconnect state snapshots do not duplicate music or silence scroll markers.
 - Admin chart axis labels have room to display larger, updating latency values.
