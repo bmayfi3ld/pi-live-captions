@@ -8,12 +8,14 @@ import (
 	"livecaption/internal/metrics"
 )
 
-// chunk is one ring entry: PCM plus the wall time it was captured, which is
-// what latency is ultimately measured against.
+// chunk is one ring entry: PCM plus the wall time it was captured (what
+// latency is ultimately measured against) and the source-session offset the
+// chunk ends at (what transcript timing is ultimately measured against).
 type chunk struct {
 	pcm        []byte
 	capturedAt time.Time
 	active     bool
+	offset     time.Duration // frame end offset; zero when the frame carried none
 }
 
 // ring holds PCM chunks while the connection is down or catching up,
@@ -37,7 +39,7 @@ func newRing(capBytes int, met *metrics.Metrics, gate *Gate) *ring {
 
 func (r *ring) push(f audio.Frame) {
 	r.mu.Lock()
-	r.chunks = append(r.chunks, chunk{pcm: f.PCM, capturedAt: f.CapturedAt, active: r.gate.Active()})
+	r.chunks = append(r.chunks, chunk{pcm: f.PCM, capturedAt: f.CapturedAt, active: r.gate.Active(), offset: f.Offset})
 	r.bytes += len(f.PCM)
 	for r.bytes > r.capBytes && len(r.chunks) > 1 {
 		dropped := r.chunks[0]

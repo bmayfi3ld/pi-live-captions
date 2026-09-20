@@ -67,9 +67,14 @@ type Frame struct {
 	NoiseGated    bool
 	NoiseGateOpen bool
 	PCM           []byte
-	// Offset is the media time of the first sample, measured from the start
-	// of the stream. Latency is computed against this, not against wall clock,
-	// so a replay at --speed 1.0 and a live capture measure the same thing.
+	// Offset is the media time of the frame's END — one past its last sample —
+	// measured from the start of the source stream, and it never restarts:
+	// a capture-process restart resumes the count rather than zeroing it.
+	// Latency is computed against this, not against wall clock, so a replay
+	// at --speed 1.0 and a live capture measure the same thing, and
+	// downstream stages can locate this frame on the source-session clock.
+	// The zero value means the producer stamped nothing; consumers treat an
+	// unstamped frame as having no known source position.
 	Offset time.Duration
 	// CapturedAt is when the frame was released into the pipeline.
 	CapturedAt time.Time

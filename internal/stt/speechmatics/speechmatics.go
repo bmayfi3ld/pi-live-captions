@@ -133,20 +133,10 @@ func (e *Engine) dial(ctx context.Context) (*websocket.Conn, stt.Session, error)
 	}
 	conn.SetReadLimit(readLimit)
 
-	s := &session{conn: conn, log: slog.Default(), onMusic: e.cfg.OnMusic}
+	s := &session{conn: conn, log: slog.Default()}
 	if err := s.handshake(ctx, e.startMessage()); err != nil {
 		conn.CloseNow()
 		return nil, nil, err
-	}
-	// A connection that drops mid-song must not leave the suppression gate
-	// stuck closed forever: every fresh handshake starts from "not music",
-	// regardless of what the last connection last reported.
-	//
-	// Media time 0 says this is the new connection's clock starting, not a
-	// music event that ended at a real offset — anything the consumer was
-	// holding from the old clock has offsets that no longer mean anything.
-	if s.onMusic != nil {
-		s.onMusic(false, 0)
 	}
 	return conn, s, nil
 }
@@ -209,10 +199,6 @@ type session struct {
 	// touched by SendAudio (the driver's single writer goroutine) and then by
 	// Finish, which the driver calls only after that goroutine has returned.
 	seqNo int
-
-	// onMusic is e.cfg.OnMusic, nil unless MusicDetect was requested. Called
-	// from Decode on each AudioEventStarted/AudioEventEnded for "music".
-	onMusic func(active bool, at time.Duration)
 }
 
 // handshake sends StartRecognition and reads until the server acknowledges it.
@@ -262,20 +248,21 @@ func (s *session) Finish(ctx context.Context) error {
 	return s.writeJSON(ctx, endOfStream{Message: "EndOfStream", LastSeqNo: s.seqNo})
 }
 
-// Decode turns one server message into zero or more Transcripts. Acks,
-// metadata and revisable partials are dropped; only an Error tears the
-// connection down.
-func (s *session) Decode(data []byte) ([]stt.Transcript, error) {
+// Decode turns one server message into zero or more Transcripts plus an
+// optional music edge. Acks, metadata and revisable partials are dropped;
+// only an Error tears the connection down. Timing stays on this connection's
+// media clock — the shared driver normalizes it onto the source clock.
+func (s *session) Decode(data []byte) ([]stt.Transcript, *stt.MusicEdge, error) {
 	var msg serverMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
 		// Noise, not a reason to drop a working link.
 		s.log.Debug("speechmatics: undecodable message", "err", err)
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	switch msg.Message {
 	case "AddTranscript":
-		return msg.transcripts()
+		return msg.transcripts(), nil, nil
 
 	case "AddPartialTranscript":
 		// enable_partials is false, so this should never fire. It stays as a
@@ -283,44 +270,43 @@ func (s *session) Decode(data []byte) ([]stt.Transcript, error) {
 		// setting silently ignored, or a changed default. Publishing one as
 		// settled text would break the append-only guarantee the whole display
 		// rests on, and it is one comparison to prevent.
-		return nil, nil
+		return nil, nil, nil
 
 	case "Error":
-		return nil, msg.asError()
+		return nil, nil, msg.asError()
 
 	case "EndOfTranscript":
-		return nil, errEndOfTranscript
+		return nil, nil, errEndOfTranscript
 
 	case "Warning":
 		s.log.Warn("speechmatics: "+msg.Type, "reason", msg.Reason)
-		return nil, nil
+		return nil, nil, nil
 
 	case "AudioEventStarted":
-		s.handleAudioEvent(msg, true)
-		return nil, nil
+		return nil, s.musicEdge(msg, true), nil
 
 	case "AudioEventEnded":
-		s.handleAudioEvent(msg, false)
-		return nil, nil
+		return nil, s.musicEdge(msg, false), nil
 
 	default:
 		// AudioAdded, Info, RecognitionStarted, anything new: nothing to
 		// publish.
-		return nil, nil
+		return nil, nil, nil
 	}
 }
 
-// handleAudioEvent drives the music gate off a music AudioEventStarted /
-// AudioEventEnded pair. Other event types (there are none requested today,
-// see startMessage) are ignored rather than rejected, so the code stays
-// correct if the request ever asks for more.
+// musicEdge turns a music AudioEventStarted/AudioEventEnded message into the
+// typed edge handed back to the shared driver, still on this connection's
+// media clock. Other event types (there are none requested today, see
+// startMessage) yield nil rather than an edge, so the code stays correct if
+// the request ever asks for more.
 //
 // Logged at Info — type, start_time, confidence — because Speechmatics warns
 // this detector can be over-sensitive, and that is the data for judging it
 // in a real service.
-func (s *session) handleAudioEvent(msg serverMessage, active bool) {
-	if msg.Event.Type != "music" || s.onMusic == nil {
-		return
+func (s *session) musicEdge(msg serverMessage, active bool) *stt.MusicEdge {
+	if msg.Event.Type != "music" {
+		return nil
 	}
 	s.log.Info("speechmatics: music event",
 		"active", active, "start_time", msg.Event.StartTime,
@@ -333,7 +319,7 @@ func (s *session) handleAudioEvent(msg serverMessage, active bool) {
 	if !active {
 		at = msg.Event.EndTime
 	}
-	s.onMusic(active, stt.SecondsToDuration(at))
+	return &stt.MusicEdge{Active: active, At: stt.SecondsToDuration(at)}
 }
 
 func (s *session) writeJSON(ctx context.Context, v any) error {
@@ -464,7 +450,7 @@ func (m serverMessage) asError() error {
 // question, say) still splits correctly. Each word keeps its own start_time —
 // Transcript.Text() rebuilds the flat string on demand. Only "word" results
 // build text; "entity" and "punctuation" are handled separately below.
-func (m serverMessage) transcripts() ([]stt.Transcript, error) {
+func (m serverMessage) transcripts() []stt.Transcript {
 	// ponytail: the flat-text fallback below is the one path profanity
 	// filtering cannot reach — tags live on Results[], and this branch is
 	// taken precisely when there are none. Harmless today (no results means
@@ -477,7 +463,7 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 			text = m.Metadata.Transcript
 		}
 		if text == "" {
-			return nil, nil
+			return nil
 		}
 		start := stt.SecondsToDuration(m.Metadata.StartTime)
 		end := stt.SecondsToDuration(m.Metadata.EndTime)
@@ -488,7 +474,7 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 			// CapturedAt/SentAt for both engines the same way.
 			Start:    start,
 			Duration: end - start,
-		}}, nil
+		}}
 	}
 
 	var ts []stt.Transcript
@@ -582,7 +568,7 @@ func (m serverMessage) transcripts() ([]stt.Transcript, error) {
 	}
 	flush()
 
-	return ts, nil
+	return ts
 }
 
 func appendPunctuation(word *stt.Word, suffix *string, removedSincePunctuation bool, incoming string) {

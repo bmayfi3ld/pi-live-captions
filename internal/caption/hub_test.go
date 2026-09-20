@@ -645,33 +645,67 @@ func TestMusicOffReleasesSpeechAfterEndTime(t *testing.T) {
 	})
 }
 
-// TestMusicResetDropsHeld covers the dialer's gate reset: a fresh connection
-// reports music off at media time 0, on a clock that just restarted. Nothing
-// held from the old clock has a comparable offset, so none of it is released.
-func TestMusicResetDropsHeld(t *testing.T) {
+// TestResetConnectionDropsHeld covers the connection-lifecycle reset: when
+// a recognizer connection ends mid-song and a replacement follows, everything
+// it held is dropped (the replacement never saw the song start, so no end
+// edge will ever arrive to sort song from speech), pending music-end timers
+// are canceled, and viewers are unfrozen — with no marker line and no line
+// closed from held audio. Speech on the replacement connection then
+// publishes normally on the same source timeline.
+func TestResetConnectionDropsHeld(t *testing.T) {
 	h := newTestHub()
-	var finals []Line
+	var finals, markers []Line
 	h.OnFinal = func(l Line) { finals = append(finals, l) }
+	h.OnMarker = func(l Line) { markers = append(markers, l) }
 	sub, unsub := h.Subscribe()
 	defer unsub()
 	drain(sub)
 
 	h.SetMusic(true, 5*time.Second)
+	drain(sub)
+	markers = nil // the music-start marker is legitimate; only the reset is under test
 	h.Publish(stt.Transcript{
 		Words: []stt.Word{{Text: "ooh", Start: 30 * time.Second, End: 31 * time.Second}},
 		Start: 30 * time.Second, Duration: time.Second,
 	})
 	drain(sub)
 
-	h.SetMusic(false, 0)
+	h.ResetConnection()
 
-	for _, ev := range drain(sub) {
+	events := drain(sub)
+	if len(events) != 1 || events[0].Kind != KindMusic || events[0].State != "off" {
+		t.Errorf("reset events = %+v, want exactly one music-off to unfreeze viewers", events)
+	}
+	for _, ev := range events {
 		if ev.Kind == KindCaption {
-			t.Errorf("reset released held audio from the old clock: %+v", ev.Words)
+			t.Errorf("reset released held audio from the old connection: %+v", ev.Words)
 		}
 	}
 	if len(finals) != 0 {
 		t.Errorf("reset closed a line from held audio: %+v", finals)
+	}
+	if len(markers) != 0 {
+		t.Errorf("reset wrote a marker for a WebSocket change: %+v", markers)
+	}
+	if h.musicTimer != nil || h.held != nil || h.music {
+		t.Errorf("reset left connection-scoped state behind: timer=%v held=%v music=%v", h.musicTimer, h.held, h.music)
+	}
+
+	// First speech after the replacement connection arrives on the same
+	// source clock the held audio was on — no restart at zero, and the real
+	// gap since the song reads as the pause it was.
+	h.Publish(stt.Transcript{
+		Words: []stt.Word{{Text: "back.", Start: 32 * time.Second, End: 32500 * time.Millisecond}},
+		Start: 32 * time.Second, Duration: 500 * time.Millisecond,
+	})
+	var caption *Event
+	for _, ev := range drain(sub) {
+		if ev.Kind == KindCaption {
+			caption = &ev
+		}
+	}
+	if caption == nil || captionText(*caption) != "back." || !caption.Break {
+		t.Errorf("first returning speech = %+v, want a published caption after the pause gap (Break set)", caption)
 	}
 }
 
@@ -724,7 +758,7 @@ func TestMusicPendingLifecycle(t *testing.T) {
 	for _, action := range []struct {
 		name string
 		run  func(*Hub)
-	}{{"reset", func(h *Hub) { h.SetMusic(false, 0) }}, {"flush", func(h *Hub) { h.Flush() }}} {
+	}{{"reset", func(h *Hub) { h.ResetConnection() }}, {"flush", func(h *Hub) { h.Flush() }}} {
 		t.Run(action.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				h := newTestHub()

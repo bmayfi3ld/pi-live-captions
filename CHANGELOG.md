@@ -10,6 +10,12 @@ adding a new `## X.Y.Z` heading here.
 - Newly recorded transcripts compact adjacent identical music and silence markers.
 - set default of the web page to show one less line while scrolling
 
+### Fixed
+- Transcript timestamps are now positions in the source audio for the whole session: silence
+  pauses and reconnects no longer restart the clock at zero, and speech, silence and music
+  markers share one nondecreasing timeline in newly recorded transcript files. Existing
+  transcript files are unchanged.
+
 ## 0.6.0
 
 ### Fixed

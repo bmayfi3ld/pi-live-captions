@@ -7,8 +7,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,11 +171,7 @@ func resultTranscripts(t *testing.T, results []map[string]any) []stt.Transcript 
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatal(err)
 	}
-	ts, err := msg.transcripts()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return ts
+	return msg.transcripts()
 }
 
 // --- config ---
@@ -273,9 +275,9 @@ func TestDecode(t *testing.T) {
 
 	t.Run("final transcript is published", func(t *testing.T) {
 		data, _ := json.Marshal(addTranscript("hello there", 1.5, 2.5))
-		ts, err := s.Decode(data)
-		if err != nil || len(ts) != 1 {
-			t.Fatalf("Decode = (%v, %v), want one transcript", ts, err)
+		ts, edge, err := s.Decode(data)
+		if err != nil || len(ts) != 1 || edge != nil {
+			t.Fatalf("Decode = (%v, %v, %v), want one transcript and no edge", ts, edge, err)
 		}
 		tr := ts[0]
 		if tr.Text() != "hello there" {
@@ -294,7 +296,7 @@ func TestDecode(t *testing.T) {
 	t.Run("partial is dropped", func(t *testing.T) {
 		data := []byte(`{"message":"AddPartialTranscript","transcript":"hel",
 			"metadata":{"start_time":0,"end_time":0.3}}`)
-		if ts, err := s.Decode(data); len(ts) != 0 || err != nil {
+		if ts, _, err := s.Decode(data); len(ts) != 0 || err != nil {
 			t.Errorf("Decode = (%v, %v), want a partial dropped silently", ts, err)
 		}
 	})
@@ -308,7 +310,7 @@ func TestDecode(t *testing.T) {
 			`{"message":"AddTranscript","metadata":{"start_time":0,"end_time":1}}`,
 			`not json at all`,
 		} {
-			if ts, err := s.Decode([]byte(data)); len(ts) != 0 || err != nil {
+			if ts, _, err := s.Decode([]byte(data)); len(ts) != 0 || err != nil {
 				t.Errorf("Decode(%s) = (%v, %v), want it skipped", data, ts, err)
 			}
 		}
@@ -316,7 +318,7 @@ func TestDecode(t *testing.T) {
 
 	t.Run("error is fatal", func(t *testing.T) {
 		data := []byte(`{"message":"Error","type":"job_error","reason":"boom"}`)
-		_, err := s.Decode(data)
+		_, _, err := s.Decode(data)
 		if err == nil {
 			t.Fatal("an Error message should drop the connection")
 		}
@@ -327,57 +329,52 @@ func TestDecode(t *testing.T) {
 
 	t.Run("bad config is permanent", func(t *testing.T) {
 		data := []byte(`{"message":"Error","type":"invalid_language","reason":"no such language"}`)
-		_, err := s.Decode(data)
+		_, _, err := s.Decode(data)
 		if !stt.IsPermanent(err) {
 			t.Errorf("invalid_language should be permanent, got %v", err)
 		}
 	})
 
 	t.Run("end of transcript ends the read loop", func(t *testing.T) {
-		_, err := s.Decode([]byte(`{"message":"EndOfTranscript"}`))
+		_, _, err := s.Decode([]byte(`{"message":"EndOfTranscript"}`))
 		if err != errEndOfTranscript { //nolint:errorlint // exact sentinel
 			t.Errorf("Decode = %v, want errEndOfTranscript", err)
 		}
 	})
 }
 
-// TestDecode_MusicEvents pins AudioEventStarted/AudioEventEnded driving
-// OnMusic on true/false edges for "music" events, and confirms an event of
+// TestDecode_MusicEvents pins AudioEventStarted/AudioEventEnded decoding
+// into typed music edges — a start carrying its start_time, an end carrying
+// its end_time, on the connection's media clock — and confirms an event of
 // another type (there is none requested today, but Decode must stay correct
-// if that changes) is silently ignored rather than flipping the gate.
-//
-// The media time each edge carries is pinned too: the end edge's is what the
-// hub sorts held segments on, so an edge that reported the wrong one (or the
-// start_time on both) would silently bring the dropped-first-word bug back.
+// if that changes) yields no edge at all. The times are what the hub sorts
+// held segments on once the shared driver normalizes them, so an edge that
+// reported the wrong one (or the start_time on both) would silently bring
+// the dropped-first-word bug back.
 func TestDecode_MusicEvents(t *testing.T) {
-	type call struct {
-		active bool
-		at     time.Duration
-	}
-	var calls []call
-	s := &session{log: slog.Default(), onMusic: func(active bool, at time.Duration) {
-		calls = append(calls, call{active, at})
-	}}
+	s := &session{log: slog.Default()}
 
 	start := []byte(`{"message":"AudioEventStarted","event":{"type":"music","start_time":1.2,"confidence":0.8}}`)
-	if ts, err := s.Decode(start); len(ts) != 0 || err != nil {
+	ts, edge, err := s.Decode(start)
+	if len(ts) != 0 || err != nil {
 		t.Errorf("Decode(AudioEventStarted) = (%v, %v), want nothing published", ts, err)
 	}
+	if edge == nil || !edge.Active || edge.At != 1200*time.Millisecond {
+		t.Errorf("start edge = %+v, want a music start at 1.2s", edge)
+	}
+
 	end := []byte(`{"message":"AudioEventEnded","event":{"type":"music","end_time":4.5}}`)
-	if ts, err := s.Decode(end); len(ts) != 0 || err != nil {
+	ts, edge, err = s.Decode(end)
+	if len(ts) != 0 || err != nil {
 		t.Errorf("Decode(AudioEventEnded) = (%v, %v), want nothing published", ts, err)
 	}
-	want := []call{{true, 1200 * time.Millisecond}, {false, 4500 * time.Millisecond}}
-	if !slices.Equal(calls, want) {
-		t.Errorf("onMusic calls = %v, want %v", calls, want)
+	if edge == nil || edge.Active || edge.At != 4500*time.Millisecond {
+		t.Errorf("end edge = %+v, want a music end at 4.5s", edge)
 	}
 
 	other := []byte(`{"message":"AudioEventStarted","event":{"type":"speech"}}`)
-	if _, err := s.Decode(other); err != nil {
-		t.Errorf("Decode(other event type) = %v, want no error", err)
-	}
-	if !slices.Equal(calls, want) {
-		t.Errorf("a non-music event must not drive onMusic; calls = %v, want %v", calls, want)
+	if _, edge, err := s.Decode(other); err != nil || edge != nil {
+		t.Errorf("Decode(other event type) = (%v, %v), want no edge and no error", edge, err)
 	}
 }
 
@@ -390,7 +387,7 @@ func TestDecode_TranscriptInMetadata(t *testing.T) {
 	s := &session{log: slog.Default()}
 	data := []byte(`{"message":"AddTranscript",
 		"metadata":{"start_time":0,"end_time":1,"transcript":"nested"}}`)
-	ts, err := s.Decode(data)
+	ts, _, err := s.Decode(data)
 	if err != nil || len(ts) != 1 || ts[0].Text() != "nested" {
 		t.Fatalf("Decode = (%v, %v), want the metadata transcript", ts, err)
 	}
@@ -424,10 +421,7 @@ func TestTranscripts_Diarization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ts, err := msg.transcripts()
-	if err != nil {
-		t.Fatalf("transcripts: %v", err)
-	}
+	ts := msg.transcripts()
 	if len(ts) != 2 {
 		t.Fatalf("got %d transcripts, want 2: %+v", len(ts), ts)
 	}
@@ -486,9 +480,9 @@ func TestTranscripts_UnknownSpeaker(t *testing.T) {
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatal(err)
 	}
-	ts, err := msg.transcripts()
-	if err != nil || len(ts) != 1 {
-		t.Fatalf("transcripts = (%v, %v), want one transcript", ts, err)
+	ts := msg.transcripts()
+	if len(ts) != 1 {
+		t.Fatalf("transcripts = %v, want one transcript", ts)
 	}
 	if ts[0].Speaker != 0 {
 		t.Errorf("Speaker = %d, want 0 for UU", ts[0].Speaker)
@@ -508,9 +502,9 @@ func TestTranscripts_LeadingPunctuationIsDropped(t *testing.T) {
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatal(err)
 	}
-	ts, err := msg.transcripts()
-	if err != nil || len(ts) != 0 {
-		t.Errorf("transcripts = (%v, %v), want none (leading punctuation has nothing to attach to)", ts, err)
+	ts := msg.transcripts()
+	if len(ts) != 0 {
+		t.Errorf("transcripts = %v, want none (leading punctuation has nothing to attach to)", ts)
 	}
 }
 
@@ -544,10 +538,7 @@ func TestTranscripts_ProfanityIsStripped(t *testing.T) {
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatal(err)
 	}
-	ts, err := msg.transcripts()
-	if err != nil {
-		t.Fatalf("transcripts: %v", err)
-	}
+	ts := msg.transcripts()
 	if len(ts) != 2 {
 		t.Fatalf("got %d transcripts, want 2 (the all-profanity S2 run must not open one): %+v", len(ts), ts)
 	}
@@ -755,9 +746,9 @@ func TestTranscripts_RemovalStateIsMessageLocalAndFlatTextUnchanged(t *testing.T
 		EndTime    float64 `json:"end_time"`
 		Transcript string  `json:"transcript"`
 	}{Transcript: "a.m.,"}}
-	ts, err := msg.transcripts()
-	if err != nil || len(ts) != 1 || ts[0].Text() != "a.m.," {
-		t.Errorf("flat-text fallback = (%+v, %v), want %q", ts, err, "a.m.,")
+	ts := msg.transcripts()
+	if len(ts) != 1 || ts[0].Text() != "a.m.," {
+		t.Errorf("flat-text fallback = %+v, want %q", ts, "a.m.,")
 	}
 }
 
@@ -804,9 +795,9 @@ func TestTranscripts_AllFilteredYieldsNothing(t *testing.T) {
 	if err := json.Unmarshal(data, &msg); err != nil {
 		t.Fatal(err)
 	}
-	ts, err := msg.transcripts()
-	if err != nil || len(ts) != 0 {
-		t.Errorf("transcripts = (%+v, %v), want none", ts, err)
+	ts := msg.transcripts()
+	if len(ts) != 0 {
+		t.Errorf("transcripts = %+v, want none", ts)
 	}
 }
 
@@ -998,4 +989,309 @@ func loudPCM(n int) []byte {
 		pcm[i], pcm[i+1] = 0x20, 0x4e // little-endian int16(20000)
 	}
 	return pcm
+}
+
+// readAudioBytes reads until at least want bytes of binary audio have
+// arrived, reporting false if the connection failed first. The engine
+// records an anchor before each write, so once the server has read n bytes
+// the client has anchored n bytes — a message sent after this point can
+// script provider media positions that are guaranteed resolvable.
+func readAudioBytes(sc serverConn, want int) bool {
+	n := 0
+	for n < want {
+		typ, data, err := sc.c.Read(sc.ctx)
+		if err != nil {
+			return false
+		}
+		if typ == websocket.MessageBinary {
+			n += len(data)
+		}
+	}
+	return true
+}
+
+// TestEngine_MusicEdgesAreSourceRelative pins the music delivery contract
+// end to end: edges decoded as typed MusicEdge values, carried to the shared
+// read path, normalized there through the connection's anchor onto the
+// source clock, and only then handed to OnMusic — in message order, at
+// source positions the pre-rolled frames account for. The frames below start
+// ten seconds into the source stream, so edges reported on the provider's
+// own clock (50ms and 90ms) would come back near zero; the source clock must
+// carry the 10s instead. Deepgram has no music events at all, so its
+// behavior is pinned simply by its unchanged suite.
+func TestEngine_MusicEdgesAreSourceRelative(t *testing.T) {
+	type call struct {
+		active bool
+		at     time.Duration
+	}
+	var mu sync.Mutex
+	var calls []call
+
+	srv := newTestServer(t, func(sc serverConn) {
+		var start startRecognition
+		if err := sc.recvJSON(&start); err != nil {
+			return
+		}
+		if err := sc.send(map[string]any{"message": "RecognitionStarted", "id": "test"}); err != nil {
+			return
+		}
+		// Both edges sit inside the first 100ms chunk; wait until that
+		// chunk has been read (and therefore anchored client-side).
+		if !readAudioBytes(sc, 3200) {
+			return
+		}
+		_ = sc.send(map[string]any{"message": "AudioEventStarted",
+			"event": map[string]any{"type": "music", "start_time": 0.05, "confidence": 0.9}})
+		_ = sc.send(map[string]any{"message": "AudioEventEnded",
+			"event": map[string]any{"type": "music", "end_time": 0.09}})
+		eos := make(chan int, 1)
+		go sc.drainBinary(eos)
+		<-eos
+		_ = sc.send(map[string]any{"message": "EndOfTranscript"})
+	})
+
+	e := testEngine(srv.URL)
+	e.cfg.MusicDetect = true
+	e.cfg.OnMusic = func(active bool, at time.Duration) {
+		mu.Lock()
+		calls = append(calls, call{active, at})
+		mu.Unlock()
+	}
+
+	frames := make(chan audio.Frame)
+	out := make(chan stt.Transcript, 4)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- e.Run(ctx, frames, out) }()
+
+	const base = 10 * time.Second
+	for i := 0; i < 5; i++ {
+		frames <- audio.Frame{
+			PCM:        loudPCM(3200),
+			Offset:     base + time.Duration(i+1)*100*time.Millisecond,
+			CapturedAt: time.Now(),
+		}
+	}
+	close(frames)
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	close(out)
+	for range out { // drain: this test publishes no transcripts
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []call{
+		{true, base + 50*time.Millisecond},
+		{false, base + 90*time.Millisecond},
+	}
+	if !slices.Equal(calls, want) {
+		t.Errorf("OnMusic calls = %v, want %v (ordered, source-relative through the 10s pre-roll)", calls, want)
+	}
+}
+
+// TestEngine_SessionTranscriptTimestamps is the integration-level check of
+// the whole change: one application session, two recognizer connections
+// (an automatic silence pause between them, a music window on the second
+// connection), wired exactly the way the CLI wires the hub, writer and
+// metrics. The saved transcript must keep the existing [clock] text
+// format while its timestamps keep advancing on the source clock across
+// the pause and the replacement connection, instead of restarting at zero
+// with each new WebSocket.
+func TestEngine_SessionTranscriptTimestamps(t *testing.T) {
+	var connNum int32
+
+	srv := newTestServer(t, func(sc serverConn) {
+		var start startRecognition
+		if err := sc.recvJSON(&start); err != nil {
+			return
+		}
+		if err := sc.send(map[string]any{"message": "RecognitionStarted", "id": "test"}); err != nil {
+			return
+		}
+		switch atomic.AddInt32(&connNum, 1) {
+		case 1:
+			// One finalized line of speech, then the gate's silence pause
+			// ends the connection the graceful way: EndOfStream arrives,
+			// EndOfTranscript lets the drain finish immediately.
+			if !readAudioBytes(sc, 6400) {
+				return
+			}
+			if err := sc.send(addTranscript("First line.", 0.1, 0.5)); err != nil {
+				return
+			}
+			eos := make(chan int, 1)
+			go sc.drainBinary(eos)
+			<-eos
+			_ = sc.send(map[string]any{"message": "EndOfTranscript"})
+		default:
+			// The resumed connection, on a restarted provider clock: a
+			// music window around the speech that follows it.
+			if !readAudioBytes(sc, 44800) {
+				return
+			}
+			_ = sc.send(map[string]any{"message": "AudioEventStarted",
+				"event": map[string]any{"type": "music", "start_time": 0.3}})
+			_ = sc.send(addTranscript("la la la", 0.5, 0.9))
+			_ = sc.send(map[string]any{"message": "AudioEventEnded",
+				"event": map[string]any{"type": "music", "end_time": 0.8}})
+			_ = sc.send(addTranscript("Back after the break.", 0.9, 1.3))
+			eos := make(chan int, 1)
+			go sc.drainBinary(eos)
+			<-eos
+			_ = sc.send(map[string]any{"message": "EndOfTranscript"})
+		}
+	})
+
+	// The session wiring, as the CLI builds it.
+	started := time.Now()
+	met := metrics.New("test", "integration")
+	hub := caption.NewHub(met)
+	met.SetSTTStateHook(func(s metrics.ConnState) { hub.PublishStatus(s.String()) })
+	w, err := caption.NewWriter(t.TempDir(), started, met)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.OnFinal = w.Write
+	hub.OnMarker = w.Write
+
+	e := testEngine(srv.URL)
+	e.cfg.Metrics = met
+	e.cfg.Pause = stt.PauseConfig{Enabled: true, Hold: 200 * time.Millisecond}
+	e.cfg.MusicDetect = true
+	e.cfg.OnTranscript = hub.Publish
+	e.cfg.OnMusic = hub.SetMusic
+	e.cfg.OnConnectionEnd = hub.ResetConnection
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	frames := make(chan audio.Frame)
+	out := make(chan stt.Transcript, 64)
+	done := make(chan error, 1)
+	go func() { done <- e.Run(ctx, frames, out) }()
+
+	consumeDone := make(chan struct{})
+	go func() {
+		defer close(consumeDone)
+		for range out { // hub delivery is synchronous through OnTranscript
+		}
+	}()
+
+	// Watch what the hub broadcasts, so the feeder's silence can begin only
+	// once the first line has landed and the pause's effects are observable.
+	sub, unsub := hub.Subscribe()
+	defer unsub()
+	<-sub // initial status snapshot
+	<-sub // initial music snapshot
+	eventText := func(ev caption.Event) string {
+		parts := make([]string, 0, len(ev.Words))
+		for _, wd := range ev.Words {
+			parts = append(parts, wd.Text)
+		}
+		return strings.Join(parts, " ")
+	}
+
+	// One feeder, switchable PCM, one monotonically advancing source clock:
+	// loud first so connection 1 sees speech, then silence to trip the
+	// pause, then loud again to resume.
+	var (
+		fmu  sync.Mutex
+		pcm  = loudPCM(3200)
+		stop = make(chan struct{})
+	)
+	setPCM := func(p []byte) {
+		fmu.Lock()
+		pcm = p
+		fmu.Unlock()
+	}
+	go func() {
+		var offset time.Duration
+		for {
+			fmu.Lock()
+			p := pcm
+			fmu.Unlock()
+			select {
+			case frames <- audio.Frame{PCM: p, Offset: offset + 100*time.Millisecond, CapturedAt: time.Now()}:
+				offset += 100 * time.Millisecond
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+
+	sawFirst, sawPause, sawSecond := false, false, false
+	deadline := time.After(20 * time.Second)
+	for !(sawFirst && sawPause && sawSecond) {
+		select {
+		case ev := <-sub:
+			switch {
+			case ev.Kind == caption.KindCaption && eventText(ev) == "First line.":
+				sawFirst = true
+				setPCM(make([]byte, 3200)) // silence trips the pause
+			case ev.Kind == caption.KindStatus && ev.State == "paused":
+				sawPause = true
+				setPCM(loudPCM(3200)) // speech resumes on a new connection
+			case ev.Kind == caption.KindCaption && eventText(ev) == "Back after the break.":
+				// Released after the music-end hold: the first caption out
+				// of the second connection.
+				sawSecond = true
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for session events (first=%v pause=%v second=%v)", sawFirst, sawPause, sawSecond)
+		}
+	}
+
+	close(stop)
+	cancel()
+	<-done
+	close(out)
+	<-consumeDone
+	hub.Flush()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(w.Dir(), "transcript.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	wantTexts := []string{"First line.", "— silence —", "♪ music ♪", "Back after the break."}
+	if len(lines) != len(wantTexts) {
+		t.Fatalf("transcript = %q, want the lines %q", string(data), wantTexts)
+	}
+
+	// The existing format, and timestamps that advance on one source clock:
+	// nondecreasing across speech, the pause's silence marker, the music
+	// window and the replacement connection — never restarted at zero.
+	clockRe := regexp.MustCompile(`^\[(\d{2}):(\d{2})\] (.+)$`)
+	prevMS, firstMS := -1, 0
+	for i, line := range lines {
+		m := clockRe.FindStringSubmatch(line)
+		if m == nil {
+			t.Fatalf("line %d is not in the existing [MM:SS] text format: %q", i+1, line)
+		}
+		mm, _ := strconv.Atoi(m[1])
+		ss, _ := strconv.Atoi(m[2])
+		offsetMS := mm*60000 + ss*1000
+		if offsetMS < prevMS {
+			t.Errorf("line %d (%q) at %dms goes backwards after %dms: the source clock must be nondecreasing across connections", i+1, m[3], offsetMS, prevMS)
+		}
+		if i == 0 {
+			firstMS = offsetMS
+		}
+		if m[3] != wantTexts[i] {
+			t.Errorf("line %d = %q, want %q", i+1, m[3], wantTexts[i])
+		}
+		prevMS = offsetMS
+	}
+	if prevMS <= firstMS {
+		t.Errorf("the session's last line at %dms never advanced past the first at %dms: the second connection restarted the clock", prevMS, firstMS)
+	}
 }

@@ -67,18 +67,36 @@ type Dialer func(ctx context.Context) (*websocket.Conn, Session, error)
 //
 // Decode returns the transcripts worth publishing from one server message —
 // zero, one, or (with diarization on) several, since a single message can
-// legitimately carry a run of words from more than one speaker. An empty
-// slice says "nothing to publish"; there is no separate ok flag for it. Its
-// error is fatal and drops the connection. Anything the provider considers
-// harmless noise — acks, metadata, revisable partials, an undecodable frame —
-// is its own to log and swallow, returning nil, nil. In particular the
+// legitimately carry a run of words from more than one speaker — plus an
+// optional music edge the same message reported. An empty slice says
+// "nothing to publish"; there is no separate ok flag for it. Its error is
+// fatal and drops the connection. Anything the provider considers harmless
+// noise — acks, metadata, revisable partials, an undecodable frame — is its
+// own to log and swallow, returning nil, nil, nil. In particular the
 // "settled text only" guarantee is enforced here, per protocol: everything
 // downstream paints a Transcript once and never revises it.
+//
+// Timing in what Decode returns stays on the provider's own connection-local
+// media clock: the shared read loop normalizes it onto the source-session
+// clock before anything is published (see readLoop), so a provider never
+// needs to know how its bytes were buffered, pre-rolled or handed over.
 type Session interface {
 	SendAudio(ctx context.Context, pcm []byte) error
 	Idle(ctx context.Context) error
-	Decode(data []byte) ([]Transcript, error)
+	Decode(data []byte) ([]Transcript, *MusicEdge, error)
 	Finish(ctx context.Context) error
+}
+
+// MusicEdge is one music start/end edge a provider detected in a message, at
+// that edge's position on the provider's connection-local media clock. It is
+// returned from Decode rather than invoked through a callback so the shared
+// read loop can put it on the source-session clock — the same clock every
+// timed word is on — before the consumer sees it; the hub compares music
+// edges against held words, which only means anything once both share one
+// timeline.
+type MusicEdge struct {
+	Active bool // true = music started, false = music ended
+	At     time.Duration
 }
 
 // RunSession is an Engine minus the protocol: the reconnect state machine, the
@@ -157,6 +175,16 @@ func (d *driver) run(ctx context.Context, out chan<- Transcript) error {
 		d.log.Info(d.name + ": connected")
 
 		oc, rerr := d.runConnection(ctx, conn, sess, out)
+		// A connection that did not end the session will be replaced: give
+		// the consumer its connection-end hook here, after the graceful
+		// drain of trailing results inside runConnection and before the next
+		// dial, so nothing keyed to the old connection's media clock survives
+		// into the replacement. This is what replaced the old convention of
+		// encoding "new connection" as a music edge at time zero — a value
+		// the source clock can legitimately produce only at session start.
+		if oc != outcomeDone && d.cfg.OnConnectionEnd != nil {
+			d.cfg.OnConnectionEnd()
+		}
 		switch oc {
 		case outcomeDone:
 			return nil
@@ -373,7 +401,7 @@ func (d *driver) writeLoop(ctx, connCtx context.Context, sess Session, idx *anch
 			// same "before" instant also stamps sentAt: the buffered socket
 			// write itself only takes microseconds, but sentAt means "handed
 			// to the socket", not "delivered" or "acknowledged".
-			idx.Add(len(c.pcm), c.capturedAt, time.Now())
+			idx.Add(len(c.pcm), c.capturedAt, time.Now(), c.offset)
 			if err := sess.SendAudio(connCtx, c.pcm); err != nil {
 				return err
 			}
@@ -417,9 +445,20 @@ func (d *driver) readLoop(ctx context.Context, conn *websocket.Conn, sess Sessio
 		if err != nil {
 			return err
 		}
-		ts, err := sess.Decode(data)
+		ts, edge, err := sess.Decode(data)
 		if err != nil {
 			return err
+		}
+		if edge != nil && d.cfg.OnMusic != nil {
+			// The edge arrives on this connection's media clock like any
+			// timed word; put it on the source clock before the consumer
+			// compares it against held words. An edge that predates every
+			// retained anchor is dropped rather than guessed at — the
+			// connection-end reset keeps suppression state from sticking when
+			// a music end goes missing.
+			if at, ok := idx.SourceAt(edge.At); ok {
+				d.cfg.OnMusic(edge.Active, at)
+			}
 		}
 		now := time.Now()
 		for _, t := range ts {
@@ -430,8 +469,18 @@ func (d *driver) readLoop(ctx context.Context, conn *websocket.Conn, sess Sessio
 			// on its own End(), not the message's overall end, so a message
 			// diarization split into several runs keeps each run's latency
 			// honest instead of all of them borrowing the last run's anchor.
+			//
+			// This must happen BEFORE the timing is normalized below: End()
+			// addresses this connection's index only while it still counts
+			// provider media, and the whole point of the source clock is that
+			// a source position can run far past anything this connection
+			// ever wrote.
 			if capturedAt, sentAt, ok := idx.At(t.End()); ok {
 				t.CapturedAt, t.SentAt = capturedAt, sentAt
+			}
+			t = sourceTime(t, idx)
+			if d.cfg.OnTranscript != nil {
+				d.cfg.OnTranscript(t)
 			}
 			select {
 			case out <- t:
@@ -440,6 +489,65 @@ func (d *driver) readLoop(ctx context.Context, conn *websocket.Conn, sess Sessio
 			}
 		}
 	}
+}
+
+// sourceTime rewrites t's timing from the provider's connection-local media
+// clock onto the source session's clock, through the same anchor index the
+// latency fields were just resolved from. Every timed word maps individually,
+// so one provider result that straddles a buffering discontinuity — pre-roll
+// on a fresh connection, audio the ring discarded — keeps the source gap
+// inside the result instead of being compressed onto one straight line, and
+// the transcript's own bounds are re-derived from the mapped words rather
+// than shifted by a single delta.
+//
+// A lookup that cannot be resolved (a result older than the anchor retention
+// window, or audio whose frames carried no offsets) never drops text: its
+// unresolved timing is zeroed, the Word contract's explicit unmeasured value,
+// rather than leaking a provider-local position into source time. Normal
+// provider finalization delay sits far inside the retention window, so this
+// is a defensive path, not a designed-for one.
+func sourceTime(t Transcript, idx *anchorIndex) Transcript {
+	// The untimed fallback has no per-word timing to map, so the transcript's
+	// own start/end go through the anchor as a unit.
+	if len(t.Words) == 1 && t.Words[0].End == 0 {
+		start, okStart := idx.SourceAt(t.Start)
+		end, okEnd := idx.SourceAt(t.End())
+		if okStart && okEnd && end >= start {
+			t.Start, t.Duration = start, end-start
+		} else {
+			t.Start, t.Duration = 0, 0
+		}
+		return t
+	}
+
+	first, last := -1, -1
+	for i := range t.Words {
+		w := &t.Words[i]
+		if w.End == 0 {
+			continue // unmeasured word: only the Untimed case, handled above
+		}
+		s, okStart := idx.SourceAt(w.Start)
+		end, okEnd := idx.SourceAt(w.End)
+		if !okStart || !okEnd || end < s {
+			// Do not leave provider-local values mixed into otherwise normalized
+			// words. Zero is the Word contract's explicit "timing unavailable"
+			// representation and preserves the text without inventing a position.
+			w.Start, w.End = 0, 0
+			continue
+		}
+		w.Start, w.End = s, end
+		if first < 0 {
+			first = i
+		}
+		last = i
+	}
+	if first < 0 {
+		t.Start, t.Duration = 0, 0
+		return t // nothing resolvable; publish as explicitly untimed
+	}
+	t.Start = t.Words[first].Start
+	t.Duration = max(t.Words[last].End-t.Start, 0)
+	return t
 }
 
 // sleepBackoff waits a jittered duration around d, reporting whether it slept

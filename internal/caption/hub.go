@@ -310,10 +310,12 @@ func wireWords(t stt.Transcript) []Word {
 }
 
 // isBreakLocked reports whether the gap between the previous segment and t
-// counts as the speaker actually stopping. A negative gap means the media
-// clock restarted — a reconnect or an auto-pause resume — which is a real
-// discontinuity and breaks the row too, so that case falls out of the same
-// comparison rather than needing its own branch.
+// counts as the speaker actually stopping. A negative gap is no longer how a
+// reconnect announces itself — every segment is on the source clock now, so
+// reconnects arrive as ordinary positive gaps — but it is kept as a defensive
+// break against contradictory input (a provider reporting behind the index,
+// or a segment that failed to normalize), which would otherwise glue a new
+// utterance onto the middle of an old one.
 //
 // Callers must hold h.mu.
 func (h *Hub) isBreakLocked(t stt.Transcript) bool {
@@ -365,7 +367,7 @@ func endsSentence(s string) bool {
 }
 
 // SetMusic toggles caption suppression on a music start/end edge from the
-// recognizer, at the edge's media time. On true, the in-progress transcript
+// recognizer, at the edge's source time. On true, the in-progress transcript
 // line is closed through the same OnFinal path Flush uses, so the sentence
 // spoken right before the song lands in transcript.txt instead of being glued
 // to whatever follows the music.
@@ -377,36 +379,11 @@ func endsSentence(s string) bool {
 // trailing context to call the song over, so its end edge lands after the
 // finals covering the first words of returning speech — deciding on arrival
 // order instead lost those words every single time.
-//
-// at <= 0 on a false edge is not a music event at all: it is a fresh
-// connection resetting the gate (see the Speechmatics dialer), on a media clock
-// that just restarted at zero. Nothing held from the old clock has a comparable
-// offset, so it is all dropped rather than released against a meaningless
-// boundary.
 func (h *Hub) SetMusic(active bool, at time.Duration) {
 	h.op.Lock()
 	defer h.op.Unlock()
 
 	h.mu.Lock()
-	if !active && at <= 0 {
-		h.cancelMusicEndLocked()
-		h.held = nil
-		h.newestMedia = 0
-		h.confirmedCutoff = 0
-		h.cutoffSet = false
-		if !h.music {
-			h.mu.Unlock()
-			return
-		}
-		h.music = false
-		h.lastMusic = false
-		ev := h.newEventLocked(KindMusic)
-		ev.State = "off"
-		h.mu.Unlock()
-		h.broadcast(ev)
-		return
-	}
-
 	h.newestMedia = max(h.newestMedia, at)
 	h.trimHeldLocked()
 	if active {
@@ -449,6 +426,45 @@ func (h *Hub) SetMusic(active bool, at time.Duration) {
 	token := h.musicToken
 	h.musicTimer = time.AfterFunc(musicEndHold, func() { h.releaseMusic(token) })
 	h.mu.Unlock()
+}
+
+// ResetConnection discards the connection-scoped music state after a
+// recognizer connection has ended, before its replacement is dialed: a
+// detector that never got to report the song's end would otherwise leave the
+// screen frozen and its held segments waiting on an edge that will never
+// come — and no new connection will report a music end for a song it never
+// saw start. Everything held is dropped rather than released, because with
+// no end edge there is no boundary to sort song from speech on, and garble is
+// the presumption. Speech lines, silence markers and the timeline itself are
+// untouched: they are on the source clock, which spans connections.
+//
+// This replaces the old convention of a recognizer reporting a music-off
+// edge at time zero to mean "new connection, new clock" — a value the
+// source clock can legitimately carry only at session start, which made a
+// timestamp do double duty as a lifecycle signal. It writes no marker and
+// closes no line: a WebSocket changing is not a transition worth a
+// transcript entry.
+func (h *Hub) ResetConnection() {
+	h.op.Lock()
+	defer h.op.Unlock()
+
+	h.mu.Lock()
+	h.cancelMusicEndLocked()
+	h.held = nil
+	h.newestMedia = 0
+	h.confirmedCutoff = 0
+	h.cutoffSet = false
+	var ev Event
+	if h.music {
+		h.music = false
+		h.lastMusic = false
+		ev = h.newEventLocked(KindMusic)
+		ev.State = "off"
+	}
+	h.mu.Unlock()
+	if ev.Kind == KindMusic {
+		h.broadcast(ev)
+	}
 }
 
 func (h *Hub) releaseMusic(token uint64) {

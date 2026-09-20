@@ -142,17 +142,18 @@ func (s *session) Finish(ctx context.Context) error {
 }
 
 // Decode turns one server message into zero or more Transcripts, dropping
-// everything that carries nothing to publish. Errors are swallowed here
+// everything that carries nothing to publish. Deepgram has no music-event
+// equivalent, so the music edge is always nil. Errors are swallowed here
 // rather than returned: an undecodable frame is noise, not a reason to tear
 // down a working link.
-func (s *session) Decode(data []byte) ([]stt.Transcript, error) {
+func (s *session) Decode(data []byte) ([]stt.Transcript, *stt.MusicEdge, error) {
 	ts, isFinal, err := decodeTranscript(data)
 	if err != nil {
 		s.log.Debug("deepgram: undecodable message", "err", err)
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(ts) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// dialURL asks for interim_results=false, so this should never fire.
 	// It stays as a trust boundary against the server sending interims
@@ -160,9 +161,9 @@ func (s *session) Decode(data []byte) ([]stt.Transcript, error) {
 	// one as settled text would break the append-only guarantee the whole
 	// display rests on, and it is one comparison to prevent.
 	if !isFinal {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return ts, nil
+	return ts, nil, nil
 }
 
 func (s *session) writeJSON(ctx context.Context, v any) error {

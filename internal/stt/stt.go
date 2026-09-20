@@ -35,8 +35,11 @@ type Transcript struct {
 	// "S1" or "UU" — and normalising to an int here, in the engine, keeps
 	// that provider-specific syntax out of the hub and off the wire.
 	Speaker int
-	// Start and Duration are media time, so latency can be measured the same
-	// way for a replayed file and a live capture.
+	// Start and Duration are media time. On a published transcript they sit
+	// on the source session's clock — the shared driver normalizes them off
+	// the provider's connection-local clock (see RunSession) — so a replayed
+	// file and a live capture measure latency the same way, and a saved
+	// timestamp still locates the audio after a recognizer reconnect.
 	Start      time.Duration
 	Duration   time.Duration
 	ReceivedAt time.Time
@@ -111,15 +114,30 @@ type Config struct {
 	// MusicDetect asks the provider for music audio-events (Speechmatics
 	// only; Deepgram has no equivalent and ignores this).
 	MusicDetect bool
-	// OnMusic is called on each music start/end edge the provider reports.
-	// Nil-safe at every call site — only Speechmatics ever calls it.
+	// OnTranscript is called synchronously before a transcript is sent to Run's
+	// output channel. Consumers that also handle music or connection callbacks
+	// use it to keep all three event types in provider order.
+	OnTranscript func(Transcript)
+	// OnMusic is called on each music start/end edge the provider reports,
+	// after the shared driver has normalized the edge onto the source-session
+	// clock. Nil-safe at every call site — only Speechmatics ever reports one.
 	//
-	// at is the edge's media time: the event's start_time on a start, its
-	// end_time on an end. Without it a consumer can only suppress by the order
-	// messages happened to arrive in, and a provider whose music detector needs
-	// trailing context reports the end AFTER the finals covering the first
-	// words of returning speech — which is how the first word went missing.
+	// at is the edge's source position: the event's start_time on a start,
+	// its end_time on an end, translated off the connection's media clock.
+	// Without it a consumer can only suppress by the order messages happened
+	// to arrive in, and a provider whose music detector needs trailing context
+	// reports the end AFTER the finals covering the first words of returning
+	// speech — which is how the first word went missing.
 	OnMusic func(active bool, at time.Duration)
+	// OnConnectionEnd is called once a recognizer connection has ended —
+	// after its graceful drain of trailing results — and before a
+	// replacement is dialed, so consumers can discard state scoped to the
+	// connection that just closed (a held music-suppression window, a
+	// pending music-end timer). It fires on both an auto-pause hangup and a
+	// reconnect; it does not fire on the connection that ends a session
+	// outright, where shutdown paths already clean up. It is deliberately
+	// provider-neutral: the driver owns connection lifetimes.
+	OnConnectionEnd func()
 }
 
 // CapKeyterms trims a keyterm list to what the provider will accept. Deepgram

@@ -233,9 +233,18 @@ encrypt the password.
 ## Transcripts
 
 On by default. Every session writes `./transcripts/<YYYY-MM-DDTHH-MM-SS>/transcript.txt`,
-timestamped and human-readable, with an `[S2]` prefix when the speaker is known. Change the
+human-readable, with an `[S2]` prefix when the speaker is known. Change the
 location with `--transcript-dir` or `$LIVECAPTION_TRANSCRIPT_DIR`; disable with
 `--no-transcript`.
+
+Each line's `[MM:SS]` clock is the line's position in the source audio for the whole
+session — where in the feed the speech, silence or music actually happened — not a
+recognizer connection's own counter. Silence pauses and network reconnects open a new
+recognizer connection whose internal clock restarts at zero, but the transcript keeps
+advancing on the one source clock: a line after a pause or reconnect is stamped after the
+lines before it, never back at `[00:00]`. The same clock covers the `— silence —` and
+`♪ music ♪` markers, so speech, silence and music stay in one order. Transcript files
+written by earlier versions are left exactly as they were.
 
 ## stdout vs stderr
 

@@ -98,9 +98,14 @@ func newSession(o buildOpts, term *ui.Terminal, log *slog.Logger) (*session, err
 			Enabled: o.stt.AutoPause,
 			Hold:    o.stt.SilenceHold,
 		},
-		Diarize:     o.stt.Diarize,
-		MusicDetect: o.stt.MusicDetect,
-		OnMusic:     hub.SetMusic,
+		Diarize:      o.stt.Diarize,
+		MusicDetect:  o.stt.MusicDetect,
+		OnTranscript: hub.Publish,
+		OnMusic:      hub.SetMusic,
+		// Replaces the old timestamp-encoded reset: the hub drops its
+		// connection-scoped music hold here, on the connection lifecycle
+		// itself, instead of a recognizer fabricating a music edge at time 0.
+		OnConnectionEnd: hub.ResetConnection,
 	})
 	if err != nil {
 		return nil, err
@@ -253,14 +258,8 @@ func (s *session) run(ctx context.Context) error {
 	go func() {
 		defer close(hubDone)
 		for t := range transcripts {
-			// Publish first, then take the publish instant. Publish runs
-			// synchronously all the way through broadcast (measured at 0.13ms
-			// on loopback), so time.Now() here is that instant plus fan-out.
-			// This makes the "assemble" phase very slightly over-count and the
-			// viewer-side delivery figure very slightly under-count by that
-			// same sub-millisecond amount — a real but negligible seam, and
-			// cheaper than plumbing a callback out of the hub.
-			s.hub.Publish(t)
+			// The engine has already published synchronously through OnTranscript,
+			// keeping speech ordered with music and connection lifecycle events.
 			s.observeLatency(t, time.Now())
 		}
 	}()

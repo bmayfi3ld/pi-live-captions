@@ -21,15 +21,16 @@ func pushRingFrame(r *ring, gate *Gate, pcm byte, capturedAt time.Time, offset t
 }
 
 // TestRing_CapturedAtRoundTrip checks that push/pop carry a chunk's
-// CapturedAt through unchanged, since that value is what the anchor index
-// ultimately keys latency off of.
+// CapturedAt and source offset through unchanged, since those are what the
+// anchor index ultimately keys latency and transcript timing off of, along
+// with the gate state the chunk was admitted under.
 func TestRing_CapturedAtRoundTrip(t *testing.T) {
 	// Real metrics and gate, not nil: push consults both on eviction, and this
 	// cap is only large enough to avoid one by accident.
 	r := newRing(1<<20, metrics.New("test", "test"), NewGate(PauseConfig{}))
 	now := time.Now()
 
-	r.push(audio.Frame{PCM: []byte{1, 2, 3, 4}, CapturedAt: now})
+	r.push(audio.Frame{PCM: []byte{1, 2, 3, 4}, CapturedAt: now, Offset: 42 * time.Second})
 
 	c, ok := r.pop()
 	if !ok {
@@ -37,6 +38,12 @@ func TestRing_CapturedAtRoundTrip(t *testing.T) {
 	}
 	if !c.capturedAt.Equal(now) {
 		t.Errorf("capturedAt = %v, want %v", c.capturedAt, now)
+	}
+	if c.offset != 42*time.Second {
+		t.Errorf("offset = %v, want the frame's end offset 42s", c.offset)
+	}
+	if !c.active {
+		t.Error("active = false, want the gate state at push time (a fresh gate is active)")
 	}
 	if len(c.pcm) != 4 {
 		t.Errorf("pcm len = %d, want %d", len(c.pcm), 4)
@@ -69,8 +76,8 @@ func TestRing_PausedEvictionOnResume(t *testing.T) {
 		offset time.Duration
 	}{{3, 2 * time.Second}, {4, 3 * time.Second}, {5, 4 * time.Second}} {
 		c, ok := r.pop()
-		if !ok || len(c.pcm) != 1 || c.pcm[0] != want.pcm || !c.capturedAt.Equal(now.Add(want.offset)) {
-			t.Fatalf("retained chunk = %#v, %t; want PCM %d at %v", c, ok, want.pcm, now.Add(want.offset))
+		if !ok || len(c.pcm) != 1 || c.pcm[0] != want.pcm || !c.capturedAt.Equal(now.Add(want.offset)) || c.offset != want.offset {
+			t.Fatalf("retained chunk = %#v, %t; want PCM %d at %v (offset %v)", c, ok, want.pcm, now.Add(want.offset), want.offset)
 		}
 	}
 

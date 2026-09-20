@@ -63,6 +63,9 @@ func (e *Engine) Run(ctx context.Context, frames <-chan audio.Frame, out chan<- 
 			// matters: see specs/ for S2, a latency bug that hid for weeks
 			// because the dev loop skipped the real upload path.
 			t.SentAt = frame.CapturedAt
+			if e.cfg.OnTranscript != nil {
+				e.cfg.OnTranscript(t)
+			}
 			select {
 			case out <- t:
 				return true
