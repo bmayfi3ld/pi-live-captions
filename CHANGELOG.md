@@ -4,6 +4,11 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
+## Unreleased
+
+### Changed
+- set default of the web page to show one less line while scrolling
+
 ## 0.6.0
 
 ### Fixed

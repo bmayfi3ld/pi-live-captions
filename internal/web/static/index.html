@@ -381,7 +381,7 @@
   }
 
   // ?lines=N overrides the four-row default; CaptionStack reduces it to fit.
-  var DEFAULT_LINES = 4;
+  var DEFAULT_LINES = 3;
   var linesParamNum = parseInt(params.get("lines"), 10);
   var requestedLines = (!isNaN(linesParamNum) && linesParamNum > 0) ? linesParamNum : DEFAULT_LINES;
   var wakeDisabled = params.get("wake") === "0";
