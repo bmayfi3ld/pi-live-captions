@@ -4,6 +4,14 @@ The topmost version heading is the source of truth for the release version:
 CI reads it, and publishes only when it moves forward. Cutting a release is
 adding a new `## X.Y.Z` heading here.
 
+## Unreleased
+
+### Fixed
+
+- The captions page and admin caption mirror now clear old displayed and queued text
+  when hidden and return directly to live captions after screen-off or tab switching,
+  without replaying missed speech.
+
 ## 0.7.0
 
 ### Added

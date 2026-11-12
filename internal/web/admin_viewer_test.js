@@ -100,7 +100,7 @@ for (const [query, expected] of [['', undefined], ['bottom=10', '10'], ['bottom=
   const context = vm.createContext({params: new URLSearchParams(query),
     document: {documentElement: {style: {setProperty(k, v) { styles[k] = v; }}}}});
   vm.runInContext(between(index, '  // ?bottom=N', '  var wakeDisabled'), context);
-  assert.equal(context.requestedLines, 4);
+  assert.equal(context.requestedLines, 3);
   assert.equal(styles['--caption-bottom'], expected === undefined ? undefined :
     `max(${expected}dvh, env(safe-area-inset-bottom, 0px))`);
 }
@@ -137,6 +137,7 @@ function transcriptPage(width, controls, resizeObserver) {
   const rootStyles = {};
   const context = {
     document: {
+      visibilityState: 'visible',
       documentElement: {style: {setProperty(name, value) { rootStyles[name] = value; }}},
       getElementById: element,
       addEventListener() {}

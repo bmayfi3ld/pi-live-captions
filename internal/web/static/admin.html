@@ -1184,11 +1184,13 @@
 
   function connect() {
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (document.visibilityState !== "visible") return;
     if (es) es.close();
-    es = new EventSource("/events");
-    es.onopen = onOpen;
-    es.onerror = onError;
-    es.onmessage = onMessage;
+    var source = es = new EventSource("/events");
+    function current() { return es === source && document.visibilityState === "visible"; }
+    source.onopen = function () { if (current()) onOpen(); };
+    source.onerror = function () { if (current()) onError(); };
+    source.onmessage = function (e) { if (current()) onMessage(e); };
   }
 
   function onOpen() {
@@ -1201,7 +1203,12 @@
     sseOpen = false;
     applyIndicator();
     if (es.readyState === EventSource.CLOSED && !retryTimer) {
-      retryTimer = setTimeout(function () { retryTimer = null; connect(); }, 3000);
+      var source = es;
+      retryTimer = setTimeout(function () {
+        if (es !== source || document.visibilityState !== "visible") return;
+        retryTimer = null;
+        connect();
+      }, 3000);
     }
   }
 
@@ -1234,14 +1241,22 @@
     applyIndicator();
   }
 
+  function syncCaptions() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    var source = es;
+    es = null; // invalidate callbacks before closing the old stream
+    if (source) source.close();
+    captionStack.clear();
+    sseOpen = null;
+    hubState = null;
+    musicOn = false;
+    applyIndicator();
+    if (document.visibilityState === "visible") connect();
+  }
+
   connect();
 
-  document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState === "visible" &&
-        (!es || es.readyState === EventSource.CLOSED)) {
-      connect();
-    }
-  });
+  document.addEventListener("visibilitychange", syncCaptions);
 })();
 </script>
 </body>

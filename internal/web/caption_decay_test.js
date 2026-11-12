@@ -179,4 +179,24 @@ console.log("ok  arriving speech cancels a decay in progress");
 // this harness can build honestly. The arming site in drain()'s tail is what
 // covers it.
 
+// A visibility reset must remove both painted words and words still waiting
+// in the pacing queue, including the ledger used by resize/reflow.
+cs.clear();
+cs.appendSegment([
+  { t: "first", o: 0, d: 1000 },
+  { t: "queued", o: 1000, d: 1000 }
+], 1);
+advance(0);
+assert.deepStrictEqual(painted(), ["first"]);
+cs.clear();
+assert.deepStrictEqual(painted(), []);
+advance(5000);
+cs.retypeset();
+assert.deepStrictEqual(painted(), []);
+console.log("ok  clear cancels queued words and resize cannot resurrect old text");
+cs.appendSegment([{ t: "live", o: 0, d: 100 }], 2);
+advance(2000);
+assert.deepStrictEqual(painted(), ["live"]);
+console.log("ok  new live speech paints after clear");
+
 console.log("\nall decay checks passed");
